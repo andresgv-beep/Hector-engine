@@ -1,12 +1,14 @@
 # HELIOS Engine — Héctor v1
 
-Custom CUDA inference engine for transformer models. Built from scratch in C++/CUDA without PyTorch, TensorFlow, or llama.cpp. Everything from memory management to attention kernels is handwritten.
+Polymorphic CUDA inference engine for transformer models. Core component of **HELIOS**, a cognitive AI system under active development.
+
+Built from scratch in C++/CUDA without PyTorch, TensorFlow, or llama.cpp. Everything from memory management to attention kernels is handwritten.
 
 ## What is this
 
-Héctor is the core inference engine of the HELIOS project. It loads models in a proprietary binary format (HNF — HELIOS Neural Format), builds a compute graph from the weight tensors it finds, and runs the forward pass entirely on GPU using custom CUDA kernels.
+Héctor is the inference engine at the heart of HELIOS — a modular cognitive architecture designed for local AI inference with multi-model orchestration. The full system includes Héctor (inference), HEXOS (system monitoring), HERA (episodic memory), and a Cognitive Kernel that coordinates reasoning and communication across multiple models.
 
-The engine is architecture-agnostic: it detects the model structure (attention type, MLP variant, normalization, RoPE style) from the tensor names in the HNF file and builds the correct graph automatically. No architecture-specific code paths — one generic pipeline handles everything.
+The engine loads models in a proprietary binary format (HNF — HELIOS Neural Format), detects the model architecture from the weight tensors it finds, and builds the correct compute graph automatically. No architecture-specific code paths — one polymorphic pipeline handles any supported transformer.
 
 ## Features
 
@@ -40,12 +42,15 @@ The engine is architecture-agnostic: it detects the model structure (attention t
 - Multimodal support: combine text + vision + code models in one file
 - Execution hints (JSON or binary) for architecture metadata
 
-**Architecture support:**
+**Architecture support (tested):**
 - Qwen2 (ChatML template)
 - Phi-3 / Phi-4 (LongRoPE, partial rotary)
 - DeepSeek Coder
-- Falcon (MQA)
-- Any standard transformer that follows the detected patterns (fused/separate QKV, gated/plain MLP, RMSNorm/LayerNorm)
+
+**Planned / in progress:**
+- Falcon (MQA kernel designed, not yet integrated)
+- LLaMA-3
+- Any standard transformer that follows detectable patterns (fused/separate QKV, gated/plain MLP, RMSNorm/LayerNorm)
 
 **Tokenizer (HTF):**
 - BPE with byte-fallback
