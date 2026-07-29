@@ -226,22 +226,38 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
         it->second(ctx, cmd);
     }
     
-    cudaStreamEndCapture(config_.stream, &new_graph);
-    
+    cudaError_t end_err = cudaStreamEndCapture(config_.stream, &new_graph);
+
     if (!new_graph || !capture_ok) {
+        static bool warned = false;
+        if (!warned) {
+            fprintf(stderr, "[engine] Graph capture FAILED (%s%s) — fallback a execute() por token\n",
+                    capture_ok ? "" : "kernel no registrado; ",
+                    cudaGetErrorString(end_err));
+            warned = true;
+        }
         if (new_graph) cudaGraphDestroy(new_graph);
         // Fall back to normal execution for this token
         execute(commands);
         return;
     }
-    
+
     // Instantiate
     if (graph_exec_) cudaGraphExecDestroy(graph_exec_);
     if (captured_graph_) cudaGraphDestroy(captured_graph_);
-    
-    cudaGraphInstantiate(&graph_exec_, new_graph, nullptr, nullptr, 0);
+
+    cudaError_t inst_err = cudaGraphInstantiate(&graph_exec_, new_graph, nullptr, nullptr, 0);
+    if (inst_err != cudaSuccess || !graph_exec_) {
+        fprintf(stderr, "[engine] Graph instantiate FAILED: %s\n", cudaGetErrorString(inst_err));
+        captured_graph_ = new_graph;
+        graph_valid_ = false;
+        execute(commands);
+        return;
+    }
     captured_graph_ = new_graph;
     graph_valid_ = true;
+    fprintf(stderr, "[engine] CUDA Graph capturado (%zu comandos) — decode en modo replay\n",
+            commands.size());
     
     // Launch for first token
     cudaGraphLaunch(graph_exec_, config_.stream);

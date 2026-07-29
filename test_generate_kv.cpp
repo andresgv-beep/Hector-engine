@@ -55,9 +55,14 @@ int main(int argc, char** argv) {
     
     try {
         // 1. Setup engine
+        // Stream dedicado: el stream legacy (nullptr) no admite CUDA Graph capture
+        cudaStream_t stream;
+        cudaStreamCreate(&stream);
+
         EngineConfig config;
         config.scratch_pool.pool_size_bytes = 0;
         config.scratch_pool.auto_fraction = 0.0f;
+        config.stream = stream;
         Engine engine(config);
         kernels::register_all_kernels(engine);
         
@@ -124,32 +129,47 @@ int main(int argc, char** argv) {
         
         auto start_time = std::chrono::high_resolution_clock::now();
         
+        // FASE 1: command buffer construido UNA vez; por token solo se actualiza
+        // la posición en device (4 bytes async) y se relanza el CUDA Graph.
+        CommandBuffer cb;
+        bool cb_built = false;
+
         for (int step = 0; step < max_tokens; step++) {
             // Copy token
             auto* input_info = engine.tensors().get("input_tokens");
             cudaMemcpy(input_info->ptr, &current_token, sizeof(int32_t),
                        cudaMemcpyHostToDevice);
-            
-            // Forward with KV cache
+
+            // Posición del cache → device (leída por los kernels _dp)
             uint32_t position = kv_cache.position();
-            auto cb = gb.build_forward_cached(
-                engine, model_config, arch,
-                "input_tokens", 1, 1,
-                kv_prefix, position, kv_config.max_seq_len
-            );
-            engine.execute(cb);
-            engine.sync();
-            
+            engine.update_device_cache_pos(position, 1);
+
+            if (!cb_built) {
+                // Primer token: build + ejecución normal.
+                // (calienta el auto-tune del GEMV, que sincroniza y no es capturable)
+                cb = gb.build_forward_cached(
+                    engine, model_config, arch,
+                    "input_tokens", 1, 1,
+                    kv_prefix, position, kv_config.max_seq_len
+                );
+                cb_built = true;
+                engine.execute(cb);
+                engine.sync();
+            } else {
+                // Resto: captura en el token 2, replay puro desde el 3
+                engine.execute_graph_replay(cb);
+            }
+
             // Advance position
             kv_cache.advance(1);
-            
-            // Sample
+
+            // Sample (sincroniza el stream internamente para leer el token)
             auto* logits_info = gb.get_logits(engine);
             int32_t next_token = sampler.sample(
                 (const half*)logits_info->ptr,
                 model_config.vocab_size(),
                 sample_config,
-                nullptr
+                stream
             );
             
             std::cout << next_token << " " << std::flush;

@@ -27,11 +27,10 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # CUDA Architecture
 # ============================================================================
 
-# Detectar automáticamente o usar compatibles
-# RTX 5070 = Blackwell (sm_120) requiere CUDA 12.8+
-# RTX 4070 = Ada (sm_89)
-# RTX 3090/2080Ti = Ampere/Turing (sm_86/sm_75)
-set(CMAKE_CUDA_ARCHITECTURES "75;86;89")
+# "native" detecta la GPU local (RTX 5070 = Blackwell sm_120, requiere CUDA 12.8+)
+# Para builds portables usar lista explícita, p.ej. "86;89;120"
+# (ojo: CUDA 13 eliminó soporte para < sm_75)
+set(CMAKE_CUDA_ARCHITECTURES "native")
 
 # ============================================================================
 # Compiler Flags

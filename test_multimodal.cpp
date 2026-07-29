@@ -8,6 +8,7 @@
 #include "src/kv_cache.hpp"
 #include "kernels/kernels.hpp"
 #include <iostream>
+#include <algorithm>
 #include <chrono>
 
 using namespace helios;

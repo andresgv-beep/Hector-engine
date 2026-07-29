@@ -70,15 +70,30 @@ __global__ void gemv_hq4k_kernel(
             const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(block_ptr + HEADER_SIZE);
             uint32_t packed = payload32[lane_id];
             const int k_base = sb_base_k + lane_id * GROUP_SIZE;
-            #pragma unroll
-            for (int i = 0; i < 4; i++) {
-                uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
-                float w0 = fmaf(float((byte_val >> 4) & 0x0F), scoeff, min_f);
-                float w1 = fmaf(float(byte_val & 0x0F), scoeff, min_f);
-                const int k0 = k_base + i * 2;
-                const int k1 = k0 + 1;
-                if (k0 < K) acc = fmaf(w0, __half2float(s_input[k0]), acc);
-                if (k1 < K) acc = fmaf(w1, __half2float(s_input[k1]), acc);
+            if (k_base + GROUP_SIZE <= K) {
+                // Camino rápido: sin bounds-check y con lecturas half2 del input
+                // (los pares k0/k1 son adyacentes y k_base es múltiplo de 8)
+                const half2* in2 = reinterpret_cast<const half2*>(s_input + k_base);
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
+                    float w0 = fmaf(float((byte_val >> 4) & 0x0F), scoeff, min_f);
+                    float w1 = fmaf(float(byte_val & 0x0F), scoeff, min_f);
+                    float2 x = __half22float2(in2[i]);
+                    acc = fmaf(w0, x.x, acc);
+                    acc = fmaf(w1, x.y, acc);
+                }
+            } else {
+                #pragma unroll
+                for (int i = 0; i < 4; i++) {
+                    uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
+                    float w0 = fmaf(float((byte_val >> 4) & 0x0F), scoeff, min_f);
+                    float w1 = fmaf(float(byte_val & 0x0F), scoeff, min_f);
+                    const int k0 = k_base + i * 2;
+                    const int k1 = k0 + 1;
+                    if (k0 < K) acc = fmaf(w0, __half2float(s_input[k0]), acc);
+                    if (k1 < K) acc = fmaf(w1, __half2float(s_input[k1]), acc);
+                }
             }
         }
     }
@@ -102,6 +117,11 @@ __global__ void gemv_hq4k_kernel(
 // GEMV HQ5K KERNEL
 // ============================================================================
 
+// v2: payload staging en shared memory.
+// El payload HQ5K son 160B = 40 uint32 por superbloque. Antes cada lane leía
+// 5 bytes sueltos desalineados (payload + lane*5) — coalescing roto, ~167 GB/s
+// medidos vs 345 GB/s del HQ4K. Ahora el warp carga los 40 words alineados
+// (coalescado) a shared y cada lane lee sus 5 bytes de ahí (gratis).
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK>
 __global__ void gemv_hq5k_kernel(
     const half* __restrict__ input,
@@ -110,6 +130,7 @@ __global__ void gemv_hq5k_kernel(
     int K, int N
 ) {
     using namespace hqs;
+    constexpr int PAYLOAD_WORDS = HQ5K_PAYLOAD / 4;  // 40
     extern __shared__ half s_input[];
     {
         const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
@@ -120,7 +141,7 @@ __global__ void gemv_hq5k_kernel(
         for (int i = n_vec * 8 + threadIdx.x; i < K; i += BS) s_input[i] = input[i];
     }
     __syncthreads();
-    
+
     const int threads_per_row = WARPS_PER_ROW * 32;
     const int row_group = threadIdx.x / threads_per_row;
     const int local_tid = threadIdx.x % threads_per_row;
@@ -128,39 +149,78 @@ __global__ void gemv_hq5k_kernel(
     const int lane_id = local_tid % 32;
     const int row = blockIdx.x * ROWS_PER_BLOCK + row_group;
     if (row >= N) return;
-    
+
+    // Staging de payload por warp (después de s_input y s_partial)
+    float* s_partial = reinterpret_cast<float*>(s_input + K);
+    const int warp_in_block = threadIdx.x / 32;
+    uint32_t* s_payload = reinterpret_cast<uint32_t*>(
+        s_partial + ROWS_PER_BLOCK * WARPS_PER_ROW) + warp_in_block * PAYLOAD_WORDS;
+
     const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
     const uint8_t* row_weights = weights + (size_t)row * total_sb * HQ5K_BLOCK_SIZE;
     float acc = 0.0f;
-    
+
     for (int sb = warp_in_group; sb < total_sb; sb += WARPS_PER_ROW) {
         const int sb_base_k = sb * SUPER_BLOCK_SIZE;
         const uint8_t* block_ptr = row_weights + (size_t)sb * HQ5K_BLOCK_SIZE;
-        if (lane_id < NUM_GROUPS) {
-            const uint32_t* header32 = reinterpret_cast<const uint32_t*>(block_ptr);
-            uint32_t hdr = header32[lane_id];
-            float min_f = __half2float(__ushort_as_half(hdr & 0xFFFF));
-            float scoeff = __half2float(__ushort_as_half(hdr >> 16)) * (1.0f / HQ5K_Q_MAX);
-            const uint8_t* payload = block_ptr + HEADER_SIZE + lane_id * 5;
-            uint64_t bits = uint64_t(payload[0])
-                          | (uint64_t(payload[1]) << 8)
-                          | (uint64_t(payload[2]) << 16)
-                          | (uint64_t(payload[3]) << 24)
-                          | (uint64_t(payload[4]) << 32);
-            const int k_base = sb_base_k + lane_id * GROUP_SIZE;
+
+        // Header: 32 words, uno por lane (coalescado)
+        const uint32_t* header32 = reinterpret_cast<const uint32_t*>(block_ptr);
+        uint32_t hdr = header32[lane_id];
+
+        // Payload: 40 words cargados cooperativamente (coalescado)
+        const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(block_ptr + HEADER_SIZE);
+        s_payload[lane_id] = payload32[lane_id];
+        if (lane_id < PAYLOAD_WORDS - 32) {
+            s_payload[32 + lane_id] = payload32[32 + lane_id];
+        }
+        __syncwarp();
+
+        float min_f = __half2float(__ushort_as_half(hdr & 0xFFFF));
+        float scoeff = __half2float(__ushort_as_half(hdr >> 16)) * (1.0f / HQ5K_Q_MAX);
+
+        // 5 bytes del lane desde shared (offset 5*lane: cruza como mucho 2 words).
+        // Los 40 bits del lane se dejan en dos registros de 32 y se extraen los
+        // pesos con __funnelshift_r (1 instr) — los shifts de 64 bits son
+        // multi-instrucción en GPU y dominaban el tiempo del kernel.
+        const int byte_off = lane_id * 5;
+        const int w0 = byte_off >> 2;
+        const int sh = (byte_off & 3) * 8;
+        uint32_t pw0 = s_payload[w0];
+        uint32_t pw1 = s_payload[w0 + 1];
+        uint32_t lo = __funnelshift_r(pw0, pw1, sh);  // bits 0..31 del paquete
+        uint32_t hi = pw1 >> sh;                      // bits 32..39 (sh ∈ {0,8,16,24})
+
+        const int k_base = sb_base_k + lane_id * GROUP_SIZE;
+        if (k_base + GROUP_SIZE <= K) {
+            // Camino rápido sin bounds-check por elemento (K múltiplo de 256 en la práctica)
+            #pragma unroll
+            for (int i = 0; i < 7; i++) {
+                uint32_t q = __funnelshift_r(lo, hi, i * 5) & 0x1F;
+                acc = fmaf(fmaf(float(q), scoeff, min_f),
+                           __half2float(s_input[k_base + i]), acc);
+            }
+            uint32_t q7 = (hi >> 3) & 0x1F;  // bits 35..39
+            acc = fmaf(fmaf(float(q7), scoeff, min_f),
+                       __half2float(s_input[k_base + 7]), acc);
+        } else {
             #pragma unroll
             for (int i = 0; i < 8; i++) {
-                float w = fmaf(float((bits >> (i * 5)) & 0x1F), scoeff, min_f);
+                uint32_t q = (i < 7) ? (__funnelshift_r(lo, hi, i * 5) & 0x1F)
+                                     : ((hi >> 3) & 0x1F);
                 int k_idx = k_base + i;
-                if (k_idx < K) acc = fmaf(w, __half2float(s_input[k_idx]), acc);
+                if (k_idx < K) {
+                    acc = fmaf(fmaf(float(q), scoeff, min_f),
+                               __half2float(s_input[k_idx]), acc);
+                }
             }
         }
+        __syncwarp();  // no pisar s_payload antes de que todos los lanes lean
     }
-    
+
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
-    float* s_partial = reinterpret_cast<float*>(s_input + K);
     if (lane_id == 0) s_partial[row_group * WARPS_PER_ROW + warp_in_group] = acc;
     __syncthreads();
     if (warp_in_group == 0 && lane_id < WARPS_PER_ROW) {
@@ -192,19 +252,23 @@ static void launch_hq4k_C(const half* in, const uint8_t* w, half* out, int K, in
     gemv_hq4k_kernel<CC_WPR, CC_RPB><<<nb, CC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 
+// smem HQ5K: input + parciales + staging de payload (160B por warp)
 static void launch_hq5k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CA_RPB - 1) / CA_RPB;
-    size_t smem = K * sizeof(half) + CA_RPB * CA_WPR * sizeof(float);
+    size_t smem = K * sizeof(half) + CA_RPB * CA_WPR * sizeof(float)
+                + (size_t)(CA_WPR * CA_RPB) * hqs::HQ5K_PAYLOAD;
     gemv_hq5k_kernel<CA_WPR, CA_RPB><<<nb, CA_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq5k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CB_RPB - 1) / CB_RPB;
-    size_t smem = K * sizeof(half) + CB_RPB * CB_WPR * sizeof(float);
+    size_t smem = K * sizeof(half) + CB_RPB * CB_WPR * sizeof(float)
+                + (size_t)(CB_WPR * CB_RPB) * hqs::HQ5K_PAYLOAD;
     gemv_hq5k_kernel<CB_WPR, CB_RPB><<<nb, CB_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq5k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CC_RPB - 1) / CC_RPB;
-    size_t smem = K * sizeof(half) + CC_RPB * CC_WPR * sizeof(float);
+    size_t smem = K * sizeof(half) + CC_RPB * CC_WPR * sizeof(float)
+                + (size_t)(CC_WPR * CC_RPB) * hqs::HQ5K_PAYLOAD;
     gemv_hq5k_kernel<CC_WPR, CC_RPB><<<nb, CC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 

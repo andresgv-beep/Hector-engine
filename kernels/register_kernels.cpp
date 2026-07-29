@@ -274,8 +274,11 @@ void register_norm_kernels(Engine& engine) {
         if (!input || !weight || !output) {
             throw std::runtime_error("RMSNORM: missing tensors");
         }
-        
-        int dim = input->shape.back();
+
+        // "dim" explícito permite normalizar sub-filas (p.ej. QK-norm por-head:
+        // tensor [1, H*HD] con peso [HD] → H filas de HD)
+        int dim = (int)cmd.get<uint32_t>("dim", 0);
+        if (dim == 0) dim = input->shape.back();
         int batch = input->numel() / dim;
         
         launch_rmsnorm_fp16(
@@ -624,14 +627,26 @@ void register_attention_kernels(Engine& engine) {
             }
         }
         
-        launch_rope_inplace_fp16(
-                as_fp16(output),
-                batch, seq, num_heads, head_dim,
-                rotary_dim,
-                offset, theta,
-                scaling_factor,
-                ctx.stream
-            );
+        // device_pos: offset leído de device (permite CUDA Graph capture-once)
+        if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            launch_rope_inplace_fp16_dp(
+                    as_fp16(output),
+                    batch, seq, num_heads, head_dim,
+                    rotary_dim,
+                    engine.device_cache_pos(), theta,
+                    scaling_factor,
+                    ctx.stream
+                );
+        } else {
+            launch_rope_inplace_fp16(
+                    as_fp16(output),
+                    batch, seq, num_heads, head_dim,
+                    rotary_dim,
+                    offset, theta,
+                    scaling_factor,
+                    ctx.stream
+                );
+        }
     });
     
     // ATTENTION_CACHED - Attention using KV cache (decode)
@@ -652,16 +667,30 @@ void register_attention_kernels(Engine& engine) {
         uint32_t seq_len = cmd.get<uint32_t>("seq_len", 1);
         uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
         
-        launch_attention_cached_fp16(
-                as_fp16_const(q),
-                as_fp16_const(k_cache),
-                as_fp16_const(v_cache),
-                as_fp16(output),
-                1, seq_len,
-                num_heads, num_kv_heads, head_dim,
-                max_seq_len, scale,
-                ctx.stream
-            );
+        // device_pos: total_seq leído de device (permite CUDA Graph capture-once)
+        if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            launch_attention_cached_fp16_dp(
+                    as_fp16_const(q),
+                    as_fp16_const(k_cache),
+                    as_fp16_const(v_cache),
+                    as_fp16(output),
+                    1, engine.device_total_seq(),
+                    num_heads, num_kv_heads, head_dim,
+                    max_seq_len, scale,
+                    ctx.stream
+                );
+        } else {
+            launch_attention_cached_fp16(
+                    as_fp16_const(q),
+                    as_fp16_const(k_cache),
+                    as_fp16_const(v_cache),
+                    as_fp16(output),
+                    1, seq_len,
+                    num_heads, num_kv_heads, head_dim,
+                    max_seq_len, scale,
+                    ctx.stream
+                );
+        }
     });
     
     // KV_CACHE_UPDATE - Update KV cache with new K/V
@@ -699,15 +728,28 @@ void register_attention_kernels(Engine& engine) {
             if (k_new->shape.size() >= 3) batch = k_new->shape[0];
         }
         
-        launch_kv_cache_update(
-                as_fp16_const(k_new),
-                as_fp16_const(v_new),
-                as_fp16(k_cache),
-                as_fp16(v_cache),
-                batch, seq_len, kv_heads, head_dim,
-                max_seq_len, position,
-                ctx.stream
-            );
+        // device_pos: position leído de device (permite CUDA Graph capture-once)
+        if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            launch_kv_cache_update_dp(
+                    as_fp16_const(k_new),
+                    as_fp16_const(v_new),
+                    as_fp16(k_cache),
+                    as_fp16(v_cache),
+                    batch, seq_len, kv_heads, head_dim,
+                    max_seq_len, engine.device_cache_pos(),
+                    ctx.stream
+                );
+        } else {
+            launch_kv_cache_update(
+                    as_fp16_const(k_new),
+                    as_fp16_const(v_new),
+                    as_fp16(k_cache),
+                    as_fp16(v_cache),
+                    batch, seq_len, kv_heads, head_dim,
+                    max_seq_len, position,
+                    ctx.stream
+                );
+        }
     });
 }
 

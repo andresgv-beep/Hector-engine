@@ -86,7 +86,8 @@ struct ArchDescriptor {
     bool has_qkv_bias = false;       // ¿Tiene q_proj.bias?
     bool has_fused_qkv = false;      // ¿Usa qkv_proj en vez de q/k/v separados?
     bool has_o_proj_bias = false;     // ¿Tiene o_proj.bias?
-    
+    bool use_qk_norm = false;        // ¿RMSNorm por-head en Q/K antes de RoPE? (Qwen3)
+
     // MLP layout
     bool has_gate = false;           // ¿Tiene mlp.gate? (SwiGLU)
     bool has_fused_gate_up = false;  // ¿Usa gate_up fusionado?

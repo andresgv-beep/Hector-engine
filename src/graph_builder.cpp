@@ -162,6 +162,9 @@ ArchDescriptor GraphBuilder::detect_architecture(
     
     // O projection bias
     arch.has_o_proj_bias = engine.tensors().exists(L0 + "attn.o_proj.bias");
+
+    // QK-norm (Qwen3): RMSNorm por-head sobre Q y K antes de RoPE
+    arch.use_qk_norm = engine.tensors().exists(L0 + "attn.q_norm.weight");
     
     // Norm names
     if (engine.tensors().exists(L0 + "ln_attn_in.weight")) {
@@ -621,6 +624,18 @@ void GraphBuilder::build_attention_block(
         }
     }
     
+    // 2b. QK-norm (Qwen3): RMSNorm por-head sobre Q y K antes de RoPE.
+    // El peso mide head_dim, así que el kernel normaliza cada head por separado
+    // (dim explícito = HD; el tensor q es [B, L, H*HD]).
+    if (arch.use_qk_norm) {
+        cb.add_rmsnorm(S("q"), S("q"), W(arch, layer_idx, "attn.q_norm.weight"),
+                       config.rms_norm_eps());
+        cb.commands().back().set("dim", HD);
+        cb.add_rmsnorm(S("k"), S("k"), W(arch, layer_idx, "attn.k_norm.weight"),
+                       config.rms_norm_eps());
+        cb.commands().back().set("dim", HD);
+    }
+
     // 3. RoPE (tipo desde ArchDescriptor)
     if (arch.rope_type != RoPEType::NONE) {
         uint32_t rope_offset = cache ? cache->cache_position : position_offset;
@@ -630,6 +645,9 @@ void GraphBuilder::build_attention_block(
         //   - rope_scaling_factor: escala posicional (DeepSeek linear=4.0, default=1.0)
         //   - theta/dim/offset: standard RoPE params
         //   - num_heads/seq_len: explícitos (no deducir de scratch shapes)
+        // En decode con cache, offset se lee de device (d_cache_pos) para que el
+        // command buffer sea capturable una sola vez (CUDA Graph replay).
+        bool device_pos = (cache != nullptr) && (seq_len == 1);
         {
             auto& cmd_q = cb.add_op(op::ROPE(), S("q"));
             cmd_q.in({S("q")});
@@ -640,6 +658,7 @@ void GraphBuilder::build_attention_block(
             cmd_q.set("seq_len", seq_len);
             cmd_q.set("partial_rotary", arch.partial_rotary_factor);
             cmd_q.set("rope_scaling_factor", arch.rope_scaling_factor);
+            if (device_pos) cmd_q.set("device_pos", (uint32_t)1);
         }
         {
             auto& cmd_k = cb.add_op(op::ROPE(), S("k"));
@@ -651,6 +670,7 @@ void GraphBuilder::build_attention_block(
             cmd_k.set("seq_len", seq_len);
             cmd_k.set("partial_rotary", arch.partial_rotary_factor);
             cmd_k.set("rope_scaling_factor", arch.rope_scaling_factor);
+            if (device_pos) cmd_k.set("device_pos", (uint32_t)1);
         }
     }
     
@@ -674,12 +694,16 @@ void GraphBuilder::build_attention_block(
             // ============================================================
             // DECODE: update cache primero, luego cached attention
             // ============================================================
+            // device_pos: position/total_seq se leen de device en ejecución
+            // (los params horneados son solo fallback sin CUDA Graph)
             cb.add_kv_cache_update(k_cache, v_cache, S("k"), S("v"),
                                    cache->cache_position, cache->max_cache_len, KVH, HD, 1);
-            
+            cb.commands().back().set("device_pos", (uint32_t)1);
+
             uint32_t total_seq = cache->cache_position + seq_len;
             cb.add_attention_cached(S("attn_out"), S("q"), k_cache, v_cache,
                                     H, KVH, HD, total_seq, cache->max_cache_len);
+            cb.commands().back().set("device_pos", (uint32_t)1);
         }
     } else {
         // 4b. Full attention (no cache)

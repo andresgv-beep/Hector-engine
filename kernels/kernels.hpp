@@ -227,6 +227,20 @@ void launch_rope_inplace_fp16(
     cudaStream_t stream = nullptr
 );
 
+// Device-pointer variant: position_offset leído de device (CUDA Graph replay)
+void launch_rope_inplace_fp16_dp(
+    half* qk,
+    int batch_size,
+    int seq_len,
+    int num_heads,
+    int head_dim,
+    int rotary_dim,
+    const int32_t* d_position_offset,
+    float theta,
+    float scaling_factor,
+    cudaStream_t stream
+);
+
 // ============================================================================
 // ATTENTION KERNEL
 // ============================================================================
@@ -266,6 +280,21 @@ void launch_kv_cache_update(
     cudaStream_t stream = nullptr
 );
 
+// Device-pointer variant: position leído de device (CUDA Graph replay)
+void launch_kv_cache_update_dp(
+    const half* new_k,
+    const half* new_v,
+    half* k_cache,
+    half* v_cache,
+    int batch_size,
+    int seq_len,
+    int kv_heads,
+    int head_dim,
+    int max_seq_len,
+    const int32_t* d_position,
+    cudaStream_t stream
+);
+
 // Attention with KV cache (autoregressive)
 void launch_attention_cached_fp16(
     const half* q,          // [batch, 1, heads, head_dim] - single query
@@ -280,6 +309,22 @@ void launch_attention_cached_fp16(
     int max_seq_len,
     float scale,
     cudaStream_t stream = nullptr
+);
+
+// Device-pointer variant: seq_len (total_seq) leído de device (CUDA Graph replay)
+void launch_attention_cached_fp16_dp(
+    const half* q,
+    const half* k_cache,
+    const half* v_cache,
+    half* output,
+    int batch_size,
+    const int32_t* d_seq_len,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    float scale,
+    cudaStream_t stream
 );
 
 // ============================================================================

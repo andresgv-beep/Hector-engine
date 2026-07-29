@@ -9,6 +9,7 @@
 #include "src/sampler.hpp"
 #include "src/kv_cache.hpp"
 #include "kernels/kernels.hpp"
+#include <algorithm>
 #include <iostream>
 #include <chrono>
 

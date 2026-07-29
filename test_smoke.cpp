@@ -26,6 +26,7 @@
 #include <iomanip>
 #include <cmath>
 #include <numeric>
+#include <algorithm>
 #include <chrono>
 
 using namespace helios;
