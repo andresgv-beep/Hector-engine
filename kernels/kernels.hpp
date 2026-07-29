@@ -227,6 +227,19 @@ void launch_rope_inplace_fp16(
     cudaStream_t stream = nullptr
 );
 
+// QK-norm + RoPE fusionado (Qwen3): rmsnorm por-head de Q y K + RoPE, 1 kernel
+void launch_qk_norm_rope_fp16(
+    half* q, half* k, const half* q_norm_w, const half* k_norm_w,
+    int batch_size, int seq_len, int num_heads, int num_kv_heads,
+    int head_dim, int rotary_dim, int position_offset, float eps,
+    float theta, float scaling_factor, cudaStream_t stream);
+
+void launch_qk_norm_rope_fp16_dp(
+    half* q, half* k, const half* q_norm_w, const half* k_norm_w,
+    int batch_size, int seq_len, int num_heads, int num_kv_heads,
+    int head_dim, int rotary_dim, const int32_t* d_position_offset, float eps,
+    float theta, float scaling_factor, cudaStream_t stream);
+
 // Device-pointer variant: position_offset leído de device (CUDA Graph replay)
 void launch_rope_inplace_fp16_dp(
     half* qk,

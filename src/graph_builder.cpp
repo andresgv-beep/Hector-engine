@@ -624,10 +624,29 @@ void GraphBuilder::build_attention_block(
         }
     }
     
-    // 2b. QK-norm (Qwen3): RMSNorm por-head sobre Q y K antes de RoPE.
-    // El peso mide head_dim, así que el kernel normaliza cada head por separado
-    // (dim explícito = HD; el tensor q es [B, L, H*HD]).
-    if (arch.use_qk_norm) {
+    // 2b/3 fusionados (Qwen3): qk_norm + rope de Q y K en UN kernel.
+    // 4 lanzamientos por capa → 1 (rmsnorm(q), rmsnorm(k), rope(q), rope(k)).
+    if (arch.use_qk_norm && arch.rope_type != RoPEType::NONE) {
+        uint32_t rope_offset = cache ? cache->cache_position : position_offset;
+        bool device_pos = (cache != nullptr) && (seq_len == 1);
+        auto id = OpTypeRegistry::instance().get_id("qk_norm_rope");
+        auto& c = cb.add_op(id, S("q"));
+        c.in({S("q"), S("k"),
+              W(arch, layer_idx, "attn.q_norm.weight"),
+              W(arch, layer_idx, "attn.k_norm.weight")});
+        c.set("num_heads", H);
+        c.set("num_kv_heads", KVH);
+        c.set("dim", HD);
+        c.set("seq_len", seq_len);
+        c.set("offset", rope_offset);
+        c.set("eps", config.rms_norm_eps());
+        c.set("theta", arch.rope_theta);
+        c.set("partial_rotary", arch.partial_rotary_factor);
+        c.set("rope_scaling_factor", arch.rope_scaling_factor);
+        if (device_pos) c.set("device_pos", (uint32_t)1);
+    }
+    // 2b. QK-norm sin RoPE (poco común): RMSNorm por-head separada
+    else if (arch.use_qk_norm) {
         cb.add_rmsnorm(S("q"), S("q"), W(arch, layer_idx, "attn.q_norm.weight"),
                        config.rms_norm_eps());
         cb.commands().back().set("dim", HD);
@@ -636,8 +655,8 @@ void GraphBuilder::build_attention_block(
         cb.commands().back().set("dim", HD);
     }
 
-    // 3. RoPE (tipo desde ArchDescriptor)
-    if (arch.rope_type != RoPEType::NONE) {
+    // 3. RoPE clásico (arquitecturas sin qk_norm)
+    if (!arch.use_qk_norm && arch.rope_type != RoPEType::NONE) {
         uint32_t rope_offset = cache ? cache->cache_position : position_offset;
         // All RoPE config as explicit params — polimórfico, escalable.
         // Cada modelo aporta su propia combinación:

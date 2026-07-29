@@ -649,6 +649,48 @@ void register_attention_kernels(Engine& engine) {
         }
     });
     
+    // QK_NORM_ROPE — fusión Qwen3: rmsnorm por-head (q,k) + rope (q,k) en 1 kernel
+    {
+        auto qk_norm_rope_id = OpTypeRegistry::Builder("qk_norm_rope").build();
+        engine.register_kernel(qk_norm_rope_id, [&engine](ExecContext& ctx, const Command& cmd) {
+            TensorInfo* q = ctx.in(0);
+            TensorInfo* k = ctx.in(1);
+            TensorInfo* qw = ctx.in(2);
+            TensorInfo* kw = ctx.in(3);
+            if (!q || !k || !qw || !kw) {
+                throw std::runtime_error("QK_NORM_ROPE: missing tensors");
+            }
+
+            uint32_t H = cmd.get<uint32_t>("num_heads", 32);
+            uint32_t KVH = cmd.get<uint32_t>("num_kv_heads", H);
+            uint32_t HD = cmd.get<uint32_t>("dim", 128);
+            uint32_t seq_len = cmd.get<uint32_t>("seq_len", 1);
+            uint32_t offset = cmd.get<uint32_t>("offset", 0);
+            float eps = cmd.get<float>("eps", 1e-6f);
+            float theta = cmd.get<float>("theta", 10000.0f);
+            float partial_rotary = cmd.get<float>("partial_rotary", 1.0f);
+            float scaling_factor = cmd.get<float>("rope_scaling_factor", 1.0f);
+
+            int rotary_dim = (int)(HD * partial_rotary);
+            rotary_dim = (rotary_dim / 2) * 2;
+            if (rotary_dim <= 0) rotary_dim = HD;
+
+            if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+                launch_qk_norm_rope_fp16_dp(
+                    as_fp16(q), as_fp16(k), as_fp16_const(qw), as_fp16_const(kw),
+                    1, seq_len, H, KVH, HD, rotary_dim,
+                    engine.device_cache_pos(), eps, theta, scaling_factor,
+                    ctx.stream);
+            } else {
+                launch_qk_norm_rope_fp16(
+                    as_fp16(q), as_fp16(k), as_fp16_const(qw), as_fp16_const(kw),
+                    1, seq_len, H, KVH, HD, rotary_dim,
+                    offset, eps, theta, scaling_factor,
+                    ctx.stream);
+            }
+        });
+    }
+
     // ATTENTION_CACHED - Attention using KV cache (decode)
     engine.register_kernel(op::ATTENTION_CACHED(), [&engine](ExecContext& ctx, const Command& cmd) {
         TensorInfo* q = ctx.in(0);

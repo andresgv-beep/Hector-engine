@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+
+# Modelos HNF (multi-GB, nunca al repo)
+*.hnf
+
+# Profiling
+*.nsys-rep
+*.sqlite
+
+# Python
+__pycache__/
+*.pyc

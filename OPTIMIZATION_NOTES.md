@@ -83,6 +83,39 @@ Implementado el encoder Rust de HQ4.1K/HQ5.1K (header 40B) que faltaba:
 
 **Historial del día: 55 (basura) → 57 (correcto) → 70.4 (kernels) → 91.7 (compacto).**
 
+### Cara a cara con Ollama (2026-07-29, runs alternadas, mismo prompt, 100 tokens)
+
+| Motor | Formato | GB/token | tok/s (estable) | BW efectivo |
+|---|---|---|---|---|
+| Ollama 0.32.5 (qwen3:4b) | Q4_K_M (~4.5 bpw) | ~2.5 | **~117** | ~292 GB/s |
+| Héctor (compact) | HQ4.1K/HQ5.1K (~5.7 bpw) | ~2.8 | **~85** | ~238 GB/s |
+
+El gap era 2.1× al empezar el día (55 vs 117); ahora es **1.38×**, y se
+descompone en: ~1.12× de bytes (su atención va a 4 bits, la nuestra HQ5.1K
+a 6.25) y ~1.24× de eficiencia de kernels (fusión, flash decode, menos
+launches). Ambos motores saturan de forma similar el ancho de banda cuando
+se mide por bytes — la diferencia restante es dieta y overhead por token.
+
+## ✅ FASE 4 — ÚLTIMA RONDA (2026-07-29 noche): 95 tok/s, codo a codo con Ollama
+
+1. **`--attn4` en el conversor**: atención en HQ4.1K (lm_head se protege en
+   HQ5.1K). Archivo 3.31 GB, ~2.7 GB/token — dieta nivel Q4_K_M. Calidad
+   verificada: misma explicación coherente que con HQ5.1K.
+2. **Kernel fusionado `qk_norm_rope`**: rmsnorm(q)+rmsnorm(k)+rope(q)+rope(k)
+   → 1 kernel por capa (144 → 36 lanzamientos/token). Un bloque por head:
+   RMSNorm en shared → RoPE → writeback. Con variante `_dp` para graph replay.
+   El graph builder elige fusionado si `use_qk_norm && rope`, clásico si no.
+
+**Resultado (runs alternadas con Ollama, mismo estado térmico):**
+- Héctor: **95.4 / 95.2 / 95.2 / 85.2** tok/s (el primer run de cada proceso
+  paga el auto-tune: ~60)
+- Ollama qwen3:4b (Q4_K_M): **92-120** tok/s (misma varianza térmica)
+
+En rondas templadas se intercambian golpes (95.4 vs 93.6 ganó Héctor).
+En pico frío Ollama conserva ~1.26× (120 vs 95). El gap era 2.1× por la mañana.
+
+Historial completo del día: **55 (basura) → 57 → 70 → 92 → 95 tok/s.**
+
 Pendiente para la próxima:
 1. Benchmark térmicamente controlado (enchufado, GPU fría, ventilador fijo).
 2. Fusión de kernels pequeños (~1 ms/token: rope q+k, qk_norm+rope).

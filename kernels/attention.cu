@@ -572,6 +572,128 @@ __global__ void rope_kernel_dp(
     qk[i1] = __float2half(y1);
 }
 
+// ============================================================================
+// QK-NORM + ROPE FUSED (Qwen3)
+// ============================================================================
+// Fusiona 4 kernels por capa (rmsnorm(q), rmsnorm(k), rope(q), rope(k)) en 1.
+// Grid: batch*seq*(H+KVH) bloques; cada bloque procesa un head completo:
+// RMSNorm por-head sobre HD elementos → shared → RoPE → writeback.
+
+template<bool DEVICE_POS>
+__global__ void qk_norm_rope_kernel(
+    half* __restrict__ q,               // [B, S, H*HD]
+    half* __restrict__ k,               // [B, S, KVH*HD]
+    const half* __restrict__ q_norm_w,  // [HD]
+    const half* __restrict__ k_norm_w,  // [HD]
+    int batch_size,
+    int seq_len,
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int rotary_dim,
+    int position_offset,
+    const int32_t* __restrict__ d_position_offset,
+    float eps,
+    float theta_base,
+    float scaling_factor
+) {
+    const int total_heads = num_heads + num_kv_heads;
+    const int blk = blockIdx.x;
+    const int head = blk % total_heads;
+    const int s = (blk / total_heads) % seq_len;
+    const int b = blk / (total_heads * seq_len);
+    if (b >= batch_size) return;
+
+    const bool is_q = head < num_heads;
+    half* base = is_q
+        ? q + ((size_t)(b * seq_len + s) * num_heads + head) * head_dim
+        : k + ((size_t)(b * seq_len + s) * num_kv_heads + (head - num_heads)) * head_dim;
+    const half* w = is_q ? q_norm_w : k_norm_w;
+
+    extern __shared__ float s_v[];  // [head_dim] valores normalizados
+    __shared__ float s_red[32];
+
+    // Paso 1: suma de cuadrados (valores crudos quedan en shared)
+    float ssq = 0.0f;
+    for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        float v = __half2float(base[i]);
+        s_v[i] = v;
+        ssq += v * v;
+    }
+    #pragma unroll
+    for (int o = 16; o > 0; o >>= 1) ssq += __shfl_down_sync(0xFFFFFFFF, ssq, o);
+    if ((threadIdx.x & 31) == 0) s_red[threadIdx.x >> 5] = ssq;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        float t = 0.0f;
+        for (int wi = 0; wi < (int)(blockDim.x >> 5); wi++) t += s_red[wi];
+        s_red[0] = t;
+    }
+    __syncthreads();
+    const float rms_inv = rsqrtf(s_red[0] / float(head_dim) + eps);
+
+    // Paso 2: normalizar con peso
+    __syncthreads();  // s_v estable antes de reescribir
+    for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        s_v[i] = s_v[i] * rms_inv * __half2float(w[i]);
+    }
+    __syncthreads();
+
+    // Paso 3: RoPE + writeback
+    const int offset = DEVICE_POS ? *d_position_offset : position_offset;
+    const int half_rot = rotary_dim / 2;
+    const float pos = (float)(s + offset) / scaling_factor;
+    for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
+        if (i < half_rot) {
+            float freq = 1.0f / powf(theta_base, float(2 * i) / float(rotary_dim));
+            float angle = pos * freq;
+            float c = cosf(angle);
+            float sn = sinf(angle);
+            float x0 = s_v[i];
+            float x1 = s_v[i + half_rot];
+            base[i] = __float2half(x0 * c - x1 * sn);
+            base[i + half_rot] = __float2half(x0 * sn + x1 * c);
+        } else if (i >= rotary_dim) {
+            base[i] = __float2half(s_v[i]);
+        }
+        // i ∈ [half_rot, rotary_dim): lo escribe su pareja (i - half_rot)
+    }
+}
+
+void launch_qk_norm_rope_fp16(
+    half* q, half* k, const half* q_norm_w, const half* k_norm_w,
+    int batch_size, int seq_len, int num_heads, int num_kv_heads,
+    int head_dim, int rotary_dim, int position_offset, float eps,
+    float theta, float scaling_factor, cudaStream_t stream
+) {
+    if (rotary_dim <= 0) rotary_dim = head_dim;
+    if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
+    int num_blocks = batch_size * seq_len * (num_heads + num_kv_heads);
+    int block_size = 128;
+    size_t smem = head_dim * sizeof(float);
+    qk_norm_rope_kernel<false><<<num_blocks, block_size, smem, stream>>>(
+        q, k, q_norm_w, k_norm_w, batch_size, seq_len,
+        num_heads, num_kv_heads, head_dim, rotary_dim,
+        position_offset, nullptr, eps, theta, scaling_factor);
+}
+
+void launch_qk_norm_rope_fp16_dp(
+    half* q, half* k, const half* q_norm_w, const half* k_norm_w,
+    int batch_size, int seq_len, int num_heads, int num_kv_heads,
+    int head_dim, int rotary_dim, const int32_t* d_position_offset, float eps,
+    float theta, float scaling_factor, cudaStream_t stream
+) {
+    if (rotary_dim <= 0) rotary_dim = head_dim;
+    if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
+    int num_blocks = batch_size * seq_len * (num_heads + num_kv_heads);
+    int block_size = 128;
+    size_t smem = head_dim * sizeof(float);
+    qk_norm_rope_kernel<true><<<num_blocks, block_size, smem, stream>>>(
+        q, k, q_norm_w, k_norm_w, batch_size, seq_len,
+        num_heads, num_kv_heads, head_dim, rotary_dim,
+        0, d_position_offset, eps, theta, scaling_factor);
+}
+
 void launch_rope_fp16(
     half* q, half* k,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
