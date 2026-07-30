@@ -64,6 +64,26 @@ static void register_kv_cache(Engine& engine, KVCache& cache, const std::string&
 }
 
 // ============================================================================
+// PRESUPUESTO DE RESPUESTA — nivel 1 de salida dinámica
+// ============================================================================
+// La longitud permitida depende de lo que se pide, no de un techo fijo:
+//   trivial (saludo/ack)          → 80 tokens
+//   conversacional normal          → 350
+//   petición larga explícita       → 1500 (escribe/explica/código/detalla...)
+
+static int response_budget(const std::string& msg, bool trivial) {
+    if (trivial) return 80;
+    std::string lower = msg;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const char* kw : {"escribe", "explica", "detalla", "codigo", "código",
+                           "code", "historia", "cuento", "lista completa",
+                           "largo", "redacta", "informe", "programa"}) {
+        if (lower.find(kw) != std::string::npos) return 1500;
+    }
+    return 350;
+}
+
+// ============================================================================
 // THINKING ADAPTATIVO — heurística nivel 1
 // ============================================================================
 // Trivial (saludos, acks, mensajes muy cortos sin pregunta) → /no_think.
@@ -133,6 +153,8 @@ int main(int argc, char** argv) {
         if (!im_start || !im_end)
             throw std::runtime_error("Modelo sin tokens ChatML — usa un instruct");
         int32_t eos_id = tokenizer->eos_token_id().value_or(151645);
+        auto think_open  = tokenizer->token_to_id("<think>");
+        auto think_close = tokenizer->token_to_id("</think>");
 
         // --- KV cache ---
         KVCacheConfig kv_config;
@@ -205,6 +227,25 @@ int main(int argc, char** argv) {
             return next;
         };
 
+        // --- System prompt: identidad y estilo. Prefill ÚNICO — vive en el KV
+        //     para toda la sesión (el prefijo permanente del que habla CK v4). ---
+        {
+            std::vector<int32_t> sys_ids;
+            auto pt = [&](const std::string& s) {
+                auto seg = tokenizer->encode(s, false, false);
+                sys_ids.insert(sys_ids.end(), seg.begin(), seg.end());
+            };
+            sys_ids.push_back(*im_start);
+            pt("system\nEres Helios, un asistente local que corre en el ordenador "
+               "de Andrés sobre el motor Héctor. Conversa de forma natural, concisa "
+               "y directa — como una persona, no como un folleto. Nada de listas ni "
+               "titulares salvo que te los pidan. Extiéndete solo cuando pidan "
+               "detalle explícitamente.");
+            sys_ids.push_back(*im_end);
+            pt("\n");
+            for (int32_t t : sys_ids) (void)forward_one(t);
+        }
+
         std::cout << "\nComandos: /fast (velocidad plena on/off), /salir" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
@@ -259,39 +300,114 @@ int main(int argc, char** argv) {
             }
             auto t_prefill = std::chrono::high_resolution_clock::now();
 
-            // --- Generación con governor de ritmo ---
+            // --- Generación con governor de ritmo y presupuesto dinámico ---
             std::cout << "\033[1;35mhelios>\033[0m " << std::flush;
-            int gen_count = 0, think_count = 0;
-            bool in_think = false;
-            const int MAX_GEN = 1500;
+            int gen_count = 0, think_count = 0, visible_count = 0;
+            bool in_think = false, budget_cut = false, think_cut = false;
+            const int budget = response_budget(line, trivial);  // tokens VISIBLES
+            const int HARD_CAP = 2500;                          // techo absoluto
+            // RIENDA DEL PENSAMIENTO: si el modelo se pierde en su cabeza,
+            // se le inyecta </think> y que responda con lo que lleve pensado.
+            // Trivial debería ni pensar (20 = margen si ignora /no_think).
+            const int think_cap = trivial ? 20 : (budget >= 1500 ? 1000 : 500);
 
-            while (gen_count < MAX_GEN) {
-                if (next == eos_id || next == *im_end) break;
+            std::string think_tail;  // buffer para detectar </think> troceado
+            while (gen_count < HARD_CAP) {
+                if (next == eos_id || next == *im_end) {
+                    // TURNO MUDO: el modelo intenta terminar DENTRO del think
+                    // sin haber dicho nada → cerrar el pensamiento y que hable
+                    if (in_think && visible_count == 0 && think_close) {
+                        (void)forward_one(*think_close);
+                        auto nl = tokenizer->encode("\n\n", false, false);
+                        for (int32_t t : nl) next = forward_one(t);
+                        in_think = false;
+                        think_cut = true;
+                        gen_count += 3;
+                        std::cout << "|corte)\033[0m " << std::flush;
+                        continue;
+                    }
+                    break;
+                }
 
                 std::string piece = tokenizer->decode({next});
-                if (piece.find("<think>") != std::string::npos) in_think = true;
+                if ((think_open && next == *think_open) ||
+                    piece.find("<think>") != std::string::npos) {
+                    in_think = true;
+                    think_tail.clear();
+                }
 
                 if (in_think) {
                     think_count++;
                     // pensamiento invisible: solo un latido para que se vea vida
                     if (think_count == 1) std::cout << "\033[90m(pensando" << std::flush;
                     else if (think_count % 40 == 0) std::cout << "." << std::flush;
+
+                    // RIENDA: techo de pensamiento alcanzado → inyectar cierre.
+                    // El token muestreado se descarta (nunca entra al KV);
+                    // en su lugar se alimenta </think> + salto de línea.
+                    if (think_count >= think_cap && think_close) {
+                        (void)forward_one(*think_close);
+                        auto nl = tokenizer->encode("\n\n", false, false);
+                        for (int32_t t : nl) next = forward_one(t);
+                        in_think = false;
+                        think_cut = true;
+                        gen_count += 3;
+                        std::cout << "|corte)\033[0m " << std::flush;
+                        continue;
+                    }
                 } else {
                     std::cout << piece << std::flush;
-                    // GOVERNOR: hablar a ritmo de lectura (el think va a tope)
+                    visible_count++;
+
+                    // PRESUPUESTO: si agota lo que la pregunta merecía, corte
+                    // limpio en el próximo fin de frase (o duro si se resiste)
+                    if (visible_count >= budget) {
+                        bool sentence_end =
+                            piece.find('.') != std::string::npos ||
+                            piece.find('\n') != std::string::npos;
+                        if (sentence_end || visible_count >= budget + 40) {
+                            budget_cut = true;
+                            break;
+                        }
+                    }
+
+                    // GOVERNOR progresivo: ritmo de lectura al empezar,
+                    // acelera si la respuesta es larga (nadie lee despacio
+                    // un texto de 400 tokens), chorro libre pasado 300
                     if (!fast_mode) {
-                        std::this_thread::sleep_for(std::chrono::microseconds(
-                            (int)(1e6f / SPEAK_PACE_TOKS)));
+                        float pace = visible_count < 150 ? SPEAK_PACE_TOKS
+                                   : visible_count < 300 ? 40.0f
+                                   : 0.0f;
+                        if (pace > 0.0f) {
+                            std::this_thread::sleep_for(std::chrono::microseconds(
+                                (int)(1e6f / pace)));
+                        }
                     }
                 }
 
-                if (piece.find("</think>") != std::string::npos) {
-                    in_think = false;
-                    std::cout << ")\033[0m " << std::flush;
+                // Cierre de think robusto: por id directo O por texto acumulado
+                // (el penalty puede empujar al modelo a tokenizar "</think>"
+                // en piezas sueltas que un chequeo por-pieza no ve)
+                if (in_think) {
+                    think_tail += piece;
+                    if (think_tail.size() > 32)
+                        think_tail.erase(0, think_tail.size() - 32);
+                    if ((think_close && next == *think_close) ||
+                        think_tail.find("</think>") != std::string::npos) {
+                        in_think = false;
+                        std::cout << ")\033[0m " << std::flush;
+                    }
                 }
 
                 gen_count++;
                 next = forward_one(next);
+                // Penalty de repetición SOLO sobre texto visible normal:
+                // jamás penalizar tokens especiales (>= 151643: im_end,
+                // think, etc.) ni el contenido del think — penalizar
+                // </think> es lo que rompía el cierre del pensamiento
+                if (!in_think && next < 151643) {
+                    sampler.add_context(next);
+                }
                 if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
             }
 
@@ -299,9 +415,12 @@ int main(int argc, char** argv) {
             float gen_s = std::chrono::duration<float>(t1 - t_prefill).count();
             float prefill_ms = std::chrono::duration<float>(t_prefill - t0).count() * 1000;
 
+            if (budget_cut) std::cout << " \033[90m[…]\033[0m";
             std::cout << "\n\033[90m[" << gen_count << " tok"
                       << (think_count ? (" (" + std::to_string(think_count) + " pensando)") : "")
                       << (trivial ? " · trivial→sin think" : "")
+                      << (budget_cut ? (" · presupuesto " + std::to_string(budget) + " agotado") : "")
+                      << (think_cut ? " · pensamiento cortado" : "")
                       << " · prefill " << (int)prefill_ms << "ms"
                       << " · " << (gen_s > 0 ? (int)(gen_count / gen_s) : 0) << " tok/s"
                       << " · ctx " << kv_cache.position() << "/" << kv_config.max_seq_len
