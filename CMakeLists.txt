@@ -194,6 +194,10 @@ target_link_libraries(test_smoke PRIVATE helios-engine)
 add_executable(test_chat test_chat.cpp)
 target_link_libraries(test_chat PRIVATE helios-engine)
 
+# ========== HELIOS CHAT (multi-turn, KV continuity, dynamic output) ==========
+add_executable(helios_chat helios_chat.cpp)
+target_link_libraries(helios_chat PRIVATE helios-engine)
+
 # ============================================================================
 # Info
 # ============================================================================
