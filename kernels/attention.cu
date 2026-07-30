@@ -137,8 +137,12 @@ void launch_attention_fp16(
 //
 
 constexpr int WARP_SIZE = 32;
-constexpr int ATTN_WARPS = 4;   // Warps per head
-constexpr int ATTN_BLOCK = ATTN_WARPS * WARP_SIZE;  // 128 threads per block
+// 16 warps/head (era 4): el decode lanza UN bloque por head — con 32 heads
+// eran solo 4k threads para toda la GPU (hambre de paralelismo, 62% del
+// tiempo a contexto profundo). Con 16 warps: 16k threads y cada warp recorre
+// seq/16 posiciones. smem del merge: 16×(2+256)×4B ≈ 16.5 KB ✓
+constexpr int ATTN_WARPS = 16;  // Warps per head
+constexpr int ATTN_BLOCK = ATTN_WARPS * WARP_SIZE;  // 512 threads per block
 constexpr int MAX_HD_PER_THREAD = 8;  // head_dim up to 256
 
 // Shared memory layout for merge:

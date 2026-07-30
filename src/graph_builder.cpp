@@ -399,7 +399,19 @@ CommandBuffer GraphBuilder::build_forward(
     if (!scratch_allocated_) {
         throw std::runtime_error("GraphBuilder: call allocate_scratch() first");
     }
-    
+
+    // Ajustar la METADATA de forma de los scratch al seq actual (los buffers
+    // siguen dimensionados a max_seq; solo cambia shape[1]). Los kernels que
+    // derivan su tamaño de la forma (silu, add, rmsnorm, mul...) procesan así
+    // exactamente seq filas — sin esto, un decode con scratch de 512 hacía
+    // 512× trabajo en cada op elementwise (¡21 tok/s en vez de 85!).
+    if (seq_len <= alloc_seq_) {
+        for (const auto& name : scratch_names_) {
+            TensorInfo* t = engine.tensors().get(name);
+            if (t && t->shape.size() == 3) t->shape[1] = seq_len;
+        }
+    }
+
     CommandBuffer cb;
     cb.reserve(arch.num_layers * 20 + 10);
     

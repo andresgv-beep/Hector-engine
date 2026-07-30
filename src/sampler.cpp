@@ -29,6 +29,7 @@ namespace kernels {
     void launch_categorical_sample(const float*, const int32_t*, int32_t*, int, float, cudaStream_t);
     void launch_sample_topk_gpu(const float*, const int32_t*, int32_t*, int, float, float, float, cudaStream_t);
     void launch_repetition_penalty(half*, const int32_t*, const int32_t*, int, float, float, float, cudaStream_t);
+    void launch_window_penalty(half*, const int32_t*, const int32_t*, int, float, float, float, cudaStream_t);
 }
 
 // ============================================================================
@@ -52,28 +53,36 @@ void Sampler::apply_penalties(
     
     // Determine window: last N tokens from context
     int window_start = std::max(0, (int)context_.size() - penalty_window_);
-    int window_len = (int)context_.size() - window_start;
-    
-    // Build count map on CPU (fast: window is small, typically < 256)
-    std::vector<int32_t> counts(vocab_size, 0);
+
+    // v2: deduplicar la ventana en CPU (≤128 elementos, coste trivial) y subir
+    // SOLO los pares (id, count) — ~1 KB. La v1 subía counts[vocab] = 608 KB
+    // por token, que hundía el decode del chat a un tercio de su velocidad.
+    std::vector<int32_t> ids;
+    std::vector<int32_t> counts;
+    ids.reserve(penalty_window_);
+    counts.reserve(penalty_window_);
     for (int i = window_start; i < (int)context_.size(); i++) {
         int32_t tid = context_[i];
-        if (tid >= 0 && tid < vocab_size) {
-            counts[tid]++;
+        if (tid < 0 || tid >= vocab_size) continue;
+        bool found = false;
+        for (size_t j = 0; j < ids.size(); j++) {
+            if (ids[j] == tid) { counts[j]++; found = true; break; }
         }
+        if (!found) { ids.push_back(tid); counts.push_back(1); }
     }
-    
-    // Upload counts to GPU
-    ensure_penalty_buffer(vocab_size);
-    cudaMemcpyAsync(penalty_gpu_, counts.data(), vocab_size * sizeof(int32_t),
+    if (ids.empty()) return;
+
+    int n = (int)ids.size();
+    ensure_penalty_buffer(2 * penalty_window_);  // ids + counts, en int32
+    int32_t* d_ids = static_cast<int32_t*>(penalty_gpu_);
+    int32_t* d_counts = d_ids + penalty_window_;
+    cudaMemcpyAsync(d_ids, ids.data(), n * sizeof(int32_t),
                     cudaMemcpyHostToDevice, stream);
-    
-    // Launch penalty kernel
-    kernels::launch_repetition_penalty(
-        logits,
-        nullptr,
-        static_cast<int32_t*>(penalty_gpu_),
-        vocab_size,
+    cudaMemcpyAsync(d_counts, counts.data(), n * sizeof(int32_t),
+                    cudaMemcpyHostToDevice, stream);
+
+    kernels::launch_window_penalty(
+        logits, d_ids, d_counts, n,
         config.repetition_penalty,
         config.frequency_penalty,
         config.presence_penalty,

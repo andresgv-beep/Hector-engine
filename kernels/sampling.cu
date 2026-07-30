@@ -530,5 +530,57 @@ void launch_repetition_penalty(
     );
 }
 
+// ============================================================================
+// WINDOW PENALTY — v2: solo la ventana viaja a GPU
+// ============================================================================
+// La v1 subía counts[vocab_size] (608 KB con vocab 152k) POR TOKEN. Aquí van
+// solo los ids únicos de la ventana con sus counts (≤128 pares ≈ 1 KB) y un
+// kernel diminuto toca exactamente esas posiciones. Misma semántica (Keskar
+// multiplicativo + freq·count + presence); los ids llegan deduplicados, así
+// que no hay carreras.
+
+__global__ void window_penalty_kernel(
+    half* __restrict__ logits,
+    const int32_t* __restrict__ ids,     // [n] ids únicos de la ventana
+    const int32_t* __restrict__ counts,  // [n] ocurrencias de cada id
+    int n,
+    float rep_penalty,
+    float freq_penalty,
+    float pres_penalty
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+
+    int id = ids[i];
+    float logit = __half2float(logits[id]);
+
+    if (rep_penalty != 1.0f) {
+        if (logit > 0.0f) logit /= rep_penalty;
+        else              logit *= rep_penalty;
+    }
+    if (freq_penalty != 0.0f) logit -= freq_penalty * counts[i];
+    if (pres_penalty != 0.0f) logit -= pres_penalty;
+
+    logits[id] = __float2half(logit);
+}
+
+void launch_window_penalty(
+    half* logits,
+    const int32_t* ids,
+    const int32_t* counts,
+    int n,
+    float rep_penalty,
+    float freq_penalty,
+    float pres_penalty,
+    cudaStream_t stream
+) {
+    if (n <= 0) return;
+    int block = 128;
+    int grid = (n + block - 1) / block;
+    window_penalty_kernel<<<grid, block, 0, stream>>>(
+        logits, ids, counts, n, rep_penalty, freq_penalty, pres_penalty
+    );
+}
+
 } // namespace kernels
 } // namespace helios
