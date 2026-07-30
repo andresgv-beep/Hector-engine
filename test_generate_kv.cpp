@@ -139,8 +139,31 @@ int main(int argc, char** argv) {
 
         std::vector<int32_t> prompt_ids;
         if (!prompt.empty() && tokenizer) {
-            prompt_ids = tokenizer->encode(prompt, false, false);
-            std::cout << "  Prompt: " << prompt_ids.size() << " tokens" << std::endl;
+            // Modo raw explícito: prefijo "raw:" → continuación pura sin plantilla
+            bool raw_mode = prompt.rfind("raw:", 0) == 0;
+            std::string user_text = raw_mode ? prompt.substr(4) : prompt;
+
+            auto im_start = tokenizer->token_to_id("<|im_start|>");
+            auto im_end   = tokenizer->token_to_id("<|im_end|>");
+
+            if (!raw_mode && im_start && im_end) {
+                // Plantilla ChatML (Qwen instruct): los marcadores van como ids
+                // especiales directos — nunca por BPE, que los despedaza.
+                auto push_text = [&](const std::string& s) {
+                    auto seg = tokenizer->encode(s, false, false);
+                    prompt_ids.insert(prompt_ids.end(), seg.begin(), seg.end());
+                };
+                prompt_ids.push_back(*im_start);
+                push_text("user\n" + user_text);
+                prompt_ids.push_back(*im_end);
+                push_text("\n");
+                prompt_ids.push_back(*im_start);
+                push_text("assistant\n");
+            } else {
+                prompt_ids = tokenizer->encode(user_text, false, false);
+            }
+            std::cout << "  Prompt: " << prompt_ids.size() << " tokens"
+                      << (raw_mode ? " (raw)" : " (chat)") << std::endl;
         }
         if (prompt_ids.empty()) prompt_ids.push_back(1);  // arranque clásico sin prompt
 
