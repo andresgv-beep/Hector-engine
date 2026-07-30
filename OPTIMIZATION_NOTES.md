@@ -116,6 +116,13 @@ En pico frío Ollama conserva ~1.26× (120 vs 95). El gap era 2.1× por la maña
 
 Historial completo del día: **55 (basura) → 57 → 70 → 92 → 95 tok/s.**
 
+**HALLAZGO (2026-07-30):** el sampling con temperatura cuesta ~10 ms/token —
+greedy corre a ~84 tok/s pero temp 0.7 cae a ~46. Sospechoso: `launch_top_k`
+sobre 151k de vocab + 2 memcpy D2H + softmax en CPU por token
+(`sampler.cpp:sample_with_temperature`). Optimizar: top-k en GPU con una sola
+pasada (o muestrear en GPU del todo — los kernels ya existen:
+`launch_top_p_cutoff`, `launch_categorical_sample`, sin usar).
+
 Pendiente para la próxima:
 1. Benchmark térmicamente controlado (enchufado, GPU fría, ventilador fijo).
 2. Fusión de kernels pequeños (~1 ms/token: rope q+k, qk_norm+rope).

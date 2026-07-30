@@ -27,6 +27,7 @@ namespace kernels {
     void launch_top_k(const half*, float*, int32_t*, int, int, cudaStream_t);
     void launch_top_p_cutoff(const float*, int32_t*, int, float, cudaStream_t);
     void launch_categorical_sample(const float*, const int32_t*, int32_t*, int, float, cudaStream_t);
+    void launch_sample_topk_gpu(const float*, const int32_t*, int32_t*, int, float, float, float, cudaStream_t);
     void launch_repetition_penalty(half*, const int32_t*, const int32_t*, int, float, float, float, cudaStream_t);
 }
 
@@ -162,72 +163,26 @@ int32_t Sampler::sample_with_temperature(
     if (top_k <= 0) {
         top_k = 50;
     }
-    
+
     ensure_scratch(vocab_size, top_k);
-    
+
     float* top_values = (float*)scratch_gpu_;
     int32_t* top_indices = (int32_t*)(top_values + top_k);
-    float* probs = (float*)(top_indices + top_k);
-    int32_t* cutoff_idx = (int32_t*)(probs + top_k);
-    
-    // 1. Get top-k values and indices
+
+    // Pipeline 100% GPU: top-k → softmax+top-p+muestreo en un kernel →
+    // copiar de vuelta UN int32. Mismo coste de sincronización que el greedy.
+    // (Antes: 2 viajes D2H de valores/índices + softmax en CPU ≈ ms/token.)
     kernels::launch_top_k(logits, top_values, top_indices, vocab_size, top_k, stream);
-    
-    // 2. Apply temperature and compute softmax on CPU
-    std::vector<float> h_values(top_k);
-    std::vector<int32_t> h_indices(top_k);
-    
-    cudaMemcpyAsync(h_values.data(), top_values, top_k * sizeof(float),
-                    cudaMemcpyDeviceToHost, stream);
-    cudaMemcpyAsync(h_indices.data(), top_indices, top_k * sizeof(int32_t),
+
+    float r = uniform_(rng_);  // el RNG vive en CPU: reproducible y barato
+    kernels::launch_sample_topk_gpu(
+        top_values, top_indices, result_gpu_,
+        top_k, 1.0f / temperature, top_p, r, stream);
+
+    cudaMemcpyAsync(result_cpu_, result_gpu_, sizeof(int32_t),
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
-    
-    float inv_temp = 1.0f / temperature;
-    float max_val = h_values[0];
-    
-    std::vector<float> h_probs(top_k);
-    float sum_exp = 0.0f;
-    for (int i = 0; i < top_k; i++) {
-        h_probs[i] = expf((h_values[i] - max_val) * inv_temp);
-        sum_exp += h_probs[i];
-    }
-    for (int i = 0; i < top_k; i++) {
-        h_probs[i] /= sum_exp;
-    }
-    
-    // 3. Top-p filtering
-    int num_tokens = top_k;
-    if (top_p < 1.0f) {
-        float cumsum = 0.0f;
-        for (int i = 0; i < top_k; i++) {
-            cumsum += h_probs[i];
-            if (cumsum >= top_p) {
-                num_tokens = i + 1;
-                break;
-            }
-        }
-        
-        float new_sum = 0.0f;
-        for (int i = 0; i < num_tokens; i++) {
-            new_sum += h_probs[i];
-        }
-        for (int i = 0; i < num_tokens; i++) {
-            h_probs[i] /= new_sum;
-        }
-    }
-    
-    // 4. Sample
-    float r = uniform_(rng_);
-    float cumsum = 0.0f;
-    for (int i = 0; i < num_tokens; i++) {
-        cumsum += h_probs[i];
-        if (r < cumsum) {
-            return h_indices[i];
-        }
-    }
-    
-    return h_indices[num_tokens - 1];
+    return *result_cpu_;
 }
 
 // ============================================================================
