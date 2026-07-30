@@ -366,7 +366,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /salir" << std::endl;
+        std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /pegar · /salir" << std::endl;
         std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
@@ -428,6 +428,25 @@ int main(int argc, char** argv) {
                 line = "Te paso un documento (" + path + "). Léelo y coméntame "
                        "lo esencial:\n\n" + doc;
                 // sigue el flujo normal de turno con `line` como mensaje
+            }
+
+            // "/pegar" — texto multilínea pegado directamente: acumula líneas
+            // hasta "/fin" y lo procesa como UN solo mensaje
+            if (line == "/pegar") {
+                std::cout << "(pega el texto; termina con una línea que diga /fin)\n";
+                std::string pasted, pl;
+                while (std::getline(std::cin, pl)) {
+                    if (pl == "/fin") break;
+                    pasted += pl + "\n";
+                }
+                if (pasted.empty()) { std::cout << "(nada pegado)\n" << std::endl; continue; }
+                const size_t PASTE_MAX = 9000;
+                if (pasted.size() > PASTE_MAX) {
+                    pasted = pasted.substr(0, PASTE_MAX);
+                    std::cout << "\033[33m(texto truncado a " << PASTE_MAX << " caracteres)\033[0m\n";
+                }
+                std::cout << "(" << pasted.size() << " caracteres recibidos)\n";
+                line = "Te paso un texto. Léelo y coméntame lo esencial:\n\n" + pasted;
             }
 
             // "/memoria" — enseñar el diario tal cual está en disco
