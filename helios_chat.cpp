@@ -158,16 +158,34 @@ static float temperature_for(const std::string& msg, bool trivial, float base) {
 //   conversacional normal          → 350
 //   petición larga explícita       → 1500 (escribe/explica/código/detalla...)
 
-static int response_budget(const std::string& msg, bool trivial) {
-    if (trivial) return 80;
+// ¿Es una petición de continuar lo cortado? ("sigue", "continúa"...)
+static bool is_continuation(const std::string& msg) {
     std::string lower = msg;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const char* kw : {"sigue", "continúa", "continua", "prosigue",
+                           "acaba", "termina eso", "y despues", "y después"}) {
+        if (lower.rfind(kw, 0) == 0) return true;
+    }
+    return false;
+}
+
+static int response_budget(const std::string& msg, bool trivial) {
+    // La continuación manda sobre todo: aunque sea un mensaje cortísimo
+    if (is_continuation(msg)) return 1500;
+    if (trivial) return 120;
+    std::string lower = msg;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    // Peticiones que legítimamente necesitan desarrollo
     for (const char* kw : {"escribe", "explica", "detalla", "codigo", "código",
                            "code", "historia", "cuento", "lista completa",
-                           "largo", "redacta", "informe", "programa"}) {
-        if (lower.find(kw) != std::string::npos) return 1500;
+                           "largo", "redacta", "informe", "programa", "diseña",
+                           "diseñar", "propon", "propón", "arquitectura",
+                           "pasos", "plan ", "estructura", "ejemplo", "tutorial",
+                           "cómo se", "como se", "cómo hago", "como hago",
+                           "ui", "interfaz", "compara", "analiza"}) {
+        if (lower.find(kw) != std::string::npos) return 1200;
     }
-    return 350;
+    return 600;  // conversación normal (era 350: cortaba respuestas útiles)
 }
 
 // ============================================================================
@@ -178,6 +196,7 @@ static int response_budget(const std::string& msg, bool trivial) {
 
 static bool is_trivial_message(const std::string& msg) {
     if (msg.size() > 60) return false;
+    if (is_continuation(msg)) return false;  // "sigue" es trabajo, no saludo
 
     std::string lower = msg;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
@@ -262,6 +281,10 @@ int main(int argc, char** argv) {
         gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
 
         Sampler sampler;
+        // Ventana del penalty: 128 no alcanza a ver bloques repetidos largos
+        // (el bucle clásico del 4B repite párrafos de ~200 tokens). Con el
+        // penalty v2 (solo la ventana viaja a GPU) 384 es igual de barato.
+        sampler.set_penalty_window(384);
         // Config VIVA: el CK la reajusta cada turno (temperature_for)
         SamplingConfig sample_config = temperature < 0.01f
             ? SamplingConfig::greedy()
@@ -315,11 +338,14 @@ int main(int argc, char** argv) {
                                           model_config.vocab_size(),
                                           sample_config, stream);
             total_tokens++;
-            if (hexos.connected()) {
+            // Telemetría cada 8 tokens: a 80 tok/s son 10 refrescos/s, más de
+            // lo que el ojo ve en el dashboard, y quita 7 de cada 8 escrituras
+            // al blackboard del camino crítico del decode.
+            if (hexos.connected() && (total_tokens & 7) == 0) {
                 auto now_t = std::chrono::high_resolution_clock::now();
                 float dt = std::chrono::duration<float>(now_t - hexos_last).count();
                 hexos_last = now_t;
-                if (dt > 0.0f) hexos.update_inference(1.0f / dt, total_tokens, true);
+                if (dt > 0.0f) hexos.update_inference(8.0f / dt, total_tokens, true);
             }
             return next;
         };
@@ -375,9 +401,13 @@ int main(int argc, char** argv) {
                 "CÓMO HABLAS: cercano y con confianza, tuteando. Frases cortas, "
                 "lenguaje de persona, no de manual. Puedes bromear, opinar y decir "
                 "'no sé'. Si te habla informal, respondes informal. Nada de listas, "
-                "titulares, emojis decorativos ni tono de folleto corporativo — "
-                "salvo que te pidan un documento formal. No repitas lo que acabas "
-                "de decir con otras palabras: una idea, una vez.\n\n"
+                "titulares numerados, secciones con ###, emojis decorativos ni tono "
+                "de consultora — ni siquiera en temas técnicos: ahí explicas como "
+                "un colega en un bar, en párrafos normales. Solo usas formato de "
+                "documento si te piden un documento. No repitas lo que acabas de "
+                "decir con otras palabras: una idea, una vez. No repitas su "
+                "nombre en cada frase: sabes con quién hablas, úsalo solo cuando "
+                "aporte algo.\n\n"
                 "HONESTIDAD: sobre personas y hechos di SOLO lo que esté en tu "
                 "memoria o en la conversación. Si no lo sabes, dilo. Jamás inventes "
                 "biografías, logros ni elogios genéricos: a " + owner + " le molesta "
@@ -405,14 +435,31 @@ int main(int argc, char** argv) {
                             "conversación CONTINÚA — no saludes de nuevo, no es "
                             "una sesión nueva):\n" + session_notes;
             }
-            if (!last_exchange.empty()) {
-                sys_text += "\n\nÚltimo intercambio literal:\n" + last_exchange;
-            }
-
             sys_ids.push_back(*im_start);
             pt("system\n" + sys_text);
             sys_ids.push_back(*im_end);
             pt("\n");
+
+            // El último intercambio va como TURNOS ChatML reales, no como texto
+            // dentro del system. Metido como texto, el prompt terminaba con
+            // "Helios: <respuesta>" y los induction heads lo copiaban: tras
+            // cada compactación el modelo repetía su última respuesta palabra
+            // por palabra pasara lo que pasara. Como turno cerrado, es pasado.
+            if (!last_exchange.empty()) {
+                size_t sep = last_exchange.find("\n\x01");
+                if (sep != std::string::npos) {
+                    std::string u = last_exchange.substr(0, sep);
+                    std::string a = last_exchange.substr(sep + 2);
+                    sys_ids.push_back(*im_start);
+                    pt("user\n" + u);
+                    sys_ids.push_back(*im_end);
+                    pt("\n");
+                    sys_ids.push_back(*im_start);
+                    pt("assistant\n" + a);
+                    sys_ids.push_back(*im_end);
+                    pt("\n");
+                }
+            }
             (void)forward_batch(sys_ids);
 
             if (announce && !memories.empty()) {
@@ -424,6 +471,84 @@ int main(int argc, char** argv) {
         };
 
         prefill_prefix("", "", true);
+
+        // --- REFLEXIÓN POST-TURNO: Helios decide solo qué merece recordarse.
+        // Corre tras responder (mientras el usuario lee) y REBOBINA el KV:
+        // la pregunta interna no deja rastro en la conversación. Es el
+        // mecanismo "reflexión a coste cero" del CK v4. ---
+        auto reflect_and_capture = [&](const std::string& user_msg,
+                                       const std::string& reply) {
+            if (kv_cache.position() + 300 >= kv_config.max_seq_len) return;
+            const uint32_t saved_pos = kv_cache.position();
+
+            std::vector<int32_t> r_ids;
+            auto pt3 = [&](const std::string& s) {
+                auto seg = tokenizer->encode(s, false, false);
+                r_ids.insert(r_ids.end(), seg.begin(), seg.end());
+            };
+            // Few-shot: un 4B extrae mucho mejor con ejemplos que con reglas
+            r_ids.push_back(*im_start);
+            pt3("user\nEres un extractor de datos. Te doy un mensaje del usuario "
+                "y respondes SOLO con una de estas dos cosas:\n"
+                "- 'DATO: <hecho en una frase>' si el mensaje contiene un hecho "
+                "duradero sobre él (nombre, trabajo, gustos, familia, "
+                "preferencias, decisiones del proyecto).\n"
+                "- 'NADA' si es una pregunta, charla, cortesía u opinión pasajera.\n\n"
+                "Ejemplos:\n"
+                "Mensaje: 'me llamo Ana y vivo en Bilbao' → DATO: Se llama Ana y "
+                "vive en Bilbao.\n"
+                "Mensaje: '¿qué hora es?' → NADA\n"
+                "Mensaje: 'odio los emojis, no los uses' → DATO: No le gustan los "
+                "emojis, prefiere no usarlos.\n"
+                "Mensaje: 'jaja qué bueno' → NADA\n"
+                "Mensaje: 'vamos a usar React para la interfaz' → DATO: Ha "
+                "decidido usar React para la interfaz.\n"
+                "Mensaje: 'cuéntame un chiste' → NADA\n\n"
+                "Mensaje: '" + user_msg.substr(0, 400) + "' → /no_think");
+            r_ids.push_back(*im_end);
+            pt3("\n");
+            r_ids.push_back(*im_start);
+            pt3("assistant\n");
+
+            int32_t rx = forward_batch(r_ids);
+            std::string out;
+            bool rthink = false;
+            for (int i = 0; i < 60; i++) {
+                if (rx == eos_id || rx == *im_end) break;
+                std::string piece = tokenizer->decode({rx});
+                if ((think_open && rx == *think_open) ||
+                    piece.find("<think>") != std::string::npos) rthink = true;
+                if (!rthink) out += piece;
+                if (rthink && ((think_close && rx == *think_close) ||
+                               piece.find("</think>") != std::string::npos)) rthink = false;
+                rx = forward_one(rx);
+                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
+            }
+
+            kv_cache.rewind_to(saved_pos);  // la reflexión no existió
+
+            size_t p = out.find("DATO:");
+            if (p == std::string::npos) return;
+            std::string fact = out.substr(p + 5);
+            size_t nl = fact.find('\n');
+            if (nl != std::string::npos) fact = fact.substr(0, nl);
+            while (!fact.empty() && (fact.front() == ' ' || fact.front() == '*'))
+                fact.erase(fact.begin());
+            while (!fact.empty() && (fact.back() == ' ' || fact.back() == '*'))
+                fact.pop_back();
+            if (fact.size() < 8 || fact.size() > 200) return;
+            std::string lower = fact;
+            std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+            // El modelo a veces escribe "DATO: no hay nada memorable" — filtrar
+            for (const char* neg : {"nada", "no hay", "ningún", "ningun",
+                                    "ninguna", "no menciona", "no se menciona",
+                                    "no contiene", "no aporta"}) {
+                if (lower.find(neg) != std::string::npos) return;
+            }
+
+            append_memory("Observado: " + fact);
+            std::cout << "\033[90m  · anotado: " << fact << "\033[0m" << std::endl;
+        };
 
         // --- Destilación de lo hablado — compartida por la compactación en
         // caliente y por la despedida ---
@@ -618,10 +743,11 @@ int main(int argc, char** argv) {
 
                 kv_cache.reset();
 
+                // Separador \n\x01 para poder partirlo en turnos ChatML
                 std::string exch;
                 if (!last_user_msg.empty()) {
-                    exch = owner_name() + ": " + last_user_msg.substr(0, 400) +
-                           "\nHelios: " + last_reply.substr(0, 400);
+                    exch = last_user_msg.substr(0, 400) + "\n\x01" +
+                           last_reply.substr(0, 600);
                 }
                 prefill_prefix(notes, exch, false);
                 std::cout << " hecho — contexto " << kv_cache.position()
@@ -669,7 +795,7 @@ int main(int argc, char** argv) {
             // --- Generación con governor de ritmo y presupuesto dinámico ---
             std::cout << "\033[1;35mhelios>\033[0m " << std::flush;
             int gen_count = 0, think_count = 0, visible_count = 0;
-            bool in_think = false, budget_cut = false, think_cut = false;
+            bool in_think = false, budget_cut = false, think_cut = false, loop_cut = false;
             const int budget = response_budget(line, trivial);  // tokens VISIBLES
             const int HARD_CAP = 2500;                          // techo absoluto
             // RIENDA DEL PENSAMIENTO: si el modelo se pierde en su cabeza,
@@ -726,6 +852,20 @@ int main(int argc, char** argv) {
                     last_reply += piece;
                     visible_count++;
 
+                    // DETECTOR DE BUCLE: si el modelo entra en la espiral de
+                    // repetir un párrafo, el penalty no siempre lo salva (con
+                    // bloques largos ni la ventana llega). Comprobación
+                    // determinista: si los últimos 90 caracteres ya aparecen
+                    // antes en la respuesta, está en bucle → cortar.
+                    if (visible_count > 60 && (visible_count % 16) == 0 &&
+                        last_reply.size() > 260) {
+                        std::string tail = last_reply.substr(last_reply.size() - 90);
+                        if (last_reply.find(tail, 0) < last_reply.size() - 180) {
+                            loop_cut = true;
+                            break;
+                        }
+                    }
+
                     // PRESUPUESTO: si agota lo que la pregunta merecía, corte
                     // limpio en el próximo fin de frase (o duro si se resiste)
                     if (visible_count >= budget) {
@@ -778,11 +918,27 @@ int main(int argc, char** argv) {
                 if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
             }
 
+            // CERRAR EL TURNO: si cortamos nosotros (presupuesto, bucle,
+            // techo), el <|im_end|> nunca entró al KV y el ChatML quedaba
+            // malformado — el turno siguiente del usuario se pegaba a una
+            // respuesta inacabada y el modelo derivaba (títulos rotos, tono
+            // cada vez más burocrático). Se cierra explícitamente.
+            if (budget_cut || loop_cut || think_cut || gen_count >= HARD_CAP) {
+                (void)forward_one(*im_end);
+                auto nl2 = tokenizer->encode("\n", false, false);
+                for (int32_t t : nl2) (void)forward_one(t);
+            }
+
             auto t1 = std::chrono::high_resolution_clock::now();
             float gen_s = std::chrono::duration<float>(t1 - t_prefill).count();
             float prefill_ms = std::chrono::duration<float>(t_prefill - t0).count() * 1000;
 
-            if (budget_cut) std::cout << " \033[90m[…]\033[0m";
+            // Reflexión: solo en turnos con sustancia (los saludos no aportan)
+            bool worth_reflecting = !trivial && user_msg.size() > 15 &&
+                                    visible_count > 5 && !is_continuation(line);
+
+            if (budget_cut) std::cout << " \033[90m[…] (dime \"sigue\" para continuar)\033[0m";
+            if (loop_cut) std::cout << " \033[90m[…se repetía]\033[0m";
             std::cout << "\n\033[90m[" << gen_count << " tok"
                       << (think_count ? (" (" + std::to_string(think_count) + " pensando)") : "")
                       << (trivial ? " · trivial→sin think" : "")
@@ -792,7 +948,12 @@ int main(int argc, char** argv) {
                       << " · prefill " << (int)prefill_ms << "ms"
                       << " · " << (gen_s > 0 ? (int)(gen_count / gen_s) : 0) << " tok/s"
                       << " · ctx " << kv_cache.position() << "/" << kv_config.max_seq_len
-                      << "]\033[0m\n" << std::endl;
+                      << "]\033[0m" << std::endl;
+
+            // Reflexión post-turno: el CK decide qué merece memoria, sin que
+            // el usuario tenga que decir "recuerda". Corre mientras él lee.
+            if (worth_reflecting) reflect_and_capture(user_msg, last_reply);
+            std::cout << std::endl;
         }
 
         // --- DESPEDIDA: consolidar la sesión en memoria episódica ---

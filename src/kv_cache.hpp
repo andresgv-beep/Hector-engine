@@ -89,6 +89,11 @@ public:
     
     // Advance position after writing new KV
     void advance(uint32_t num_tokens = 1);
+
+    // Rebobinar a una posición anterior: lo escrito más allá queda como
+    // basura que la siguiente escritura sobrescribe. Permite pasadas
+    // "invisibles" (reflexión del CK) que no dejan rastro en el contexto.
+    void rewind_to(uint32_t pos) { if (pos <= position_) position_ = pos; }
     
     // ========================================
     // INFO

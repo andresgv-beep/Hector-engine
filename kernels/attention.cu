@@ -143,7 +143,8 @@ constexpr int WARP_SIZE = 32;
 // seq/16 posiciones. smem del merge: 16×(2+256)×4B ≈ 16.5 KB ✓
 constexpr int ATTN_WARPS = 16;  // Warps per head
 constexpr int ATTN_BLOCK = ATTN_WARPS * WARP_SIZE;  // 512 threads per block
-constexpr int MAX_HD_PER_THREAD = 8;  // head_dim up to 256
+constexpr int MAX_HD_PER_THREAD = 8;   // head_dim up to 256
+constexpr int MAX_HD2_PER_THREAD = 4;  // ídem en pares (half2): 256/2/32
 
 // Shared memory layout for merge:
 //   float partial_max[ATTN_WARPS]
@@ -354,79 +355,93 @@ __global__ void attention_cached_v2_kernel_dp(
     
     const int kv_h = (num_kv_heads == num_heads) ? h : (h / (num_heads / num_kv_heads));
     
-    const int q_base = b * num_heads * head_dim + h * head_dim;
-    float q_reg[MAX_HD_PER_THREAD];
+    // Vectorización half2: cada lane lleva PARES de dimensiones. El warp
+    // cubre 64 halfs por iteración (128 B contiguos = línea de caché entera)
+    // en vez de 32 halfs (64 B). Mitad de instrucciones de carga y
+    // transacciones de memoria — el decode profundo es memory-bound puro.
+    const int hd2 = head_dim >> 1;                 // dimensiones en unidades half2
+    const int q_base2 = (b * num_heads * head_dim + h * head_dim) >> 1;
+    const half2* Q2 = reinterpret_cast<const half2*>(Q);
+
+    float2 q_reg[MAX_HD2_PER_THREAD];
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-        int d = lane + i * WARP_SIZE;
-        q_reg[i] = (d < head_dim) ? __half2float(Q[q_base + d]) : 0.0f;
+    for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+        int d2 = lane + i * WARP_SIZE;
+        q_reg[i] = (d2 < hd2) ? __half22float2(Q2[q_base2 + d2])
+                              : make_float2(0.0f, 0.0f);
     }
-    
+
     const int kv_batch_base = b * max_seq_len * num_kv_heads * head_dim;
     const int kv_head_offset = kv_h * head_dim;
-    
+    const half2* K2 = reinterpret_cast<const half2*>(K_cache);
+    const half2* V2 = reinterpret_cast<const half2*>(V_cache);
+
     const int chunk = (seq_len + ATTN_WARPS - 1) / ATTN_WARPS;
     const int pos_start = warp_id * chunk;
     const int pos_end = min(pos_start + chunk, seq_len);
-    
+
     float running_max = -1e10f;
     float running_sum = 0.0f;
-    float acc[MAX_HD_PER_THREAD];
+    float2 acc[MAX_HD2_PER_THREAD];
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] = 0.0f;
-    
+    for (int i = 0; i < MAX_HD2_PER_THREAD; i++) acc[i] = make_float2(0.0f, 0.0f);
+
     for (int pos = pos_start; pos < pos_end; pos++) {
-        const int kv_base = kv_batch_base + pos * num_kv_heads * head_dim + kv_head_offset;
-        
+        const int kv_base2 =
+            (kv_batch_base + pos * num_kv_heads * head_dim + kv_head_offset) >> 1;
+
         float dot = 0.0f;
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-            int d = lane + i * WARP_SIZE;
-            if (d < head_dim) {
-                dot += q_reg[i] * __half2float(K_cache[kv_base + d]);
+        for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+            int d2 = lane + i * WARP_SIZE;
+            if (d2 < hd2) {
+                float2 k = __half22float2(K2[kv_base2 + d2]);
+                dot = fmaf(q_reg[i].x, k.x, dot);
+                dot = fmaf(q_reg[i].y, k.y, dot);
             }
         }
-        
+
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1) {
             dot += __shfl_down_sync(0xFFFFFFFF, dot, offset);
         }
         float score = __shfl_sync(0xFFFFFFFF, dot, 0) * scale;
-        
+
         float new_max = fmaxf(running_max, score);
         float exp_score = expf(score - new_max);
         float correction = expf(running_max - new_max);
-        
+
         running_sum = running_sum * correction + exp_score;
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-            acc[i] = acc[i] * correction;
-        }
-        
-        #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-            int d = lane + i * WARP_SIZE;
-            if (d < head_dim) {
-                acc[i] += exp_score * __half2float(V_cache[kv_base + d]);
+        for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+            int d2 = lane + i * WARP_SIZE;
+            acc[i].x *= correction;
+            acc[i].y *= correction;
+            if (d2 < hd2) {
+                float2 v = __half22float2(V2[kv_base2 + d2]);
+                acc[i].x = fmaf(exp_score, v.x, acc[i].x);
+                acc[i].y = fmaf(exp_score, v.y, acc[i].y);
             }
         }
         running_max = new_max;
     }
-    
+
     extern __shared__ float s_mem[];
     float* s_max = s_mem;
     float* s_sum = s_max + ATTN_WARPS;
     float* s_acc = s_sum + ATTN_WARPS;
-    
+
     if (lane == 0) {
         s_max[warp_id] = running_max;
         s_sum[warp_id] = running_sum;
     }
-    
+
+    // Layout del merge sin cambios: 2 floats por cada par → mismo tamaño
     const int acc_stride = MAX_HD_PER_THREAD * WARP_SIZE;
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-        s_acc[warp_id * acc_stride + lane * MAX_HD_PER_THREAD + i] = acc[i];
+    for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+        s_acc[warp_id * acc_stride + lane * MAX_HD_PER_THREAD + i * 2]     = acc[i].x;
+        s_acc[warp_id * acc_stride + lane * MAX_HD_PER_THREAD + i * 2 + 1] = acc[i].y;
     }
     __syncthreads();
     
@@ -440,26 +455,31 @@ __global__ void attention_cached_v2_kernel_dp(
         #pragma unroll
         for (int i = 0; i < MAX_HD_PER_THREAD; i++) merged_acc[i] = 0.0f;
         float merged_sum = 0.0f;
-        
+
         for (int w = 0; w < ATTN_WARPS; w++) {
             float correction = expf(s_max[w] - global_max);
             float w_sum = s_sum[w] * correction;
             merged_sum += w_sum;
-            
+
             #pragma unroll
             for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
                 merged_acc[i] += s_acc[w * acc_stride + lane * MAX_HD_PER_THREAD + i] * correction;
             }
         }
-        
+
         float inv_sum = (merged_sum > 0.0f) ? (1.0f / merged_sum) : 0.0f;
-        const int out_base = b * num_heads * head_dim + h * head_dim;
-        
+        // Salida vectorizada: cada lane escribe sus pares (mismo orden que
+        // se guardaron: merged_acc[2i], merged_acc[2i+1] = dimensión d2*2, +1)
+        const int out_base2 = (b * num_heads * head_dim + h * head_dim) >> 1;
+        half2* out2 = reinterpret_cast<half2*>(output);
+
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
-            int d = lane + i * WARP_SIZE;
-            if (d < head_dim) {
-                output[out_base + d] = __float2half(merged_acc[i] * inv_sum);
+        for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+            int d2 = lane + i * WARP_SIZE;
+            if (d2 < hd2) {
+                out2[out_base2 + d2] = __floats2half2_rn(
+                    merged_acc[i * 2] * inv_sum,
+                    merged_acc[i * 2 + 1] * inv_sum);
             }
         }
     }
