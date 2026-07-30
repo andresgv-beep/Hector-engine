@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
         kv_config.num_kv_heads = model_config.num_key_value_heads();
         kv_config.head_dim = model_config.head_dim();
         kv_config.max_batch_size = 1;
-        kv_config.max_seq_len = 128;
+        kv_config.max_seq_len = 4096;  // 576 MB de KV para Qwen3-4B (36L × 8KVH × 128HD)
         
         KVCache kv_cache;
         if (!kv_cache.allocate(kv_config)) {
