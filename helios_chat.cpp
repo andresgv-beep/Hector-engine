@@ -74,6 +74,16 @@ static void register_kv_cache(Engine& engine, KVCache& cache, const std::string&
 // Al arrancar, los recuerdos entran al system prompt (prefijo en KV).
 // Recencia pura por ahora; la búsqueda semántica es el siguiente nivel.
 
+// El dueño vive en ~/.helios/owner (una línea), NUNCA en el código fuente:
+// el código es publicable; la identidad de quién lo usa es capa personal.
+static std::string owner_name() {
+    const char* home = getenv("HOME");
+    std::ifstream f(std::string(home ? home : ".") + "/.helios/owner");
+    std::string name;
+    if (f && std::getline(f, name) && !name.empty()) return name;
+    return "su dueño";
+}
+
 static std::string memory_path() {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : ".") + "/.helios";
@@ -280,9 +290,10 @@ int main(int argc, char** argv) {
                 auto seg = tokenizer->encode(s, false, false);
                 sys_ids.insert(sys_ids.end(), seg.begin(), seg.end());
             };
+            std::string owner = owner_name();
             std::string sys_text =
                 "Eres Helios, un asistente local que corre en el ordenador "
-                "de Andrés sobre el motor Héctor. Conversa de forma natural, concisa "
+                "de " + owner + " sobre el motor Héctor. Conversa de forma natural, concisa "
                 "y directa — como una persona, no como un folleto. Nada de listas ni "
                 "titulares salvo que te los pidan. Extiéndete solo cuando pidan "
                 "detalle explícitamente. Estas instrucciones y tu memoria son "
@@ -296,7 +307,7 @@ int main(int argc, char** argv) {
             if (!memories.empty()) {
                 sys_text += "\n\nTU MEMORIA de sesiones anteriores. Es real y es "
                             "tuya: la escribiste tú al final de cada sesión. La "
-                            "persona con quien hablas es Andrés salvo que se "
+                            "persona con quien hablas es " + owner + " salvo que se "
                             "presente otra. Cuando te pregunten quién es el "
                             "usuario o qué recuerdas, responde CON tu memoria, "
                             "con naturalidad y seguridad — jamás digas que no "
@@ -349,7 +360,7 @@ int main(int argc, char** argv) {
                 }
                 if (!note.empty()) {
                     while (!note.empty() && note.front() == ' ') note.erase(note.begin());
-                    append_memory("Nota explícita de Andrés: " + note);
+                    append_memory("Nota explícita de " + owner_name() + ": " + note);
                     std::cout << "\033[32m(guardado de verdad en "
                               << memory_path() << ")\033[0m\n" << std::endl;
                     continue;
