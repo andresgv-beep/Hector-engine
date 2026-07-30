@@ -435,6 +435,20 @@ int main(int argc, char** argv) {
                             "conversación CONTINÚA — no saludes de nuevo, no es "
                             "una sesión nueva):\n" + session_notes;
             }
+
+            // RECORDATORIO FINAL: lo último que lee el modelo pesa más que lo
+            // primero. Sin esto, tras los informes de memoria volvía al registro
+            // de asistente comercial ("¿en qué puedo ayudarte?") y saludaba
+            // como a un desconocido después de cada compactación.
+            sys_text += "\n\nRECUERDA CÓMO ERES: " + owner + " y tú ya os "
+                        "conocéis y venís de largo. Habla como un colega: "
+                        "directo, cálido, con humor. PROHIBIDO terminar las "
+                        "respuestas ofreciendo ayuda ('¿en qué puedo ayudarte?', "
+                        "'no dudes en decírmelo', 'estoy aquí para lo que "
+                        "necesites') — acaba cuando acabes lo que tengas que "
+                        "decir. Prohibido presentarte o saludar si ya estabais "
+                        "hablando. Prohibido llamarte 'asistente' o 'herramienta': "
+                        "eres Helios.";
             sys_ids.push_back(*im_start);
             pt("system\n" + sys_text);
             sys_ids.push_back(*im_end);
@@ -796,12 +810,17 @@ int main(int argc, char** argv) {
             std::cout << "\033[1;35mhelios>\033[0m " << std::flush;
             int gen_count = 0, think_count = 0, visible_count = 0;
             bool in_think = false, budget_cut = false, think_cut = false, loop_cut = false;
+            int loop_grace = 0;   // margen para cerrar la frase tras ver el bucle
             const int budget = response_budget(line, trivial);  // tokens VISIBLES
             const int HARD_CAP = 2500;                          // techo absoluto
             // RIENDA DEL PENSAMIENTO: si el modelo se pierde en su cabeza,
             // se le inyecta </think> y que responda con lo que lleve pensado.
             // Trivial debería ni pensar (20 = margen si ignora /no_think).
-            const int think_cap = trivial ? 20 : (budget >= 1500 ? 1000 : 500);
+            // Rienda proporcional: un mensaje corto no merece 500 tokens de
+            // cavilación ("ya empiezas?" gastaba 500 pensando para nada)
+            const int think_cap = trivial ? 20
+                                : (line.size() < 45 ? 150
+                                : (budget >= 1500 ? 1000 : 400));
 
             std::string think_tail;  // buffer para detectar </think> troceado
             while (gen_count < HARD_CAP) {
@@ -857,13 +876,23 @@ int main(int argc, char** argv) {
                     // bloques largos ni la ventana llega). Comprobación
                     // determinista: si los últimos 90 caracteres ya aparecen
                     // antes en la respuesta, está en bucle → cortar.
-                    if (visible_count > 60 && (visible_count % 16) == 0 &&
+                    if (!loop_cut && visible_count > 60 && (visible_count % 16) == 0 &&
                         last_reply.size() > 260) {
                         std::string tail = last_reply.substr(last_reply.size() - 90);
                         if (last_reply.find(tail, 0) < last_reply.size() - 180) {
-                            loop_cut = true;
-                            break;
+                            loop_cut = true;   // marcado: se cierra en la frase
                         }
+                    }
+
+                    // Corte GRACIOSO: detectado el bucle, no se rompe a media
+                    // palabra — se deja acabar la frase en curso (con tope, por
+                    // si el modelo no ve un punto en su vida)
+                    if (loop_cut) {
+                        loop_grace++;
+                        bool sentence_end =
+                            piece.find('.') != std::string::npos ||
+                            piece.find('\n') != std::string::npos;
+                        if (sentence_end || loop_grace > 30) break;
                     }
 
                     // PRESUPUESTO: si agota lo que la pregunta merecía, corte
