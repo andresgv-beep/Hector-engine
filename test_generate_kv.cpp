@@ -42,13 +42,27 @@ void register_kv_cache(Engine& engine, KVCache& cache, const std::string& prefix
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <model.hnf> [max_tokens] [temperature]" << std::endl;
+        std::cerr << "Usage: " << argv[0] << " <model.hnf> [prompt] [max_tokens] [temperature]" << std::endl;
+        std::cerr << "   or: " << argv[0] << " <model.hnf> [max_tokens] [temperature]  (sin prompt)" << std::endl;
         return 1;
     }
-    
+
     std::string hnf_path = argv[1];
-    int max_tokens = argc > 2 ? std::atoi(argv[2]) : 20;
-    float temperature = argc > 3 ? std::atof(argv[3]) : 0.0f;
+
+    // argv[2] puede ser prompt (texto) o max_tokens (número) — se detecta
+    std::string prompt;
+    int arg_idx = 2;
+    if (argc > 2) {
+        char* endp = nullptr;
+        long v = strtol(argv[2], &endp, 10);
+        (void)v;
+        if (endp && *endp != '\0') {
+            prompt = argv[2];   // no es número puro → es prompt
+            arg_idx = 3;
+        }
+    }
+    int max_tokens = argc > arg_idx ? std::atoi(argv[arg_idx]) : 100;
+    float temperature = argc > arg_idx + 1 ? std::atof(argv[arg_idx + 1]) : 0.0f;
     
     std::cout << "============================================" << std::endl;
     std::cout << "HELIOS Text Generation (with KV Cache)" << std::endl;
@@ -120,15 +134,31 @@ int main(int argc, char** argv) {
         
         engine.tensors().allocate_and_register("input_tokens", {1, 1}, dtype::INT32());
         
-        // 5. Generate with KV cache
+        // 5. Tokenizer embebido en el HNF: prompt y salida en texto
+        const HTFTokenizer* tokenizer = loader.tokenizer("text");
+
+        std::vector<int32_t> prompt_ids;
+        if (!prompt.empty() && tokenizer) {
+            prompt_ids = tokenizer->encode(prompt, false, false);
+            std::cout << "  Prompt: " << prompt_ids.size() << " tokens" << std::endl;
+        }
+        if (prompt_ids.empty()) prompt_ids.push_back(1);  // arranque clásico sin prompt
+
+        int32_t eos_id = tokenizer ? tokenizer->eos_token_id().value_or(151645) : 151645;
+
         std::cout << "\n>>> Generating with KV cache..." << std::endl;
-        std::cout << "Tokens: ";
-        
+        if (!prompt.empty()) {
+            std::cout << "\033[36m" << prompt << "\033[0m" << std::flush;  // prompt en cyan
+        }
+
         std::vector<int32_t> generated;
-        int32_t current_token = 1;  // Start token
-        generated.push_back(current_token);
-        
+        size_t prompt_pos = 0;
+        int32_t current_token = prompt_ids[0];
+        int gen_count = 0;
+
         auto start_time = std::chrono::high_resolution_clock::now();
+        auto gen_start = start_time;
+        int total_steps = (int)prompt_ids.size() - 1 + max_tokens;
         
         // HEXOS bridge: si el monitor está corriendo, publicar telemetría
         // de inferencia al blackboard (/dev/shm/hexos_state). No-op si no.
@@ -148,7 +178,7 @@ int main(int argc, char** argv) {
         CommandBuffer cb;
         bool cb_built = false;
 
-        for (int step = 0; step < max_tokens; step++) {
+        for (int step = 0; step < total_steps; step++) {
             // Copy token
             auto* input_info = engine.tensors().get("input_tokens");
             cudaMemcpy(input_info->ptr, &current_token, sizeof(int32_t),
@@ -186,11 +216,7 @@ int main(int argc, char** argv) {
                 stream
             );
             
-            std::cout << next_token << " " << std::flush;
-            generated.push_back(next_token);
-            current_token = next_token;
-
-            // Telemetría HEXOS: throughput instantáneo por token
+            // Telemetría HEXOS: throughput instantáneo por forward
             if (hexos.connected()) {
                 auto now_t = std::chrono::high_resolution_clock::now();
                 float dt = std::chrono::duration<float>(now_t - hexos_last).count();
@@ -200,9 +226,29 @@ int main(int argc, char** argv) {
                     hexos.update_inference(1.0f / dt, hexos_total_tokens, true);
                 }
             }
-            
-            if (next_token == 2 || next_token == 151643) {
-                std::cout << "[EOS]";
+
+            // ¿Seguimos consumiendo el prompt? (prefill token a token)
+            if (prompt_pos + 1 < prompt_ids.size()) {
+                prompt_pos++;
+                current_token = prompt_ids[prompt_pos];
+                if (prompt_pos + 1 == prompt_ids.size()) {
+                    gen_start = std::chrono::high_resolution_clock::now();
+                }
+                continue;
+            }
+
+            // Token generado: texto si hay tokenizer, id crudo si no
+            if (tokenizer) {
+                std::cout << tokenizer->decode({next_token}) << std::flush;
+            } else {
+                std::cout << next_token << " " << std::flush;
+            }
+            generated.push_back(next_token);
+            gen_count++;
+            current_token = next_token;
+
+            if (next_token == eos_id || next_token == 151643 || next_token == 2) {
+                std::cout << " [EOS]";
                 break;
             }
         }
@@ -215,11 +261,17 @@ int main(int argc, char** argv) {
         
         std::cout << std::endl << std::endl;
         
-        int tokens_generated = generated.size() - 1;
-        float tokens_per_sec = tokens_generated > 0 ? tokens_generated * 1000.0f / duration.count() : 0;
-        
+        auto gen_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            end_time - gen_start).count();
+        auto prefill_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            gen_start - start_time).count();
+        float tokens_per_sec = (gen_count > 0 && gen_ms > 0)
+            ? gen_count * 1000.0f / gen_ms : 0;
+
         std::cout << "============================================" << std::endl;
-        std::cout << "Tokens: " << tokens_generated << std::endl;
+        std::cout << "Prompt: " << prompt_ids.size() << " tokens ("
+                  << prefill_ms << " ms)" << std::endl;
+        std::cout << "Tokens: " << gen_count << std::endl;
         std::cout << "Time: " << duration.count() << " ms" << std::endl;
         std::cout << "Speed: " << tokens_per_sec << " tok/s" << std::endl;
         std::cout << "============================================" << std::endl;
