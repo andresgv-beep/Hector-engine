@@ -573,6 +573,141 @@ __global__ void rope_kernel_dp(
 }
 
 // ============================================================================
+// PREFILL ATTENTION SOBRE CACHE
+// ============================================================================
+// Q = S_new posiciones nuevas; K/V se leen del CACHE [0 .. P+q_idx], causal.
+// Reemplaza al kernel naive (un thread por elemento, 3 pasadas, redundancia
+// ~384×) y corrige el prefill multi-turno: las posiciones nuevas atienden a
+// TODA la historia, no solo al turno actual.
+//
+// Un bloque (4 warps) por (query, head) — misma estructura probada del decode:
+// Q en registros, cada warp procesa un tramo de posiciones con online softmax,
+// merge en shared. Requiere kv_cache_update ANTES (el cache ya contiene las
+// posiciones nuevas).
+
+__global__ void attention_prefill_cached_kernel(
+    const half* __restrict__ Q,          // [S_new, heads, head_dim]
+    const half* __restrict__ K_cache,    // [max_seq, kv_heads, head_dim]
+    const half* __restrict__ V_cache,
+    half* __restrict__ output,           // [S_new, heads, head_dim]
+    int seq_new,
+    int past_len,                        // posiciones ya en cache antes del turno
+    int num_heads,
+    int num_kv_heads,
+    int head_dim,
+    int max_seq_len,
+    float scale
+) {
+    const int q_idx = blockIdx.x;        // 0..seq_new-1
+    const int h = blockIdx.y;            // 0..num_heads-1
+    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int lane = threadIdx.x % WARP_SIZE;
+    if (q_idx >= seq_new || h >= num_heads) return;
+
+    const int kv_h = (num_kv_heads == num_heads) ? h : (h / (num_heads / num_kv_heads));
+    const int total_kv = past_len + q_idx + 1;   // causal: hasta mi posición
+
+    const int q_base = (q_idx * num_heads + h) * head_dim;
+    float q_reg[MAX_HD_PER_THREAD];
+    #pragma unroll
+    for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+        int d = lane + i * WARP_SIZE;
+        q_reg[i] = (d < head_dim) ? __half2float(Q[q_base + d]) : 0.0f;
+    }
+
+    const int kv_head_offset = kv_h * head_dim;
+    const int chunk = (total_kv + ATTN_WARPS - 1) / ATTN_WARPS;
+    const int pos_start = warp_id * chunk;
+    const int pos_end = min(pos_start + chunk, total_kv);
+
+    float running_max = -1e10f;
+    float running_sum = 0.0f;
+    float acc[MAX_HD_PER_THREAD];
+    #pragma unroll
+    for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] = 0.0f;
+
+    for (int pos = pos_start; pos < pos_end; pos++) {
+        const int kv_base = pos * num_kv_heads * head_dim + kv_head_offset;
+
+        float dot = 0.0f;
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+            int d = lane + i * WARP_SIZE;
+            if (d < head_dim) dot += q_reg[i] * __half2float(K_cache[kv_base + d]);
+        }
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset >>= 1)
+            dot += __shfl_down_sync(0xFFFFFFFF, dot, offset);
+        float score = __shfl_sync(0xFFFFFFFF, dot, 0) * scale;
+
+        float new_max = fmaxf(running_max, score);
+        float exp_score = expf(score - new_max);
+        float correction = expf(running_max - new_max);
+        running_sum = running_sum * correction + exp_score;
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] *= correction;
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+            int d = lane + i * WARP_SIZE;
+            if (d < head_dim) acc[i] += exp_score * __half2float(V_cache[kv_base + d]);
+        }
+        running_max = new_max;
+    }
+
+    // Merge de los 4 warps (idéntico al decode v2)
+    extern __shared__ float s_pf[];
+    float* s_max = s_pf;
+    float* s_sum = s_max + ATTN_WARPS;
+    float* s_acc = s_sum + ATTN_WARPS;
+
+    if (lane == 0) { s_max[warp_id] = running_max; s_sum[warp_id] = running_sum; }
+    const int acc_stride = MAX_HD_PER_THREAD * WARP_SIZE;
+    #pragma unroll
+    for (int i = 0; i < MAX_HD_PER_THREAD; i++)
+        s_acc[warp_id * acc_stride + lane * MAX_HD_PER_THREAD + i] = acc[i];
+    __syncthreads();
+
+    if (warp_id == 0) {
+        float global_max = s_max[0];
+        for (int w = 1; w < ATTN_WARPS; w++) global_max = fmaxf(global_max, s_max[w]);
+
+        float merged_acc[MAX_HD_PER_THREAD];
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) merged_acc[i] = 0.0f;
+        float merged_sum = 0.0f;
+        for (int w = 0; w < ATTN_WARPS; w++) {
+            float correction = expf(s_max[w] - global_max);
+            merged_sum += s_sum[w] * correction;
+            #pragma unroll
+            for (int i = 0; i < MAX_HD_PER_THREAD; i++)
+                merged_acc[i] += s_acc[w * acc_stride + lane * MAX_HD_PER_THREAD + i] * correction;
+        }
+        float inv_sum = (merged_sum > 0.0f) ? (1.0f / merged_sum) : 0.0f;
+        const int out_base = (q_idx * num_heads + h) * head_dim;
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+            int d = lane + i * WARP_SIZE;
+            if (d < head_dim)
+                output[out_base + d] = __float2half(merged_acc[i] * inv_sum);
+        }
+    }
+}
+
+void launch_attention_prefill_cached_fp16(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    int seq_new, int past_len, int num_heads, int num_kv_heads,
+    int head_dim, int max_seq_len, float scale, cudaStream_t stream
+) {
+    dim3 grid(seq_new, num_heads);
+    size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
+    attention_prefill_cached_kernel<<<grid, ATTN_BLOCK, smem, stream>>>(
+        q, k_cache, v_cache, output,
+        seq_new, past_len, num_heads, num_kv_heads, head_dim,
+        max_seq_len, scale
+    );
+}
+
+// ============================================================================
 // QK-NORM + ROPE FUSED (Qwen3)
 // ============================================================================
 // Fusiona 4 kernels por capa (rmsnorm(q), rmsnorm(k), rope(q), rope(k)) en 1.

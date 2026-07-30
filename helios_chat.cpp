@@ -222,14 +222,18 @@ int main(int argc, char** argv) {
 
         GraphBuilder gb;
         auto arch = gb.detect_architecture(engine, "text");
-        gb.allocate_scratch(engine, model_config, arch, 1, 1);
+        // Scratch para prefill por lotes (hasta PREFILL_CHUNK tokens por forward)
+        const uint32_t PREFILL_CHUNK = 512;
+        gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
 
         Sampler sampler;
         SamplingConfig sample_config = temperature < 0.01f
             ? SamplingConfig::greedy()
             : SamplingConfig::creative(temperature, 50, 0.9f);
 
-        engine.tensors().allocate_and_register("input_tokens", {1, 1}, dtype::INT32());
+        // El MISMO tensor sirve a decode (1 token en la posición 0) y a prefill
+        // (S tokens) — el puntero no cambia jamás, que el graph capturado lo usa
+        engine.tensors().allocate_and_register("input_tokens", {1, PREFILL_CHUNK}, dtype::INT32());
 
         HexosBridge hexos;
         if (hexos.connect()) {
@@ -282,6 +286,39 @@ int main(int argc, char** argv) {
             return next;
         };
 
+        // PREFILL POR LOTES: S tokens en UN forward (kernel de atención sobre
+        // cache + dequant+GEMM). Devuelve el token muestreado tras el último.
+        auto forward_batch = [&](const std::vector<int32_t>& ids) -> int32_t {
+            int32_t next = 0;
+            size_t done = 0;
+            while (done < ids.size()) {
+                size_t n = std::min((size_t)PREFILL_CHUNK, ids.size() - done);
+                if (n == 1) { next = forward_one(ids[done]); done += 1; continue; }
+
+                auto* input_info = engine.tensors().get("input_tokens");
+                cudaMemcpy(input_info->ptr, ids.data() + done, n * sizeof(int32_t),
+                           cudaMemcpyHostToDevice);
+
+                uint32_t position = kv_cache.position();
+                auto pcb = gb.build_forward_cached(engine, model_config, arch,
+                                                   "input_tokens", 1, (uint32_t)n,
+                                                   kv_prefix, position,
+                                                   kv_config.max_seq_len);
+                engine.execute(pcb);
+                engine.sync();
+                kv_cache.advance((uint32_t)n);
+
+                auto* logits_info = gb.get_logits(engine);
+                const half* last_row = (const half*)logits_info->ptr +
+                                       (size_t)(n - 1) * model_config.vocab_size();
+                next = sampler.sample(last_row, model_config.vocab_size(),
+                                      sample_config, stream);
+                total_tokens += n;
+                done += n;
+            }
+            return next;
+        };
+
         // --- System prompt: identidad y estilo. Prefill ÚNICO — vive en el KV
         //     para toda la sesión (el prefijo permanente del que habla CK v4). ---
         {
@@ -319,7 +356,7 @@ int main(int argc, char** argv) {
             pt("system\n" + sys_text);
             sys_ids.push_back(*im_end);
             pt("\n");
-            for (int32_t t : sys_ids) (void)forward_one(t);
+            (void)forward_batch(sys_ids);
 
             if (!memories.empty()) {
                 int sessions = 0;
@@ -415,10 +452,7 @@ int main(int argc, char** argv) {
             push_text("assistant\n");
 
             auto t0 = std::chrono::high_resolution_clock::now();
-            int32_t next = 0;
-            for (size_t i = 0; i < turn_ids.size(); i++) {
-                next = forward_one(turn_ids[i]);
-            }
+            int32_t next = forward_batch(turn_ids);
             auto t_prefill = std::chrono::high_resolution_clock::now();
 
             // --- Generación con governor de ritmo y presupuesto dinámico ---
@@ -569,8 +603,7 @@ int main(int argc, char** argv) {
             d_ids.push_back(*im_start);
             pt2("assistant\n");
 
-            int32_t nx = 0;
-            for (int32_t t : d_ids) nx = forward_one(t);
+            int32_t nx = forward_batch(d_ids);
 
             std::string summary;
             bool dthink = false;

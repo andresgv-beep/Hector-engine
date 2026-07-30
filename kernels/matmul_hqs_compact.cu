@@ -17,6 +17,13 @@ namespace kernels {
 // Same configs as matmul_hqs.cu — must match
 constexpr int COMPACT_MAX_K_SHARED = 16384;
 
+// Batch (M>1): a partir de este M compensa dequant completo + cuBLAS GEMM
+// frente al bucle de M GEMVs (el dequant lee el peso UNA vez; el bucle M veces)
+constexpr int COMPACT_GEMM_THRESHOLD = 4;
+
+void launch_matmul_hq41k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
+void launch_matmul_hq51k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
+
 constexpr int CCA_WPR = 4, CCA_RPB = 4, CCA_BLOCK = CCA_WPR * CCA_RPB * 32;
 constexpr int CCB_WPR = 2, CCB_RPB = 8, CCB_BLOCK = CCB_WPR * CCB_RPB * 32;
 constexpr int CCC_WPR = 4, CCC_RPB = 1, CCC_BLOCK = CCC_WPR * CCC_RPB * 32;
@@ -351,6 +358,9 @@ void launch_matmul_hq41k(
             case 1: launch_hq41k_B(input, weights, output, K, N, stream); break;
             case 2: launch_hq41k_C(input, weights, output, K, N, stream); break;
         }
+    } else if (M >= COMPACT_GEMM_THRESHOLD) {
+        // Batch real: dequant una vez + tensor cores
+        launch_matmul_hq41k_cublas(input, weights, output, M, K, N, stream);
     } else {
         for (int m = 0; m < M; m++) {
             launch_matmul_hq41k(input + m * K, weights, output + m * N, 1, K, N, stream);
@@ -381,6 +391,9 @@ void launch_matmul_hq51k(
             case 1: launch_hq51k_B(input, weights, output, K, N, stream); break;
             case 2: launch_hq51k_C(input, weights, output, K, N, stream); break;
         }
+    } else if (M >= COMPACT_GEMM_THRESHOLD) {
+        // Batch real: dequant una vez + tensor cores
+        launch_matmul_hq51k_cublas(input, weights, output, M, K, N, stream);
     } else {
         for (int m = 0; m < M; m++) {
             launch_matmul_hq51k(input + m * K, weights, output + m * N, 1, K, N, stream);

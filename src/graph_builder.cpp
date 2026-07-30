@@ -22,6 +22,7 @@
 
 #include "graph_builder.hpp"
 #include <stdexcept>
+#include <cmath>
 #include <sstream>
 #include <iostream>
 
@@ -700,15 +701,27 @@ void GraphBuilder::build_attention_block(
         
         if (seq_len > 1) {
             // ============================================================
-            // PREFILL con cache: full attention primero, luego guardar en cache
+            // PREFILL con cache: cache primero, atención sobre TODO el cache
             // ============================================================
-            // attention_cached_kernel solo soporta seq_q=1 (decode).
-            // Para prefill usamos attention completa sobre Q/K/V actuales,
-            // y después copiamos K/V al cache para uso futuro en decode.
-            cb.add_attention(S("attn_out"), S("q"), S("k"), S("v"), H, KVH, HD, true,
-                            seq_len, seq_len);
+            // El orden importa: al escribir K/V nuevos al cache antes de la
+            // atención, cada query nueva atiende causalmente a la historia
+            // completa [0..past+q]. (El branch anterior atendía solo dentro
+            // del turno nuevo — incorrecto en multi-turno.)
             cb.add_kv_cache_update(k_cache, v_cache, S("k"), S("v"),
                                    cache->cache_position, cache->max_cache_len, KVH, HD, seq_len);
+            {
+                float scale = 1.0f / std::sqrt(static_cast<float>(HD));
+                auto pf_id = OpTypeRegistry::instance().get_id("attention_prefill_cached");
+                auto& c = cb.add_op(pf_id, S("attn_out"));
+                c.in({S("q"), k_cache, v_cache});
+                c.set("num_heads", H);
+                c.set("num_kv_heads", KVH);
+                c.set("head_dim", HD);
+                c.set("scale", scale);
+                c.set("seq_len", seq_len);
+                c.set("past_len", cache->cache_position);
+                c.set("max_seq_len", cache->max_cache_len);
+            }
         } else {
             // ============================================================
             // DECODE: update cache primero, luego cached attention

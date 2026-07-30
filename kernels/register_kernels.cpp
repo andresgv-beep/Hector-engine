@@ -735,6 +735,35 @@ void register_attention_kernels(Engine& engine) {
         }
     });
     
+    // ATTENTION_PREFILL_CACHED — S_new queries sobre el cache completo (causal)
+    {
+        auto prefill_id = OpTypeRegistry::Builder("attention_prefill_cached").build();
+        engine.register_kernel(prefill_id, [](ExecContext& ctx, const Command& cmd) {
+            TensorInfo* q = ctx.in(0);
+            TensorInfo* k_cache = ctx.in(1);
+            TensorInfo* v_cache = ctx.in(2);
+            TensorInfo* output = ctx.output;
+            if (!q || !k_cache || !v_cache || !output) {
+                throw std::runtime_error("ATTENTION_PREFILL_CACHED: missing tensors");
+            }
+
+            uint32_t num_heads = cmd.get<uint32_t>("num_heads", 32);
+            uint32_t num_kv_heads = cmd.get<uint32_t>("num_kv_heads", num_heads);
+            uint32_t head_dim = cmd.get<uint32_t>("head_dim", 128);
+            float scale = cmd.get<float>("scale", 1.0f / std::sqrt(float(head_dim)));
+            uint32_t seq_new = cmd.get<uint32_t>("seq_len", 1);
+            uint32_t past_len = cmd.get<uint32_t>("past_len", 0);
+            uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
+
+            launch_attention_prefill_cached_fp16(
+                as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
+                as_fp16(output),
+                (int)seq_new, (int)past_len,
+                (int)num_heads, (int)num_kv_heads, (int)head_dim,
+                (int)max_seq_len, scale, ctx.stream);
+        });
+    }
+
     // KV_CACHE_UPDATE - Update KV cache with new K/V
     engine.register_kernel(op::KV_CACHE_UPDATE(), [&engine](ExecContext& ctx, const Command& cmd) {
         TensorInfo* k_new = ctx.in(0);

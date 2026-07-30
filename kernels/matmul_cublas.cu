@@ -63,8 +63,8 @@ __global__ void dequant_hq4k_kernel(
 ) {
     using namespace hqs;
     
-    const int row = blockIdx.y;
-    const int group_global = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
+    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
     
     const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
     const int total_groups = num_superblocks * NUM_GROUPS;
@@ -111,8 +111,8 @@ __global__ void dequant_hq5k_kernel(
 ) {
     using namespace hqs;
     
-    const int row = blockIdx.y;
-    const int group_global = blockIdx.x * blockDim.x + threadIdx.x;
+    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
+    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
     
     const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
     const int total_groups = num_superblocks * NUM_GROUPS;
@@ -151,6 +151,94 @@ __global__ void dequant_hq5k_kernel(
 }
 
 // ============================================================================
+// DEQUANT KERNELS — HQ4.1K/HQ5.1K (header compacto de 40B) → FP16
+// ============================================================================
+
+__global__ void dequant_hq41k_kernel(
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+
+    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
+    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
+
+    const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
+    const int total_groups = num_superblocks * NUM_GROUPS;
+    if (row >= N || group_global >= total_groups) return;
+
+    const int sb = group_global / NUM_GROUPS;
+    const int group_in_sb = group_global % NUM_GROUPS;
+
+    const int sb_base_k = sb * SUPER_BLOCK_SIZE;
+    const uint8_t* block_ptr = weights +
+        ((size_t)row * num_superblocks + sb) * HQ41K_BLOCK_SIZE;
+
+    float min_f, scoeff;
+    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / HQ4K_Q_MAX);
+
+    const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(
+        block_ptr + COMPACT_HEADER_SIZE);
+    uint32_t packed = payload32[group_in_sb];
+
+    const int k_base = sb_base_k + group_in_sb * GROUP_SIZE;
+    half* out_ptr = output + (size_t)row * K + k_base;
+
+    #pragma unroll
+    for (int i = 0; i < 4; i++) {
+        uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
+        float w0 = fmaf(float((byte_val >> 4) & 0x0F), scoeff, min_f);
+        float w1 = fmaf(float(byte_val & 0x0F), scoeff, min_f);
+        const int k0 = k_base + i * 2;
+        if (k0 < K)     out_ptr[i * 2]     = __float2half(w0);
+        if (k0 + 1 < K) out_ptr[i * 2 + 1] = __float2half(w1);
+    }
+}
+
+__global__ void dequant_hq51k_kernel(
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+
+    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
+    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
+
+    const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
+    const int total_groups = num_superblocks * NUM_GROUPS;
+    if (row >= N || group_global >= total_groups) return;
+
+    const int sb = group_global / NUM_GROUPS;
+    const int group_in_sb = group_global % NUM_GROUPS;
+
+    const int sb_base_k = sb * SUPER_BLOCK_SIZE;
+    const uint8_t* block_ptr = weights +
+        ((size_t)row * num_superblocks + sb) * HQ51K_BLOCK_SIZE;
+
+    float min_f, scoeff;
+    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / HQ5K_Q_MAX);
+
+    const uint8_t* payload = block_ptr + COMPACT_HEADER_SIZE + group_in_sb * 5;
+    uint64_t bits = uint64_t(payload[0])
+                  | (uint64_t(payload[1]) << 8)
+                  | (uint64_t(payload[2]) << 16)
+                  | (uint64_t(payload[3]) << 24)
+                  | (uint64_t(payload[4]) << 32);
+
+    const int k_base = sb_base_k + group_in_sb * GROUP_SIZE;
+    half* out_ptr = output + (size_t)row * K + k_base;
+
+    #pragma unroll
+    for (int i = 0; i < 8; i++) {
+        float w = fmaf(float((bits >> (i * 5)) & 0x1F), scoeff, min_f);
+        const int k_idx = k_base + i;
+        if (k_idx < K) out_ptr[i] = __float2half(w);
+    }
+}
+
+// ============================================================================
 // LAUNCH: Dequant → cuBLAS
 // ============================================================================
 // 
@@ -180,7 +268,7 @@ void launch_matmul_hq4k_cublas(
     // Step 1: Dequant HQ4K → FP16 buffer
     const int num_superblocks = (K + 255) / 256;
     const int total_groups = num_superblocks * 32;
-    dim3 grid_dq((total_groups + 255) / 256, N);
+    dim3 grid_dq(N, (total_groups + 255) / 256);
     dim3 block_dq(256);
     dequant_hq4k_kernel<<<grid_dq, block_dq, 0, stream>>>(
         weights, g_dequant_buffer, K, N
@@ -216,7 +304,7 @@ void launch_matmul_hq5k_cublas(
     
     const int num_superblocks = (K + 255) / 256;
     const int total_groups = num_superblocks * 32;
-    dim3 grid_dq((total_groups + 255) / 256, N);
+    dim3 grid_dq(N, (total_groups + 255) / 256);
     dim3 block_dq(256);
     dequant_hq5k_kernel<<<grid_dq, block_dq, 0, stream>>>(
         weights, g_dequant_buffer, K, N
@@ -225,6 +313,68 @@ void launch_matmul_hq5k_cublas(
     __half alpha_h = __float2half(1.0f);
     __half beta_h = __float2half(0.0f);
     
+    cublasHgemm(g_cublas_handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K,
+        &alpha_h,
+        g_dequant_buffer, K,
+        input, K,
+        &beta_h,
+        output, N
+    );
+}
+
+void launch_matmul_hq41k_cublas(
+    const half* input,
+    const uint8_t* weights,
+    half* output,
+    int M, int K, int N,
+    cudaStream_t stream
+) {
+    ensure_cublas();
+    cublasSetStream(g_cublas_handle, stream);
+    ensure_dequant_buffer((size_t)N * K, stream);
+
+    const int num_superblocks = (K + 255) / 256;
+    const int total_groups = num_superblocks * 32;
+    dim3 grid_dq(N, (total_groups + 255) / 256);
+    dequant_hq41k_kernel<<<grid_dq, 256, 0, stream>>>(
+        weights, g_dequant_buffer, K, N
+    );
+
+    __half alpha_h = __float2half(1.0f);
+    __half beta_h = __float2half(0.0f);
+    cublasHgemm(g_cublas_handle,
+        CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K,
+        &alpha_h,
+        g_dequant_buffer, K,
+        input, K,
+        &beta_h,
+        output, N
+    );
+}
+
+void launch_matmul_hq51k_cublas(
+    const half* input,
+    const uint8_t* weights,
+    half* output,
+    int M, int K, int N,
+    cudaStream_t stream
+) {
+    ensure_cublas();
+    cublasSetStream(g_cublas_handle, stream);
+    ensure_dequant_buffer((size_t)N * K, stream);
+
+    const int num_superblocks = (K + 255) / 256;
+    const int total_groups = num_superblocks * 32;
+    dim3 grid_dq(N, (total_groups + 255) / 256);
+    dequant_hq51k_kernel<<<grid_dq, 256, 0, stream>>>(
+        weights, g_dequant_buffer, K, N
+    );
+
+    __half alpha_h = __float2half(1.0f);
+    __half beta_h = __float2half(0.0f);
     cublasHgemm(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
