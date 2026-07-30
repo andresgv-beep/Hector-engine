@@ -39,6 +39,19 @@
 #include <algorithm>
 #include <ctime>
 #include <sys/stat.h>
+#include <sys/select.h>
+#include <unistd.h>
+
+// ¿Hay más datos esperando en stdin? (para detectar pegotes multilínea)
+static bool stdin_ready(int timeout_ms) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(0, &fds);
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    return select(1, &fds, nullptr, nullptr, &tv) > 0;
+}
 
 using namespace helios;
 
@@ -370,12 +383,41 @@ int main(int argc, char** argv) {
         std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
+        const bool interactive = isatty(0);
         std::string line;
+        std::string pending_cmd;   // comando que llegó pegado tras un texto
         while (true) {
             // --- Turno del usuario ---
-            std::cout << "\033[1;36mtú>\033[0m " << std::flush;
-            if (!std::getline(std::cin, line)) break;
+            if (!pending_cmd.empty()) {
+                line = pending_cmd;
+                pending_cmd.clear();
+            } else {
+                std::cout << "\033[1;36mtú>\033[0m " << std::flush;
+                if (!std::getline(std::cin, line)) break;
+            }
             if (line.empty()) continue;
+
+            // DETECCIÓN DE PEGADO (solo terminal interactivo): si ya hay más
+            // líneas esperando en stdin, es un pegote — nadie teclea así de
+            // rápido. Se juntan en UN mensaje en vez de un turno por línea.
+            if (interactive && line[0] != '/' && stdin_ready(60)) {
+                int joined = 0;
+                while (stdin_ready(120)) {
+                    std::string more;
+                    if (!std::getline(std::cin, more)) break;
+                    if (!more.empty() && more[0] == '/') { pending_cmd = more; break; }
+                    line += "\n" + more;
+                    joined++;
+                    if (line.size() > 9000) {
+                        std::cout << "\033[33m(pegote truncado a 9000 caracteres)\033[0m\n";
+                        break;
+                    }
+                }
+                if (joined > 0) {
+                    std::cout << "\033[32m(pegado detectado: " << (joined + 1)
+                              << " líneas unidas en un solo mensaje)\033[0m\n";
+                }
+            }
             if (line == "/salir" || line == "/exit") break;
             if (line == "/fast") {
                 fast_mode = !fast_mode;
