@@ -318,7 +318,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::cout << "\nComandos: /fast (velocidad plena on/off), /salir" << std::endl;
+        std::cout << "\nComandos: /fast · /memoria (ver diario) · /recuerda <nota> · /salir" << std::endl;
+        std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
         std::string line;
@@ -331,6 +332,41 @@ int main(int argc, char** argv) {
             if (line == "/fast") {
                 fast_mode = !fast_mode;
                 std::cout << "(velocidad " << (fast_mode ? "PLENA" : "tranquila") << ")\n";
+                continue;
+            }
+
+            // MEMORIA EXPLÍCITA — determinista, sin teatro del modelo:
+            // "/recuerda X" o "guarda en memoria: X" escriben directo a disco.
+            {
+                std::string note;
+                if (line.rfind("/recuerda ", 0) == 0) {
+                    note = line.substr(10);
+                } else {
+                    std::string lower = line;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                    size_t p = lower.find("guarda en memoria:");
+                    if (p != std::string::npos) note = line.substr(p + 18);
+                }
+                if (!note.empty()) {
+                    while (!note.empty() && note.front() == ' ') note.erase(note.begin());
+                    append_memory("Nota explícita de Andrés: " + note);
+                    std::cout << "\033[32m(guardado de verdad en "
+                              << memory_path() << ")\033[0m\n" << std::endl;
+                    continue;
+                }
+            }
+
+            // "/memoria" — enseñar el diario tal cual está en disco
+            if (line == "/memoria") {
+                std::ifstream mf(memory_path());
+                if (mf) {
+                    std::cout << "\033[90m--- " << memory_path() << " ---\033[0m\n";
+                    std::string ml;
+                    while (std::getline(mf, ml)) std::cout << ml << "\n";
+                    std::cout << "\033[90m--- fin ---\033[0m\n" << std::endl;
+                } else {
+                    std::cout << "(sin memoria todavía)\n" << std::endl;
+                }
                 continue;
             }
 
