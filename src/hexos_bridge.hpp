@@ -26,6 +26,10 @@ public:
     bool connect();
     bool connected() const { return state_ != nullptr; }
 
+    // Anuncia que el Cognitive Kernel (orquestador: presupuestos, rienda de
+    // thinking, governor) está activo en este proceso
+    void announce_cognitive();
+
     // Métricas de inferencia (throughput actual, tokens acumulados)
     void update_inference(float tokens_per_sec, uint64_t total_tokens, bool running);
 

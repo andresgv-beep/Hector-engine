@@ -22,7 +22,8 @@ namespace {
 
 constexpr uint32_t HEXOS_SHM_MAGIC   = 0x4845584F;  // "HEXO"
 constexpr uint32_t HEXOS_SHM_VERSION = 1;
-constexpr int      HEXOS_MODULE_INFERENCE = 4;      // hexos_module_id_t
+constexpr int      HEXOS_MODULE_COGNITIVE = 2;      // hexos_module_id_t
+constexpr int      HEXOS_MODULE_INFERENCE = 4;
 constexpr const char* HEXOS_SHM_STATE = "/hexos_state";
 
 struct hexos_shared_state_t {
@@ -114,6 +115,13 @@ bool HexosBridge::connect() {
     return true;
 }
 
+void HexosBridge::announce_cognitive() {
+    if (!state_) return;
+    auto* st = static_cast<hexos_shared_state_t*>(state_);
+    __atomic_or_fetch(&st->modules_connected,
+                      1u << HEXOS_MODULE_COGNITIVE, __ATOMIC_RELAXED);
+}
+
 void HexosBridge::update_inference(float tokens_per_sec, uint64_t total_tokens,
                                    bool running) {
     if (!state_) return;
@@ -142,7 +150,8 @@ void HexosBridge::disconnect() {
     st->cognitive.state = 0;
     st->cognitive.tokens_per_sec = 0.0f;
     __atomic_and_fetch(&st->modules_connected,
-                       ~(1u << HEXOS_MODULE_INFERENCE), __ATOMIC_RELAXED);
+                       ~((1u << HEXOS_MODULE_INFERENCE) |
+                         (1u << HEXOS_MODULE_COGNITIVE)), __ATOMIC_RELAXED);
     munmap(state_, sizeof(hexos_shared_state_t));
     close(fd_);
     state_ = nullptr;

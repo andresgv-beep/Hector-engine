@@ -184,6 +184,8 @@ int main(int argc, char** argv) {
             std::cout << ">>> HEXOS conectado — telemetría activa" << std::endl;
             hexos.update_vram_budgets(3400,
                 (uint32_t)(kv_config.total_bytes() / 1024 / 1024), 0);
+            // El proto-CK (presupuestos, rienda, governor) vive aquí
+            hexos.announce_cognitive();
         }
 
         // --- Estado del chat ---
