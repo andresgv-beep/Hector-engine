@@ -263,6 +263,7 @@ int main(int argc, char** argv) {
         uint64_t total_tokens = 0;
         int user_turns = 0;
         bool fast_mode = false;
+        std::string last_user_msg, last_reply;  // para el puente de compactación
         const float SPEAK_PACE_TOKS = 18.0f;   // ritmo de lectura humana
         auto hexos_last = std::chrono::high_resolution_clock::now();
 
@@ -332,9 +333,11 @@ int main(int argc, char** argv) {
             return next;
         };
 
-        // --- System prompt: identidad y estilo. Prefill ÚNICO — vive en el KV
-        //     para toda la sesión (el prefijo permanente del que habla CK v4). ---
-        {
+        // --- Prefijo de sesión: identidad + memoria (+ notas de compactación).
+        // Se prefillea al arrancar Y tras cada compactación en caliente. ---
+        auto prefill_prefix = [&](const std::string& session_notes,
+                                  const std::string& last_exchange,
+                                  bool announce) {
             std::vector<int32_t> sys_ids;
             auto pt = [&](const std::string& s) {
                 auto seg = tokenizer->encode(s, false, false);
@@ -364,6 +367,15 @@ int main(int argc, char** argv) {
                             "tienes acceso a información personal: la tienes, "
                             "está aquí:\n" + memories;
             }
+            // COMPACTACIÓN: la sesión en curso continúa tras el reset del KV
+            if (!session_notes.empty()) {
+                sys_text += "\n\nLo que llevas hablado en ESTA MISMA sesión (la "
+                            "conversación CONTINÚA — no saludes de nuevo, no es "
+                            "una sesión nueva):\n" + session_notes;
+            }
+            if (!last_exchange.empty()) {
+                sys_text += "\n\nÚltimo intercambio literal:\n" + last_exchange;
+            }
 
             sys_ids.push_back(*im_start);
             pt("system\n" + sys_text);
@@ -371,13 +383,59 @@ int main(int argc, char** argv) {
             pt("\n");
             (void)forward_batch(sys_ids);
 
-            if (!memories.empty()) {
+            if (announce && !memories.empty()) {
                 int sessions = 0;
                 for (size_t p = 0; (p = memories.find("## Sesión", p)) != std::string::npos; p += 9) sessions++;
                 std::cout << ">>> Memoria episódica: " << sessions
                           << " sesión(es) recordadas" << std::endl;
             }
-        }
+        };
+
+        prefill_prefix("", "", true);
+
+        // --- Destilación de lo hablado — compartida por la compactación en
+        // caliente y por la despedida ---
+        auto distill_session = [&]() -> std::string {
+            if (kv_cache.position() + 400 >= kv_config.max_seq_len) return "";
+
+            std::vector<int32_t> d_ids;
+            auto pt2 = [&](const std::string& s) {
+                auto seg = tokenizer->encode(s, false, false);
+                d_ids.insert(d_ids.end(), seg.begin(), seg.end());
+            };
+            d_ids.push_back(*im_start);
+            pt2("user\nResume en 3 a 6 frases lo esencial de esta conversación "
+                "para tu memoria — quién es el usuario, datos que te dio, "
+                "decisiones y temas tratados. Si te pidieron recordar algún "
+                "dato concreto (claves, nombres, números), inclúyelo LITERAL. "
+                "Solo el resumen, sin saludos ni despedidas. /no_think");
+            d_ids.push_back(*im_end);
+            pt2("\n");
+            d_ids.push_back(*im_start);
+            pt2("assistant\n");
+
+            int32_t nx = forward_batch(d_ids);
+
+            std::string summary;
+            bool dthink = false;
+            int dcount = 0;
+            while (dcount < 300) {
+                if (nx == eos_id || nx == *im_end) break;
+                std::string piece = tokenizer->decode({nx});
+                if ((think_open && nx == *think_open) ||
+                    piece.find("<think>") != std::string::npos) dthink = true;
+                if (!dthink) summary += piece;
+                if (dthink && ((think_close && nx == *think_close) ||
+                               piece.find("</think>") != std::string::npos)) dthink = false;
+                dcount++;
+                nx = forward_one(nx);
+                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
+            }
+            while (!summary.empty() &&
+                   (summary.front() == '\n' || summary.front() == ' '))
+                summary.erase(summary.begin());
+            return summary;
+        };
 
         std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /pegar · /salir" << std::endl;
         std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
@@ -425,24 +483,36 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            // MEMORIA EXPLÍCITA — determinista, sin teatro del modelo:
-            // "/recuerda X" o "guarda en memoria: X" escriben directo a disco.
+            // MEMORIA EXPLÍCITA — determinista, sin teatro del modelo.
+            // El instinto natural es la spec: cualquier fraseo de "recuerda"
+            // escribe a disco DE VERDAD. El comando /recuerda guarda en
+            // silencio; los fraseos naturales guardan Y siguen al modelo
+            // para que además lo reconozca conversacionalmente.
             {
                 std::string note;
+                bool silent = false;
                 if (line.rfind("/recuerda ", 0) == 0) {
                     note = line.substr(10);
+                    silent = true;
                 } else {
                     std::string lower = line;
                     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                    size_t p = lower.find("guarda en memoria:");
-                    if (p != std::string::npos) note = line.substr(p + 18);
+                    for (const char* pat : {"guarda en memoria:", "recuerda esto:",
+                                            "recuerda que ", "apunta esto:",
+                                            "no olvides que "}) {
+                        size_t p = lower.find(pat);
+                        if (p != std::string::npos) {
+                            note = line.substr(p + strlen(pat));
+                            break;
+                        }
+                    }
                 }
                 if (!note.empty()) {
                     while (!note.empty() && note.front() == ' ') note.erase(note.begin());
                     append_memory("Nota explícita de " + owner_name() + ": " + note);
-                    std::cout << "\033[32m(guardado de verdad en "
-                              << memory_path() << ")\033[0m\n" << std::endl;
-                    continue;
+                    std::cout << "\033[32m(apuntado en memoria de verdad)\033[0m\n";
+                    if (silent) { std::cout << std::endl; continue; }
+                    // fraseo natural: el turno sigue — el modelo también se entera
                 }
             }
 
@@ -505,12 +575,25 @@ int main(int argc, char** argv) {
                 continue;
             }
 
-            // Guardia de contexto (compactación = trabajo futuro del CK)
-            if (kv_cache.position() + 600 > kv_config.max_seq_len) {
-                std::cout << "\033[33m[contexto casi lleno — " << kv_cache.position()
-                          << "/" << kv_config.max_seq_len
-                          << ". La compactación llegará con el CK]\033[0m\n";
-                if (kv_cache.position() + 100 > kv_config.max_seq_len) break;
+            // COMPACTACIÓN EN CALIENTE: contexto lleno ya no mata la sesión.
+            // Se destila lo hablado, se resetea el KV, y se re-prefillea
+            // identidad + memoria + resumen de la propia sesión + último
+            // intercambio literal. La conversación respira. (~1-2 s)
+            if (kv_cache.position() + 1200 > kv_config.max_seq_len) {
+                std::cout << "\033[90m(reorganizando recuerdos..." << std::flush;
+                std::string notes = distill_session();
+                if (!notes.empty()) append_memory(notes);  // también al diario
+
+                kv_cache.reset();
+
+                std::string exch;
+                if (!last_user_msg.empty()) {
+                    exch = owner_name() + ": " + last_user_msg.substr(0, 400) +
+                           "\nHelios: " + last_reply.substr(0, 400);
+                }
+                prefill_prefix(notes, exch, false);
+                std::cout << " hecho — contexto " << kv_cache.position()
+                          << "/" << kv_config.max_seq_len << ")\033[0m" << std::endl;
             }
 
             // --- Thinking adaptativo (el usuario puede forzar con /think, /no_think) ---
@@ -524,6 +607,8 @@ int main(int argc, char** argv) {
             }
 
             user_turns++;
+            last_user_msg = user_msg;
+            last_reply.clear();
 
             // --- Prefill del turno (solo el texto NUEVO: la historia ya está en KV) ---
             std::vector<int32_t> turn_ids;
@@ -599,6 +684,7 @@ int main(int argc, char** argv) {
                     }
                 } else {
                     std::cout << piece << std::flush;
+                    last_reply += piece;
                     visible_count++;
 
                     // PRESUPUESTO: si agota lo que la pregunta merecía, corte
@@ -669,48 +755,11 @@ int main(int argc, char** argv) {
                       << "]\033[0m\n" << std::endl;
         }
 
-        // --- DESTILACIÓN: consolidar la sesión en memoria episódica ---
-        // El propio modelo resume lo vivido; se guarda con fecha en disco.
-        // (El "sueño" del CK v4, nivel 1: al cierre, sin coste percibido.)
-        if (user_turns > 0 && kv_cache.position() + 400 < kv_config.max_seq_len) {
+        // --- DESPEDIDA: consolidar la sesión en memoria episódica ---
+        // (mismo mecanismo que la compactación en caliente)
+        if (user_turns > 0) {
             std::cout << "\n\033[90m(consolidando memoria...\033[0m" << std::flush;
-
-            std::vector<int32_t> d_ids;
-            auto pt2 = [&](const std::string& s) {
-                auto seg = tokenizer->encode(s, false, false);
-                d_ids.insert(d_ids.end(), seg.begin(), seg.end());
-            };
-            d_ids.push_back(*im_start);
-            pt2("user\nAntes de despedirnos: escribe un resumen de 3 a 6 frases "
-                "con lo esencial de esta conversación para tu memoria — quién es "
-                "el usuario, datos que te dio, decisiones y temas tratados. Solo "
-                "el resumen, sin saludos ni despedidas. /no_think");
-            d_ids.push_back(*im_end);
-            pt2("\n");
-            d_ids.push_back(*im_start);
-            pt2("assistant\n");
-
-            int32_t nx = forward_batch(d_ids);
-
-            std::string summary;
-            bool dthink = false;
-            int dcount = 0;
-            while (dcount < 300) {
-                if (nx == eos_id || nx == *im_end) break;
-                std::string piece = tokenizer->decode({nx});
-                if ((think_open && nx == *think_open) ||
-                    piece.find("<think>") != std::string::npos) dthink = true;
-                if (!dthink) summary += piece;
-                if (dthink && ((think_close && nx == *think_close) ||
-                               piece.find("</think>") != std::string::npos)) dthink = false;
-                dcount++;
-                nx = forward_one(nx);
-                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
-            }
-            while (!summary.empty() &&
-                   (summary.front() == '\n' || summary.front() == ' '))
-                summary.erase(summary.begin());
-
+            std::string summary = distill_session();
             if (!summary.empty()) {
                 append_memory(summary);
                 std::cout << "\033[90m guardada)\033[0m" << std::endl;
