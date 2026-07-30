@@ -7,6 +7,7 @@
 #include "src/hnf_loader.hpp"
 #include "src/graph_builder.hpp"
 #include "src/sampler.hpp"
+#include "src/hexos_bridge.hpp"
 #include "src/kv_cache.hpp"
 #include "kernels/kernels.hpp"
 #include <iostream>
@@ -129,6 +130,19 @@ int main(int argc, char** argv) {
         
         auto start_time = std::chrono::high_resolution_clock::now();
         
+        // HEXOS bridge: si el monitor está corriendo, publicar telemetría
+        // de inferencia al blackboard (/dev/shm/hexos_state). No-op si no.
+        HexosBridge hexos;
+        if (hexos.connect()) {
+            std::cout << ">>> HEXOS detectado — publicando telemetria" << std::endl;
+            hexos.update_vram_budgets(
+                4096 /* aprox modelo MB; TODO: tamaño real del bloque */,
+                (uint32_t)(kv_config.total_bytes() / 1024 / 1024),
+                0);
+        }
+        uint64_t hexos_total_tokens = 0;
+        auto hexos_last = std::chrono::high_resolution_clock::now();
+
         // FASE 1: command buffer construido UNA vez; por token solo se actualiza
         // la posición en device (4 bytes async) y se relanza el CUDA Graph.
         CommandBuffer cb;
@@ -175,6 +189,17 @@ int main(int argc, char** argv) {
             std::cout << next_token << " " << std::flush;
             generated.push_back(next_token);
             current_token = next_token;
+
+            // Telemetría HEXOS: throughput instantáneo por token
+            if (hexos.connected()) {
+                auto now_t = std::chrono::high_resolution_clock::now();
+                float dt = std::chrono::duration<float>(now_t - hexos_last).count();
+                hexos_last = now_t;
+                hexos_total_tokens++;
+                if (dt > 0.0f) {
+                    hexos.update_inference(1.0f / dt, hexos_total_tokens, true);
+                }
+            }
             
             if (next_token == 2 || next_token == 151643) {
                 std::cout << "[EOS]";
@@ -184,6 +209,9 @@ int main(int argc, char** argv) {
         
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+
+        // Motor parado: dejar el blackboard limpio
+        hexos.update_inference(0.0f, hexos_total_tokens, false);
         
         std::cout << std::endl << std::endl;
         

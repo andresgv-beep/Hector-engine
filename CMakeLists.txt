@@ -65,6 +65,7 @@ set(ENGINE_SOURCES
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
+    src/hexos_bridge.cpp
 )
 
 # CUDA kernels
