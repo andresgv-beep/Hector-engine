@@ -366,7 +366,7 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::cout << "\nComandos: /fast · /memoria (ver diario) · /recuerda <nota> · /salir" << std::endl;
+        std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /salir" << std::endl;
         std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
@@ -402,6 +402,32 @@ int main(int argc, char** argv) {
                               << memory_path() << ")\033[0m\n" << std::endl;
                     continue;
                 }
+            }
+
+            // "/lee <archivo>" — ingesta de documentos: el contenido entra como
+            // turno del usuario (el prefill batch lo hace viable: ~1.5s/2000 tok)
+            if (line.rfind("/lee ", 0) == 0) {
+                std::string path = line.substr(5);
+                while (!path.empty() && path.front() == ' ') path.erase(path.begin());
+                std::ifstream df(path);
+                if (!df) {
+                    std::cout << "(no puedo abrir: " << path << ")\n" << std::endl;
+                    continue;
+                }
+                std::stringstream dss;
+                dss << df.rdbuf();
+                std::string doc = dss.str();
+                const size_t DOC_MAX = 9000;  // ~2300 tokens: margen en ctx 4096
+                if (doc.size() > DOC_MAX) {
+                    doc = doc.substr(0, DOC_MAX);
+                    std::cout << "\033[33m(documento truncado a " << DOC_MAX
+                              << " caracteres — la memoria semántica lo hará entero)\033[0m\n";
+                }
+                std::cout << "(leyendo " << path << ": " << doc.size()
+                          << " caracteres...)\n";
+                line = "Te paso un documento (" + path + "). Léelo y coméntame "
+                       "lo esencial:\n\n" + doc;
+                // sigue el flujo normal de turno con `line` como mensaje
             }
 
             // "/memoria" — enseñar el diario tal cual está en disco
