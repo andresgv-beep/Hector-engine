@@ -6,18 +6,19 @@ que 512 tokens"*. **Cumplido el 2026-07-31.**
 
 ## Qué es la referencia
 
-`tools/ref_gemma4.py` — implementación fp32 de Gemma 4 en numpy que lee el
+`tools/quant_bench/ref_gemma4.py` — implementación fp32 de Gemma 4 en numpy que lee el
 safetensors original de HuggingFace. **No comparte una línea de código con
 Héctor.** Las fórmulas están portadas de `modeling_gemma4.py` y
 `modeling_rope_utils.py` de transformers, que son la autoridad.
 
 Uso:
 
-    ref_gemma4.py <dir_modelo_hf> <tok1,tok2,...> <salida.bin>
-    gemma4_compare_logits.py <referencia.bin> <hector.bin>
+    tools/quant_bench/ref_gemma4.py <dir_modelo_hf> <tok1,tok2,...> <salida.bin>
+    tools/quant_bench/compare_logits.py <referencia.bin> <hector.bin>
 
-`gemma4_tokens600.txt` es la secuencia de 600 tokens (semilla 7) que cruza la
-ventana deslizante de 512.
+La secuencia de 600 tokens era pseudoaleatoria con semilla 7. Para repetirlo
+hoy, usar los corpus reales de `tools/quant_bench/` — el banco completo y las
+reglas de medida están documentados en su README.
 
 ## Resultado
 
