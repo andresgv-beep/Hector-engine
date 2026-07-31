@@ -21,6 +21,33 @@ Se descartaron dos métricas que engañan:
 KL y solapamiento top-k sí valen, pero el % de aciertos es el que se entiende
 sin traducción.
 
+## LO QUE ESTE BANCO NO VE — leer antes de decidir nada
+
+**El % de aciertos es un filtro, no un veredicto.** Mide fidelidad media en
+posiciones con *teacher forcing*: en cada paso se le devuelve el token correcto
+al modelo. Eso hace ciego el banco a tres cosas que sí matan un perfil:
+
+1. **Acumulación de error en generación libre.** Aquí cada posición parte de la
+   verdad; generando de verdad, los errores se arrastran.
+2. **Catástrofes de cola.** Un carácter chino cada 50 turnos es invisible en una
+   media del 83%, y sin embargo es inaceptable.
+3. **Comportamiento a largo plazo.** Bucles, pérdida de memoria contextual y
+   deriva de idioma aparecen a los cientos de tokens, no en una posición suelta.
+
+**Caso real (HQ3.1K, 2026-07-31):** el banco dio 83,0% y el simulador lo había
+predicho con 0,27 puntos de error — la medida era correcta. Pero la batería de
+conversaciones reales encontró mezcla de idiomas, UTF-8 inválido, tokens
+especiales visibles y los controles de memoria cayendo del 80% al 30%. El
+formato se rechazó como perfil de producción **después** de pasar este banco.
+
+El orden correcto es: **este banco criba, el A/B con sampling real decide.**
+Sirve para descartar barato (así murieron cuatro hipótesis de layout en una
+tarde), no para promover. Para lo segundo está `tools/hq31_ab.py`, que corre
+perfiles de usuario sintéticos con varias semillas y cuenta artefactos.
+
+**Umbral práctico:** por debajo de ~85% de aciertos, no molestarse en probar el
+A/B. Por encima, el A/B manda.
+
 ## Reglas de uso (aprendidas a base de equivocarse)
 
 1. **Dos corpus como mínimo, siempre.** Un efecto de +2,2 puntos con p=0,018 en
@@ -51,8 +78,15 @@ sin traducción.
 | `compare_logits.py` | Compara dos volcados de logits: error, correlación, KL, solapamiento top-k. |
 | `tok_codec.cpp` | Codificar/decodificar con el tokenizer del propio HNF. |
 
-**El simulador está calibrado**: predijo 87,5% para el perfil de 4 bits y el
-HNF real dio 88,0%. Medio punto. Por eso sus proyecciones son creíbles.
+**El simulador está calibrado**, con dos puntos de contraste contra HNF reales:
+
+| perfil | predicho | real | desvío |
+|---|---:|---:|---:|
+| todo 4 bits | 87,5% | 88,0% | +0,5 |
+| MLP 3b + attn 4b (HQ3.1K) | 83,29% | 83,02% | −0,27 |
+
+Sus proyecciones son creíbles **para esta métrica**. Que la métrica prediga el
+comportamiento en producción es otra cosa: ver la sección de arriba.
 
 ## Cómo se corre
 
@@ -79,8 +113,10 @@ HQS_QMLP=7 HQS_QATT=15 HQS_EMB=15 python3 tools/quant_bench/ref_qwen3.py ...
 
 Variables del simulador: `HQS_QMAX` (7=3 bits, 15=4, 31=5) para todas las
 capas, o `HQS_QMLP`/`HQS_QATT` por separado, más `HQS_EMB` para la tabla de
-embeddings. En `ref_gemma4.py`: `HQS_SIM=1` y `HQS_GROUP`/`HQS_SCALE_BITS`
-para variar el layout.
+embeddings. Para aislar el MLP, `HQS_QGATE`, `HQS_QUP` y `HQS_QDOWN`
+sobrescriben la familia correspondiente; `HQS_LAYER_START`/`HQS_LAYER_END`
+limitan esos overrides a un rango inclusivo de capas. En `ref_gemma4.py`:
+`HQS_SIM=1` y `HQS_GROUP`/`HQS_SCALE_BITS` para variar el layout.
 
 ## Resultados del 2026-07-31
 
@@ -129,12 +165,27 @@ local mejor de lo que parece.
 
 ## Siguiente jugada
 
-Detallada en `helios_convert_v9.1/HQ3_PROPUESTA.md`. Resumen del orden:
+**HQ3.1K ya está implementado y ya está descartado como perfil de producción
+para Qwen3-4B** (detalle en `helios_convert_v9.1/HQ3_PROPUESTA.md`). El encoder,
+el layout y el kernel son correctos y el ahorro es real, pero ninguna asignación
+probada sobrevive al A/B de conversación. No se tira: puede servir en otro
+modelo o en tensores concretos.
 
-1. **Cuantizar la tabla de embeddings** — gratis, sin código nuevo: +0,3 puntos
-   (p=0,55, sin diferencia medible) y −499 MB.
-2. **Confirmar la curva con el segundo corpus** antes de escribir el encoder.
-3. **HQ3.1K**: encoder en Rust (3 bits, 96 B de payload → 4,25 bpw) y kernel de
-   dequant en CUDA. Cabecera y superbloque sin cambios; el desempaquetado de 5
-   bits de `matmul_hqs_compact.cu` ya resuelve el cruce de frontera de byte.
-4. Repetir el banco en Qwen3-8B antes de afirmar nada en público.
+Lo que queda, por orden de relación beneficio/riesgo:
+
+1. **Tabla de embeddings a HQ5.1K.** Hoy va en fp16 (742 MB, 22% del fichero).
+   Pasarla a HQ5.1K ahorra **452 MB** y **el kernel ya existe y está en
+   producción**: Gemma 4 carga su tabla PLE en `hq51k` con
+   `launch_embedding_hq51k`. Es una decisión de mapper en el conversor, sin
+   tocar el motor.
+
+   HQ4.1K ahorraría 498 MB, solo 46 MB más, pero exige escribir
+   `launch_embedding_hq41k` desde cero. **Empezar por HQ5.1K**: el 91% del
+   ahorro, cero código nuevo y más bits de precisión.
+
+   Aviso: la medida de +0,3 puntos (p=0,55) se hizo simulando **HQ4.1K**. HQ5.1K
+   solo puede salir igual o mejor, pero conviene confirmarlo con el banco antes
+   de darlo por bueno, y pasar el A/B después.
+
+2. **Repetir el banco en Qwen3-8B** antes de afirmar nada en público. Todo lo
+   medido hasta ahora es un modelo de 4B.
