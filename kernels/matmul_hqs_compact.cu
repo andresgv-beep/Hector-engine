@@ -77,19 +77,13 @@ __global__ void gemv_hq41k_kernel(
         const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
             row_weights + (size_t)sb * HQ41K_BLOCK_SIZE);
 
-        // Staging cooperativo del bloque completo (coalescado)
-        s_blk[lane_id] = blk32[lane_id];
-        if (lane_id < BLK_WORDS - 32) s_blk[32 + lane_id] = blk32[32 + lane_id];
-        __syncwarp();
-
-        // Header compacto desde shared
-        uint32_t h0 = s_blk[0];  // d_scale | d_min (fp16 × 2)
-        uint32_t h1 = s_blk[1];  // min_base | pad
+        uint32_t h0 = blk32[0];
+        uint32_t h1 = blk32[1];
         float d_scale  = __half2float(__ushort_as_half(h0 & 0xFFFF));
         float d_min    = __half2float(__ushort_as_half(h0 >> 16));
         float min_base = __half2float(__ushort_as_half(h1 & 0xFFFF));
 
-        const uint8_t* sb8 = reinterpret_cast<const uint8_t*>(s_blk);
+        const uint8_t* sb8 = reinterpret_cast<const uint8_t*>(blk32);
         uint8_t s_packed = sb8[8 + (lane_id >> 1)];
         uint8_t q_s = (lane_id & 1) ? (s_packed & 0x0F) : (s_packed >> 4);
         uint8_t m_packed = sb8[24 + (lane_id >> 1)];
@@ -99,7 +93,7 @@ __global__ void gemv_hq41k_kernel(
         float min_f  = fmaf(d_min, float(q_m) * (1.0f / 15.0f), min_base);
 
         // Payload: word 10 + lane (bytes 40..168)
-        uint32_t packed = s_blk[10 + lane_id];
+        uint32_t packed = blk32[10 + lane_id];
         const int k_base = sb_base_k + lane_id * GROUP_SIZE;
         if (k_base + GROUP_SIZE <= K) {
             const half2* in2 = reinterpret_cast<const half2*>(s_input + k_base);
@@ -124,7 +118,6 @@ __global__ void gemv_hq41k_kernel(
                 if (k1 < K) acc = fmaf(w1, __half2float(s_input[k1]), acc);
             }
         }
-        __syncwarp();  // no pisar s_blk antes de que todos lean
     }
 
     #pragma unroll
