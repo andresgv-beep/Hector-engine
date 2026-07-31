@@ -177,6 +177,17 @@ public:
         uint32_t max_batch = 1,
         uint32_t max_seq = 1
     );
+
+    // Explicit Gemma 4 scratch. Per-layer aliases carry exact GM4X shapes
+    // while sharing max-sized backing allocations sequentially.
+    void allocate_gemma4_scratch(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t max_batch = 1,
+        uint32_t max_seq = 1
+    );
     
     void free_scratch(Engine& engine);
     
@@ -239,6 +250,43 @@ public:
         uint32_t seq_len,
         uint32_t position_offset = 0,
         const KVCacheParams* cache = nullptr
+    );
+
+    // Gemma 4 input path: scaled main embedding plus complete packed PLE.
+    CommandBuffer build_gemma4_input(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        const std::string& input_tokens,
+        uint32_t batch_size,
+        uint32_t seq_len
+    );
+
+    // One exact non-shared Gemma 4 layer. Local attention is valid here only
+    // while the supplied sequence does not exceed its sliding window; the
+    // long-context mask and shared KV semantics belong to Phase 6.
+    CommandBuffer build_gemma4_single_layer(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t batch_size,
+        uint32_t seq_len,
+        uint32_t position_offset = 0
+    );
+
+    // Attention-independent tail shared by normal and shared-KV layers. This
+    // permits validating double-wide MLP+PLE before Phase 6 supplies shared KV.
+    CommandBuffer build_gemma4_mlp_ple_tail(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t batch_size,
+        uint32_t seq_len
     );
     
     // ========================================================================
@@ -308,6 +356,15 @@ private:
         uint32_t batch_size,
         uint32_t seq_len
     );
+
+    void append_gemma4_mlp_ple_tail(
+        CommandBuffer& cb,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t seq_len
+    );
     
     // ========================================================================
     // ACTIVATION (polimórfico dispatch)
@@ -337,6 +394,9 @@ private:
                   const std::string& component) const;
     std::string WG(const ArchDescriptor& arch, const std::string& name) const;
     static std::string S(const std::string& name);
+    static std::string G4(uint32_t layer, const std::string& name);
+    void set_active_scratch_shape(Engine& engine, uint32_t batch_size,
+                                  uint32_t seq_len);
     
     // ========================================================================
     // STATE
@@ -346,6 +406,7 @@ private:
     uint32_t alloc_batch_ = 0;
     uint32_t alloc_seq_ = 0;
     std::vector<std::string> scratch_names_;
+    std::vector<std::string> scratch_view_names_;
     
     // Decode cache para CommandBuffer reuse
     CachedDecode cached_decode_;

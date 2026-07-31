@@ -91,6 +91,14 @@ void CommandBuffer::add_rmsnorm(const std::string& dst, const std::string& src,
     auto& command = add_op(op::RMSNORM(), dst).in({src, weight}).set("eps", eps);
     if (dim != 0) command.set("dim", dim);
 }
+
+void CommandBuffer::add_rmsnorm_no_weight(const std::string& dst,
+                                           const std::string& src,
+                                           float eps, uint32_t dim) {
+    auto& command = add_op(op::RMSNORM(), dst).in({src})
+        .set("eps", eps).set("no_weight", true);
+    if (dim != 0) command.set("dim", dim);
+}
 void CommandBuffer::add_add_rmsnorm(const std::string& residual_dst, const std::string& normed_dst,
                                      const std::string& a, const std::string& b,
                                      const std::string& weight, float eps) {
@@ -179,6 +187,14 @@ void CommandBuffer::add_dequant(const std::string& dst, const std::string& src,
 void CommandBuffer::add_embedding(const std::string& dst, const std::string& indices,
                                    const std::string& table) {
     add_op(op::EMBEDDING(), dst).in({indices, table});
+}
+
+void CommandBuffer::add_ple_slice(const std::string& dst,
+                                  const std::string& packed,
+                                  uint32_t layer, uint32_t layers,
+                                  uint32_t dim) {
+    add_op(op::PLE_SLICE(), dst).in({packed})
+        .set("layer", layer).set("layers", layers).set("dim", dim);
 }
 
 void CommandBuffer::add_concat(const std::string& dst,

@@ -21,6 +21,8 @@
 //
 
 #include "graph_builder.hpp"
+#include "gemma4_ple.hpp"
+#include <algorithm>
 #include <stdexcept>
 #include <cmath>
 #include <sstream>
@@ -43,6 +45,10 @@ std::string GraphBuilder::WG(const ArchDescriptor& arch, const std::string& name
 
 std::string GraphBuilder::S(const std::string& name) {
     return "_s." + name;
+}
+
+std::string GraphBuilder::G4(uint32_t layer, const std::string& name) {
+    return "_s.g4.layer" + std::to_string(layer) + "." + name;
 }
 
 // ============================================================================
@@ -103,7 +109,8 @@ void GraphBuilder::add_gated_activation(
 static ActivationType parse_activation(const std::string& s) {
     if (s == "silu" || s == "swish") return ActivationType::SILU;
     if (s == "gelu") return ActivationType::GELU;
-    if (s == "gelu_new" || s == "gelu_fast") return ActivationType::GELU_NEW;
+    if (s == "gelu_new" || s == "gelu_fast" ||
+        s == "gelu_pytorch_tanh") return ActivationType::GELU_NEW;
     if (s == "relu") return ActivationType::RELU;
     return ActivationType::SILU;  // Safe default
 }
@@ -170,7 +177,8 @@ ArchDescriptor GraphBuilder::detect_architecture(
     // Norm names
     if (engine.tensors().exists(L0 + "ln_attn_in.weight")) {
         arch.pre_attn_norm = "ln_attn_in";
-        arch.post_attn_norm = "ln_attn_out";
+        arch.post_attn_norm = engine.tensors().exists(L0 + "ln_attn_post.weight")
+            ? "ln_attn_post" : "ln_attn_out";
     } else if (engine.tensors().exists(L0 + "ln1.weight")) {
         arch.pre_attn_norm = "ln1";
         arch.post_attn_norm = "ln2";
@@ -370,7 +378,95 @@ void GraphBuilder::allocate_scratch(
     scratch_allocated_ = true;
 }
 
+void GraphBuilder::allocate_gemma4_scratch(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t max_batch,
+    uint32_t max_seq
+) {
+    if (scratch_allocated_) free_scratch(engine);
+    if (config.arch() != "gemma4" || gemma.layers.size() != arch.num_layers ||
+        arch.num_layers != config.num_hidden_layers()) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4/GM4X contract");
+    }
+    if (max_batch == 0 || max_seq == 0 || config.hidden_size() == 0 ||
+        gemma.ple_hidden_size == 0) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4 scratch dimensions");
+    }
+
+    alloc_batch_ = max_batch;
+    alloc_seq_ = max_seq;
+    const uint32_t B = max_batch;
+    const uint32_t L = max_seq;
+    const uint32_t D = config.hidden_size();
+    const uint32_t H = config.num_attention_heads();
+    const uint32_t KVH = config.num_key_value_heads();
+    const uint32_t V = config.vocab_size();
+    const uint32_t P = gemma.ple_hidden_size;
+    const uint32_t PW = P * arch.num_layers;
+
+    uint32_t max_hd = 0;
+    uint32_t max_intermediate = 0;
+    for (const Gemma4LayerConfig& layer : gemma.layers) {
+        max_hd = std::max(max_hd, layer.head_dim);
+        max_intermediate = std::max(max_intermediate, layer.intermediate_size);
+    }
+    if (max_hd == 0 || max_intermediate == 0) {
+        throw std::invalid_argument("GraphBuilder: zero-sized GM4X layer");
+    }
+
+    auto alloc = [&](const std::string& name, const std::vector<uint32_t>& shape) {
+        engine.tensors().allocate_and_register(name, shape, dtype::FP16());
+        scratch_names_.push_back(name);
+    };
+    auto view = [&](const std::string& name, const std::string& backing,
+                    const std::vector<uint32_t>& shape) {
+        engine.tensors().register_external(
+            name, engine.tensors().at(backing).ptr, shape, dtype::FP16());
+        scratch_view_names_.push_back(name);
+    };
+
+    alloc(S("hidden"), {B, L, D});
+    alloc(S("normed"), {B, L, D});
+    alloc(S("attn_proj"), {B, L, D});
+    alloc(S("mlp_out"), {B, L, D});
+    alloc(S("g4.ple_projected"), {B, L, D});
+
+    alloc(S("g4.q_backing"), {B, L, H * max_hd});
+    alloc(S("g4.k_backing"), {B, L, KVH * max_hd});
+    alloc(S("g4.v_backing"), {B, L, KVH * max_hd});
+    alloc(S("g4.attn_out_backing"), {B, L, H * max_hd});
+    alloc(S("g4.gate_backing"), {B, L, max_intermediate});
+    alloc(S("g4.up_backing"), {B, L, max_intermediate});
+    alloc(S("g4.mlp_h_backing"), {B, L, max_intermediate});
+
+    alloc(S("g4.ple"), {B, L, PW});
+    alloc(S("g4.ple_context"), {B, L, PW});
+    alloc(S("g4.ple_segment"), {B, L, P});
+    alloc(S("g4.ple_gate"), {B, L, P});
+    alloc(S("logits"), {B, 1, V});
+
+    for (uint32_t i = 0; i < arch.num_layers; ++i) {
+        const uint32_t HD = gemma.layers[i].head_dim;
+        const uint32_t I = gemma.layers[i].intermediate_size;
+        view(G4(i, "q"), S("g4.q_backing"), {B, L, H * HD});
+        view(G4(i, "k"), S("g4.k_backing"), {B, L, KVH * HD});
+        view(G4(i, "v"), S("g4.v_backing"), {B, L, KVH * HD});
+        view(G4(i, "attn_out"), S("g4.attn_out_backing"), {B, L, H * HD});
+        view(G4(i, "gate"), S("g4.gate_backing"), {B, L, I});
+        view(G4(i, "up"), S("g4.up_backing"), {B, L, I});
+        view(G4(i, "mlp_h"), S("g4.mlp_h_backing"), {B, L, I});
+    }
+    scratch_allocated_ = true;
+}
+
 void GraphBuilder::free_scratch(Engine& engine) {
+    for (const auto& name : scratch_view_names_) {
+        if (engine.tensors().exists(name)) engine.tensors().remove(name);
+    }
+    scratch_view_names_.clear();
     for (const auto& name : scratch_names_) {
         if (engine.tensors().exists(name)) {
             engine.tensors().remove(name);
@@ -380,6 +476,217 @@ void GraphBuilder::free_scratch(Engine& engine) {
     scratch_allocated_ = false;
     alloc_batch_ = 0;
     alloc_seq_ = 0;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_input(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    const std::string& input_tokens,
+    uint32_t batch_size,
+    uint32_t seq_len
+) {
+    if (!scratch_allocated_) {
+        throw std::runtime_error("GraphBuilder: call allocate_gemma4_scratch() first");
+    }
+    if (batch_size == 0 || seq_len == 0 || batch_size > alloc_batch_ ||
+        seq_len > alloc_seq_) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4 input shape");
+    }
+    const TensorInfo* tokens = engine.tensors().get(input_tokens);
+    if (!tokens || tokens->shape.empty() || tokens->shape[0] != batch_size ||
+        (tokens->shape.size() > 1 ? tokens->shape[1] : 1) != seq_len) {
+        throw std::invalid_argument("GraphBuilder: Gemma 4 token shape mismatch");
+    }
+    set_active_scratch_shape(engine, batch_size, seq_len);
+
+    CommandBuffer cb;
+    cb.reserve(10);
+    cb.add_embedding(S("hidden"), input_tokens, WG(arch, arch.embedding_name));
+    cb.add_scale(S("hidden"), S("hidden"),
+                 std::sqrt(static_cast<float>(config.hidden_size())));
+
+    Gemma4PlePreparationNames names;
+    names.input_tokens = input_tokens;
+    names.main_embeddings = S("hidden");
+    names.ple = S("g4.ple");
+    names.context = S("g4.ple_context");
+    append_gemma4_ple_preparation(cb, config, gemma, names);
+    return cb;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_single_layer(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    uint32_t position_offset
+) {
+    if (!scratch_allocated_) {
+        throw std::runtime_error("GraphBuilder: call allocate_gemma4_scratch() first");
+    }
+    if (layer_idx >= gemma.layers.size() || batch_size == 0 || seq_len == 0 ||
+        batch_size > alloc_batch_ || seq_len > alloc_seq_) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4 layer request");
+    }
+    if (gemma.num_kv_shared_layers > config.num_hidden_layers()) {
+        throw std::invalid_argument("GraphBuilder: invalid shared-KV layer count");
+    }
+    const uint32_t first_shared = config.num_hidden_layers() -
+                                  gemma.num_kv_shared_layers;
+    if (layer_idx >= first_shared) {
+        throw std::invalid_argument(
+            "GraphBuilder: shared-KV Gemma 4 layers belong to Phase 6");
+    }
+
+    const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
+    if (!layer.is_global_attention() && layer.sliding_window != 0 &&
+        seq_len > layer.sliding_window) {
+        throw std::invalid_argument(
+            "GraphBuilder: local attention beyond its window belongs to Phase 6");
+    }
+    set_active_scratch_shape(engine, batch_size, seq_len);
+
+    const uint32_t H = config.num_attention_heads();
+    const uint32_t KVH = config.num_key_value_heads();
+    const uint32_t HD = layer.head_dim;
+    const std::string q = G4(layer_idx, "q");
+    const std::string k = G4(layer_idx, "k");
+    const std::string v = G4(layer_idx, "v");
+    const std::string attn_out = G4(layer_idx, "attn_out");
+    auto set_seq = [&](CommandBuffer& commands) {
+        commands.commands().back().set("seq_len", seq_len);
+    };
+
+    CommandBuffer cb;
+    cb.reserve(32);
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   W(arch, layer_idx, "ln_attn_in.weight"),
+                   config.rms_norm_eps());
+    cb.add_matmul(q, S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
+    set_seq(cb);
+    cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
+    set_seq(cb);
+    cb.add_matmul(v, S("normed"), W(arch, layer_idx, "attn.v_proj.weight"));
+    set_seq(cb);
+
+    cb.add_rmsnorm(q, q, W(arch, layer_idx, "attn.q_norm.weight"),
+                   config.rms_norm_eps(), HD);
+    cb.add_rmsnorm(k, k, W(arch, layer_idx, "attn.k_norm.weight"),
+                   config.rms_norm_eps(), HD);
+    cb.add_rmsnorm_no_weight(v, v, config.rms_norm_eps(), HD);
+
+    cb.add_rope(q, q, layer.rope_theta, HD, position_offset,
+                layer.partial_rotary_factor, layer.rope_type == ROPE_PROPORTIONAL);
+    cb.commands().back().set("num_heads", H).set("seq_len", seq_len);
+    cb.add_rope(k, k, layer.rope_theta, HD, position_offset,
+                layer.partial_rotary_factor, layer.rope_type == ROPE_PROPORTIONAL);
+    cb.commands().back().set("num_heads", KVH).set("seq_len", seq_len);
+
+    auto& attention = cb.add_op(op::ATTENTION(), attn_out);
+    attention.in({q, k, v})
+        .set("num_heads", H)
+        .set("num_kv_heads", KVH)
+        .set("head_dim", HD)
+        .set("scale", 1.0f)
+        .set("causal", true)
+        .set("seq_q", seq_len)
+        .set("seq_kv", seq_len);
+
+    cb.add_matmul(S("attn_proj"), attn_out,
+                  W(arch, layer_idx, "attn.o_proj.weight"));
+    set_seq(cb);
+    cb.add_rmsnorm(S("attn_proj"), S("attn_proj"),
+                   W(arch, layer_idx, "ln_attn_post.weight"),
+                   config.rms_norm_eps());
+    cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
+
+    append_gemma4_mlp_ple_tail(
+        cb, config, gemma, arch, layer_idx, seq_len);
+    return cb;
+}
+
+void GraphBuilder::append_gemma4_mlp_ple_tail(
+    CommandBuffer& cb,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t seq_len
+) {
+    const std::string gate = G4(layer_idx, "gate");
+    const std::string up = G4(layer_idx, "up");
+    const std::string mlp_h = G4(layer_idx, "mlp_h");
+    auto set_seq = [&](CommandBuffer& commands) {
+        commands.commands().back().set("seq_len", seq_len);
+    };
+
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   W(arch, layer_idx, "ln_mlp_in.weight"),
+                   config.rms_norm_eps());
+    cb.add_matmul(gate, S("normed"), W(arch, layer_idx, "mlp.gate.weight"));
+    set_seq(cb);
+    cb.add_matmul(up, S("normed"), W(arch, layer_idx, "mlp.up.weight"));
+    set_seq(cb);
+    cb.add_gelu(gate, gate);
+    cb.add_mul(mlp_h, gate, up);
+    cb.add_matmul(S("mlp_out"), mlp_h,
+                  W(arch, layer_idx, "mlp.down.weight"));
+    set_seq(cb);
+    cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
+                   W(arch, layer_idx, "ln_mlp_post.weight"),
+                   config.rms_norm_eps());
+    cb.add_add(S("hidden"), S("hidden"), S("mlp_out"));
+
+    cb.add_ple_slice(S("g4.ple_segment"), S("g4.ple"), layer_idx,
+                     arch.num_layers, gemma.ple_hidden_size);
+    Gemma4PleLayerNames ple_names;
+    ple_names.hidden = S("hidden");
+    ple_names.ple_segment = S("g4.ple_segment");
+    ple_names.gate = S("g4.ple_gate");
+    ple_names.projected = S("g4.ple_projected");
+    append_gemma4_ple_layer_injection(
+        cb, config, gemma, layer_idx, ple_names);
+}
+
+CommandBuffer GraphBuilder::build_gemma4_mlp_ple_tail(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t batch_size,
+    uint32_t seq_len
+) {
+    if (!scratch_allocated_ || layer_idx >= gemma.layers.size() ||
+        batch_size == 0 || seq_len == 0 || batch_size > alloc_batch_ ||
+        seq_len > alloc_seq_) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4 MLP/PLE request");
+    }
+    set_active_scratch_shape(engine, batch_size, seq_len);
+    CommandBuffer cb;
+    cb.reserve(18);
+    append_gemma4_mlp_ple_tail(
+        cb, config, gemma, arch, layer_idx, seq_len);
+    return cb;
+}
+
+void GraphBuilder::set_active_scratch_shape(
+    Engine& engine, uint32_t batch_size, uint32_t seq_len
+) {
+    auto update = [&](const std::string& name) {
+        TensorInfo* tensor = engine.tensors().get(name);
+        if (tensor && tensor->shape.size() == 3 && name != S("logits")) {
+            tensor->shape[0] = batch_size;
+            tensor->shape[1] = seq_len;
+        }
+    };
+    for (const std::string& name : scratch_names_) update(name);
+    for (const std::string& name : scratch_view_names_) update(name);
 }
 
 // ============================================================================

@@ -294,11 +294,12 @@ void register_norm_kernels(Engine& engine) {
     // RMSNORM
     engine.register_kernel(op::RMSNORM(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* input = ctx.in(0);
-        TensorInfo* weight = ctx.in(1);
+        const bool no_weight = cmd.get<bool>("no_weight", false);
+        TensorInfo* weight = no_weight ? nullptr : ctx.in(1);
         TensorInfo* output = ctx.output;
         float eps = cmd.get<float>("eps", 1e-5f);
         
-        if (!input || !weight || !output) {
+        if (!input || (!no_weight && !weight) || !output) {
             throw std::runtime_error("RMSNORM: missing tensors");
         }
 
@@ -307,11 +308,15 @@ void register_norm_kernels(Engine& engine) {
         int dim = (int)cmd.get<uint32_t>("dim", 0);
         if (dim == 0) dim = input->shape.back();
         int batch = input->numel() / dim;
-        launch_rmsnorm_fp16(
-            as_fp16_const(input), as_fp16_const(weight), as_fp16(output),
-            batch, dim, eps,
-            ctx.stream
-        );
+        if (no_weight) {
+            launch_rmsnorm_no_weight_fp16(
+                as_fp16_const(input), as_fp16(output), batch, dim, eps,
+                ctx.stream);
+        } else {
+            launch_rmsnorm_fp16(
+                as_fp16_const(input), as_fp16_const(weight), as_fp16(output),
+                batch, dim, eps, ctx.stream);
+        }
     });
     
 
@@ -489,6 +494,26 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("EMBEDDING: unsupported table dtype " +
                                      std::string(dtype_name(table->dtype)));
         }
+    });
+
+    engine.register_kernel(op::PLE_SLICE(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* packed = ctx.in(0);
+        TensorInfo* output = ctx.output;
+        const uint32_t layer = cmd.get<uint32_t>("layer", 0);
+        const uint32_t layers = cmd.get<uint32_t>("layers", 0);
+        const uint32_t dim = cmd.get<uint32_t>("dim", 0);
+        if (!packed || !output || layers == 0 || dim == 0 || layer >= layers) {
+            throw std::runtime_error("PLE_SLICE: invalid tensors or dimensions");
+        }
+        const size_t packed_width = size_t(layers) * dim;
+        if (packed->numel() % packed_width != 0 ||
+            output->numel() != packed->numel() / layers) {
+            throw std::runtime_error("PLE_SLICE: incompatible packed/output shapes");
+        }
+        launch_ple_slice_fp16(
+            as_fp16_const(packed), as_fp16(output),
+            int(packed->numel() / packed_width), int(layers), int(dim), int(layer),
+            ctx.stream);
     });
     
     // SPLIT_QKV - Zero-copy for decode (batch_seq=1), kernel for prefill

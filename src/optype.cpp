@@ -77,7 +77,7 @@ void OpTypeRegistry::register_builtins() {
     
     // Normalization
     info = OpTypeInfo{}; info.name = "rmsnorm"; info.category = "norm";
-    info.min_inputs = 2; info.max_inputs = 2;
+    info.min_inputs = 1; info.max_inputs = 2;
     register_op(info);
     
     info = OpTypeInfo{}; info.name = "layernorm"; info.category = "norm";
@@ -143,6 +143,10 @@ void OpTypeRegistry::register_builtins() {
     
     info = OpTypeInfo{}; info.name = "embedding"; info.category = "memory";
     info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "ple_slice"; info.category = "memory";
+    info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
 }
 

@@ -18,6 +18,38 @@ constexpr int ELEMENTWISE_BLOCK_SIZE = 256;
 constexpr int ELEMENTS_PER_THREAD = 4;
 
 // ============================================================================
+// PACKED PLE LAYER GATHER
+// ============================================================================
+
+__global__ void ple_slice_fp16_kernel(
+    const half* __restrict__ packed,
+    half* __restrict__ output,
+    int rows, int layers, int dim, int layer
+) {
+    const size_t count = size_t(rows) * dim;
+    size_t index = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t stride = size_t(blockDim.x) * gridDim.x;
+    for (; index < count; index += stride) {
+        const int row = int(index / dim);
+        const int component = int(index % dim);
+        output[index] = packed[(size_t(row) * layers + layer) * dim + component];
+    }
+}
+
+void launch_ple_slice_fp16(
+    const half* packed, half* output,
+    int rows, int layers, int dim, int layer,
+    cudaStream_t stream
+) {
+    if (rows <= 0 || layers <= 0 || dim <= 0 || layer < 0 || layer >= layers) return;
+    const size_t count = size_t(rows) * dim;
+    int blocks = int((count + ELEMENTWISE_BLOCK_SIZE - 1) / ELEMENTWISE_BLOCK_SIZE);
+    blocks = min(blocks, 65535);
+    ple_slice_fp16_kernel<<<blocks, ELEMENTWISE_BLOCK_SIZE, 0, stream>>>(
+        packed, output, rows, layers, dim, layer);
+}
+
+// ============================================================================
 // ADD KERNEL
 // ============================================================================
 

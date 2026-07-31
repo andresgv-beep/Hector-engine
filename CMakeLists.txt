@@ -159,6 +159,10 @@ target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
 add_executable(test_gemma4_ple tests/test_gemma4_ple.cu)
 target_link_libraries(test_gemma4_ple PRIVATE helios-engine)
 
+# Gemma 4 heterogeneous scratch and explicit first-layer graph
+add_executable(test_gemma4_graph tests/test_gemma4_graph.cu)
+target_link_libraries(test_gemma4_graph PRIVATE helios-engine)
+
 # Real HNF inspector (with block loading test)
 add_executable(inspect_hnf test_real_hnf.cpp)
 target_link_libraries(inspect_hnf PRIVATE helios-engine)
@@ -174,6 +178,7 @@ add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
+add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 
 # GraphBuilder test
 add_executable(test_graph_builder test_graph_builder.cpp)

@@ -133,6 +133,13 @@ void launch_split_2way(
     cudaStream_t stream = nullptr
 );
 
+// Gather one layer from token-major packed PLE [rows, layers, dim].
+void launch_ple_slice_fp16(
+    const half* packed, half* output,
+    int rows, int layers, int dim, int layer,
+    cudaStream_t stream = nullptr
+);
+
 // ============================================================================
 // ACTIVATION KERNELS
 // ============================================================================

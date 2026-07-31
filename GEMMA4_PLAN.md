@@ -271,13 +271,13 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 ## Estado actual
 
-- **Fase activa:** Fase 5 — grafo Gemma 4 por capa.
-- **Última fase completada:** Fase 4 — ruta completa de Per-Layer Embeddings.
-- **Siguiente acción exacta:** definir el scratch Gemma 4 y construir el forward
-  de la primera capa local, manteniendo la atención sin KV compartido hasta la
-  Fase 6.
+- **Fase activa:** Fase 6 — atención alternada y KV compartido.
+- **Última fase completada:** Fase 5 — grafo Gemma 4 por capa.
+- **Siguiente acción exacta:** definir el layout KV heterogéneo y sus aliases
+  compartidos, conservando estados de dimensión 256 para local y 512 para
+  global antes de conectar prefill o decode.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
-  primitivas Gemma 4 y ruta PLE completa. No se ha tocado aún el graph builder.
+  primitivas, ruta PLE y grafo Gemma 4 explícito con scratch por capa.
 
 ## Registro de trabajo
 
@@ -290,3 +290,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-07-31 | Fase 3 | Primitivas numéricas verificadas en CUDA | RMSNorm directo/sin peso, GELU tanh, escalas, softcap y RoPE proporcional |
 | 2026-07-31 | Fase 4 | Lookup HQ51K terminado; ruta PLE aún incompleta | Fila real 42: 8960 valores desde solo 7000 bytes, igualdad con decoder CPU |
 | 2026-07-31 | Fase 4 | Ruta PLE completa verificada y cerrada | Filas 0/42/262143; preparación de 35 segmentos max abs 0,015625; inyección en capas 0/4/15/34 max abs 0,00390625; workspace 17,5 MiB para 1x512 |
+| 2026-07-31 | Fase 5 | Grafo heterogéneo por capa verificado y cerrado | PLE multi-token; capas reales 0-4 encadenadas contra CPU, global HD512 max abs 0,0234375; cola MLP/PLE de capa 15 a 12288 max abs 0,0273438 |

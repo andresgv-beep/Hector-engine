@@ -171,6 +171,8 @@ public:
     // Normalization
     void add_rmsnorm(const std::string& dst, const std::string& src,
                      const std::string& weight, float eps, uint32_t dim = 0);
+    void add_rmsnorm_no_weight(const std::string& dst, const std::string& src,
+                               float eps, uint32_t dim = 0);
     void add_layernorm(const std::string& dst, const std::string& src,
                        const std::string& weight, const std::string& bias, float eps);
     void add_add_rmsnorm(const std::string& residual_dst, const std::string& normed_dst,
@@ -214,6 +216,8 @@ public:
     // Memory
     void add_embedding(const std::string& dst, const std::string& indices,
                        const std::string& table);
+    void add_ple_slice(const std::string& dst, const std::string& packed,
+                       uint32_t layer, uint32_t layers, uint32_t dim);
     void add_concat(const std::string& dst, 
                     const std::vector<std::string>& inputs, int32_t dim);
     

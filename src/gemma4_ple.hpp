@@ -22,8 +22,8 @@ struct Gemma4PlePreparationNames {
     std::string projection_norm_weight = "text.ple.projection_norm.weight";
 };
 
-// `ple_segment` is a zero-copy view of 256 consecutive values from the packed
-// prepared PLE tensor. The graph allocator creates one such view per layer.
+// `ple_segment` is a contiguous [batch, sequence, 256] tensor gathered from
+// the token-major packed PLE tensor before this branch is appended.
 struct Gemma4PleLayerNames {
     std::string hidden = "_scratch.hidden";
     std::string ple_segment = "_scratch.gemma4_ple_layer";
