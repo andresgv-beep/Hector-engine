@@ -274,6 +274,7 @@ void inspect_real_hnf(const std::string& path) {
     std::cout << "  weights=" << validation.tensor_bytes
               << " ple=" << validation.ple_embedding_bytes
               << " scratch_1x512=" << validation.core_scratch_bytes
+              << " ple_workspace_1x512=" << validation.ple_workspace_bytes
               << " kv_upper_1x512=" << validation.kv_cache_upper_bound_bytes
               << std::endl;
 }

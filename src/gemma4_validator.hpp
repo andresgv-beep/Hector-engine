@@ -21,14 +21,15 @@ struct Gemma4ValidationReport {
     uint32_t budget_batch_size = 1;
     uint32_t budget_sequence_length = 0;
     uint64_t core_scratch_bytes = 0;
+    uint64_t ple_workspace_bytes = 0;
     uint64_t kv_cache_upper_bound_bytes = 0;
 
     bool ok() const { return errors.empty(); }
 };
 
 // Validates the complete text tensor contract without loading weights. Scratch
-// is the current graph's uniform-max core allocation; future PLE workspace is
-// intentionally not included until its data path is defined in Phase 4.
+// is the current graph's uniform-max core allocation. PLE workspace accounts
+// separately for the packed token/result and contextual projection buffers.
 Gemma4ValidationReport validate_gemma4_tensors(
     const HnfLoader& loader,
     uint32_t budget_batch_size = 1,

@@ -271,13 +271,13 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 ## Estado actual
 
-- **Fase activa:** Fase 4 — ruta completa de Per-Layer Embeddings.
-- **Última fase completada:** Fase 3 — primitivas numéricas aisladas.
-- **Siguiente acción exacta:** construir y validar la preparación PLE completa
-  (lookup escalado + proyección contextual + norma + combinación), todavía sin
-  integrarla en las 35 capas.
+- **Fase activa:** Fase 5 — grafo Gemma 4 por capa.
+- **Última fase completada:** Fase 4 — ruta completa de Per-Layer Embeddings.
+- **Siguiente acción exacta:** definir el scratch Gemma 4 y construir el forward
+  de la primera capa local, manteniendo la atención sin KV compartido hasta la
+  Fase 6.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
-  primitivas Gemma 4 y lookup HQ51K. No se ha tocado aún el graph builder.
+  primitivas Gemma 4 y ruta PLE completa. No se ha tocado aún el graph builder.
 
 ## Registro de trabajo
 
@@ -289,3 +289,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-07-31 | Fase 2 | 601/601 tensores válidos en ambos HNF | Compacto: 283 FP16, 105 HQ41K, 213 HQ51K; 0 errores |
 | 2026-07-31 | Fase 3 | Primitivas numéricas verificadas en CUDA | RMSNorm directo/sin peso, GELU tanh, escalas, softcap y RoPE proporcional |
 | 2026-07-31 | Fase 4 | Lookup HQ51K terminado; ruta PLE aún incompleta | Fila real 42: 8960 valores desde solo 7000 bytes, igualdad con decoder CPU |
+| 2026-07-31 | Fase 4 | Ruta PLE completa verificada y cerrada | Filas 0/42/262143; preparación de 35 segmentos max abs 0,015625; inyección en capas 0/4/15/34 max abs 0,00390625; workspace 17,5 MiB para 1x512 |

@@ -169,8 +169,8 @@ public:
     void add_softcap(const std::string& dst, const std::string& src, float cap);
     
     // Normalization
-    void add_rmsnorm(const std::string& dst, const std::string& src, 
-                     const std::string& weight, float eps);
+    void add_rmsnorm(const std::string& dst, const std::string& src,
+                     const std::string& weight, float eps, uint32_t dim = 0);
     void add_layernorm(const std::string& dst, const std::string& src,
                        const std::string& weight, const std::string& bias, float eps);
     void add_add_rmsnorm(const std::string& residual_dst, const std::string& normed_dst,

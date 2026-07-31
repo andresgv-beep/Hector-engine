@@ -272,6 +272,15 @@ Gemma4ValidationReport validate_gemma4_tensors(
         add_error(report, "scratch budget overflows uint64");
     }
 
+    uint64_t ple_workspace_elements = 0;
+    if (checked_mul(batch_positions, ple_width, ple_workspace_elements) &&
+        checked_mul(ple_workspace_elements, 2, ple_workspace_elements) &&
+        checked_mul(ple_workspace_elements, 2, report.ple_workspace_bytes)) {
+        // Two FP16 buffers: packed token/result and contextual projection.
+    } else {
+        add_error(report, "PLE workspace budget overflows uint64");
+    }
+
     uint64_t kv_elements = 0;
     if (checked_mul(sum_head_dims, kv_heads, kv_elements) &&
         checked_mul(kv_elements, 2, kv_elements) && // K and V

@@ -87,8 +87,9 @@ void CommandBuffer::add_softcap(const std::string& dst, const std::string& src, 
 }
 
 void CommandBuffer::add_rmsnorm(const std::string& dst, const std::string& src,
-                                 const std::string& weight, float eps) {
-    add_op(op::RMSNORM(), dst).in({src, weight}).set("eps", eps);
+                                 const std::string& weight, float eps, uint32_t dim) {
+    auto& command = add_op(op::RMSNORM(), dst).in({src, weight}).set("eps", eps);
+    if (dim != 0) command.set("dim", dim);
 }
 void CommandBuffer::add_add_rmsnorm(const std::string& residual_dst, const std::string& normed_dst,
                                      const std::string& a, const std::string& b,
