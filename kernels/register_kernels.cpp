@@ -228,9 +228,7 @@ void register_activation_kernels(Engine& engine) {
     
     // SILU_MUL — fused silu(gate) * up
     {
-        auto silu_mul_id = OpTypeRegistry::Builder("silu_mul")
-            .category("activation").inputs(2, 2).requires_output(true).build();
-        engine.register_kernel(silu_mul_id, [](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::SILU_MUL(), [](ExecContext& ctx, const Command& cmd) {
             TensorInfo* gate = ctx.in(0);
             TensorInfo* up = ctx.in(1);
             TensorInfo* output = ctx.output;
@@ -246,9 +244,7 @@ void register_activation_kernels(Engine& engine) {
     
     // GELU_MUL — fused gelu(gate) * up
     {
-        auto gelu_mul_id = OpTypeRegistry::Builder("gelu_mul")
-            .category("activation").inputs(2, 2).requires_output(true).build();
-        engine.register_kernel(gelu_mul_id, [](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::GELU_MUL(), [](ExecContext& ctx, const Command& cmd) {
             TensorInfo* gate = ctx.in(0);
             TensorInfo* up = ctx.in(1);
             TensorInfo* output = ctx.output;
@@ -322,9 +318,7 @@ void register_norm_kernels(Engine& engine) {
 
     // ADD_RMSNORM — fused add + rmsnorm
     {
-        auto add_rmsnorm_id = OpTypeRegistry::Builder("add_rmsnorm")
-            .build();
-        engine.register_kernel(add_rmsnorm_id, [](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::ADD_RMSNORM(), [](ExecContext& ctx, const Command& cmd) {
             TensorInfo* a = ctx.in(0);
             TensorInfo* b = ctx.in(1);
             TensorInfo* weight = ctx.in(2);
@@ -620,6 +614,7 @@ void register_attention_kernels(Engine& engine) {
         uint32_t head_dim = cmd.get<uint32_t>("head_dim", 128);
         float scale = cmd.get<float>("scale", 1.0f / std::sqrt(float(head_dim)));
         bool causal = cmd.get<bool>("causal", true);
+        uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
         
         int batch = q->shape[0];
         int seq_q = cmd.get<uint32_t>("seq_q", 0);
@@ -633,7 +628,7 @@ void register_attention_kernels(Engine& engine) {
             as_fp16(output),
             batch, seq_q, seq_kv,
             num_heads, num_kv_heads, head_dim,
-            scale, causal,
+            scale, causal, window_size,
             ctx.stream
         );
     });
@@ -732,8 +727,7 @@ void register_attention_kernels(Engine& engine) {
     
     // QK_NORM_ROPE — fusión Qwen3: rmsnorm por-head (q,k) + rope (q,k) en 1 kernel
     {
-        auto qk_norm_rope_id = OpTypeRegistry::Builder("qk_norm_rope").build();
-        engine.register_kernel(qk_norm_rope_id, [&engine](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::QK_NORM_ROPE(), [&engine](ExecContext& ctx, const Command& cmd) {
             TensorInfo* q = ctx.in(0);
             TensorInfo* k = ctx.in(1);
             TensorInfo* qw = ctx.in(2);
@@ -789,6 +783,11 @@ void register_attention_kernels(Engine& engine) {
         float scale = cmd.get<float>("scale", 1.0f / std::sqrt(float(head_dim)));
         uint32_t seq_len = cmd.get<uint32_t>("seq_len", 1);
         uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
+        uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
+        if (head_dim == 0 || head_dim > 512 || num_kv_heads == 0 ||
+            num_heads == 0 || num_heads % num_kv_heads != 0) {
+            throw std::runtime_error("ATTENTION_CACHED: unsupported head geometry");
+        }
         
         // device_pos: total_seq leído de device (permite CUDA Graph capture-once)
         if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
@@ -799,7 +798,7 @@ void register_attention_kernels(Engine& engine) {
                     as_fp16(output),
                     1, engine.device_total_seq(),
                     num_heads, num_kv_heads, head_dim,
-                    max_seq_len, scale,
+                    max_seq_len, scale, window_size,
                     ctx.stream
                 );
         } else {
@@ -810,7 +809,7 @@ void register_attention_kernels(Engine& engine) {
                     as_fp16(output),
                     1, seq_len,
                     num_heads, num_kv_heads, head_dim,
-                    max_seq_len, scale,
+                    max_seq_len, scale, window_size,
                     ctx.stream
                 );
         }
@@ -818,8 +817,7 @@ void register_attention_kernels(Engine& engine) {
     
     // ATTENTION_PREFILL_CACHED — S_new queries sobre el cache completo (causal)
     {
-        auto prefill_id = OpTypeRegistry::Builder("attention_prefill_cached").build();
-        engine.register_kernel(prefill_id, [](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::ATTENTION_PREFILL_CACHED(), [](ExecContext& ctx, const Command& cmd) {
             TensorInfo* q = ctx.in(0);
             TensorInfo* k_cache = ctx.in(1);
             TensorInfo* v_cache = ctx.in(2);
@@ -835,13 +833,19 @@ void register_attention_kernels(Engine& engine) {
             uint32_t seq_new = cmd.get<uint32_t>("seq_len", 1);
             uint32_t past_len = cmd.get<uint32_t>("past_len", 0);
             uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
+            uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
+            if (head_dim == 0 || head_dim > 512 || num_kv_heads == 0 ||
+                num_heads == 0 || num_heads % num_kv_heads != 0) {
+                throw std::runtime_error(
+                    "ATTENTION_PREFILL_CACHED: unsupported head geometry");
+            }
 
             launch_attention_prefill_cached_fp16(
                 as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
                 as_fp16(output),
                 (int)seq_new, (int)past_len,
                 (int)num_heads, (int)num_kv_heads, (int)head_dim,
-                (int)max_seq_len, scale, ctx.stream);
+                (int)max_seq_len, scale, (int)window_size, ctx.stream);
         });
     }
 

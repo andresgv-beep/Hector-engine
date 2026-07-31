@@ -277,6 +277,33 @@ public:
         uint32_t position_offset = 0
     );
 
+    // Exact cached Gemma 4 layer. Non-shared layers project and update their
+    // own K/V; shared layers only project Q and consume the cache alias
+    // registered for their local/global source layer.
+    CommandBuffer build_gemma4_layer_cached(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t batch_size,
+        uint32_t seq_len,
+        const KVCacheParams& cache
+    );
+
+    // Complete cached text forward for Gemma 4: scaled embedding + PLE,
+    // heterogeneous/shared-KV layers, final norm, LM head and logit softcap.
+    CommandBuffer build_gemma4_forward_cached(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        const std::string& input_tokens,
+        uint32_t batch_size,
+        uint32_t seq_len,
+        const KVCacheParams& cache
+    );
+
     // Attention-independent tail shared by normal and shared-KV layers. This
     // permits validating double-wide MLP+PLE before Phase 6 supplies shared KV.
     CommandBuffer build_gemma4_mlp_ple_tail(

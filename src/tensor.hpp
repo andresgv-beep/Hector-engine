@@ -26,11 +26,13 @@ namespace helios {
 // ============================================================================
 
 struct TensorInfo {
-    void* ptr;                  // Device pointer (GPU memory)
+    void* ptr = nullptr;        // Device-visible pointer
     std::vector<uint32_t> shape; // Dimensions (variable size)
-    DTypeID dtype;              // Data type (extensible)
-    size_t size_bytes;          // Total size in bytes
-    bool owns_memory;           // If true, destructor frees ptr
+    DTypeID dtype = DTYPE_INVALID; // Data type (extensible)
+    size_t size_bytes = 0;      // Total size in bytes
+    bool owns_memory = false;   // If true, registry releases allocation_ptr/ptr
+    bool host_mapped = false;   // Owned allocation came from cudaHostAlloc
+    void* allocation_ptr = nullptr; // Original host/device allocation handle
     
     // Computed properties
     size_t numel() const {

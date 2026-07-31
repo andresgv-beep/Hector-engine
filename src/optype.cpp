@@ -74,6 +74,14 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "softcap"; info.category = "activation";
     info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
+
+    info = OpTypeInfo{}; info.name = "silu_mul"; info.category = "activation";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "gelu_mul"; info.category = "activation";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
     
     // Normalization
     info = OpTypeInfo{}; info.name = "rmsnorm"; info.category = "norm";
@@ -82,6 +90,10 @@ void OpTypeRegistry::register_builtins() {
     
     info = OpTypeInfo{}; info.name = "layernorm"; info.category = "norm";
     info.min_inputs = 2; info.max_inputs = 3;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "add_rmsnorm"; info.category = "norm";
+    info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
     
     // Linear algebra
@@ -109,6 +121,14 @@ void OpTypeRegistry::register_builtins() {
     
     info = OpTypeInfo{}; info.name = "kv_cache_update"; info.category = "attention";
     info.min_inputs = 2; info.max_inputs = 2;  // K/V new, K/V cache
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "qk_norm_rope"; info.category = "attention";
+    info.min_inputs = 4; info.max_inputs = 4;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "attention_prefill_cached"; info.category = "attention";
+    info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
     
     // Quantization

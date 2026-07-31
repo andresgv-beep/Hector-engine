@@ -193,14 +193,16 @@ public:
                        const std::string& q, const std::string& k, const std::string& v,
                        uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_dim,
                        bool causal = true,
-                       uint32_t seq_q = 0, uint32_t seq_kv = 0);
+                       uint32_t seq_q = 0, uint32_t seq_kv = 0,
+                       uint32_t window_size = 0);
     
     // Attention with KV cache (autoregressive)
     void add_attention_cached(const std::string& dst,
                               const std::string& q,
                               const std::string& k_cache, const std::string& v_cache,
                               uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_dim,
-                              uint32_t seq_len, uint32_t max_seq_len);
+                              uint32_t seq_len, uint32_t max_seq_len,
+                              uint32_t window_size = 0);
     
     // KV cache update (copy new K/V to cache at position)
     void add_kv_cache_update(const std::string& k_cache, const std::string& v_cache,

@@ -15,7 +15,7 @@ using namespace helios;
 // CREATE MOCK HNF FILE
 // ============================================================================
 
-std::string create_mock_hnf(const std::string& path) {
+std::string create_mock_hnf(const std::string& path, bool malformed_tensor_size = false) {
     std::ofstream f(path, std::ios::binary);
     if (!f.is_open()) {
         return "Cannot create file";
@@ -43,8 +43,9 @@ std::string create_mock_hnf(const std::string& path) {
     // PREPARE TENSOR DATA
     // ========================================
     
-    // Create a small mock tensor: [4, 8] fp16 = 64 elements = 128 bytes
-    std::vector<uint16_t> tensor1_data(64, 0x3C00);  // 1.0 in fp16
+    // Create a small mock tensor: [4, 8] fp16 = 32 elements = 64 bytes
+    std::vector<uint16_t> tensor1_data(
+        malformed_tensor_size ? 64 : 32, 0x3C00);  // 1.0 in fp16
     
     // Create another tensor: [8] fp16 = 16 bytes
     std::vector<uint16_t> tensor2_data(8, 0x4000);   // 2.0 in fp16
@@ -348,6 +349,21 @@ void test_tensor_loading() {
     std::cout << "PASSED" << std::endl;
 }
 
+void test_tensor_size_validation() {
+    std::cout << "Test: Tensor size validation... ";
+
+    const std::string path = "/tmp/test_model_bad_size.hnf";
+    assert(create_mock_hnf(path, true).empty());
+
+    Engine engine;
+    HnfLoader loader;
+    assert(!loader.load(path, engine));
+    assert(!engine.tensors().exists("text.token_embedding.weight"));
+
+    std::remove(path.c_str());
+    std::cout << "PASSED" << std::endl;
+}
+
 void test_tensor_values() {
     std::cout << "Test: Tensor values correctness... ";
     
@@ -409,6 +425,7 @@ int main() {
     test_block_table();
     test_manifest_parsing();
     test_execution_hints();
+    test_tensor_size_validation();
     test_tensor_loading();
     test_tensor_values();
     test_print_info();

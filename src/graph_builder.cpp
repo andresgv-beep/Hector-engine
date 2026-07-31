@@ -544,11 +544,6 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     }
 
     const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
-    if (!layer.is_global_attention() && layer.sliding_window != 0 &&
-        seq_len > layer.sliding_window) {
-        throw std::invalid_argument(
-            "GraphBuilder: local attention beyond its window belongs to Phase 6");
-    }
     set_active_scratch_shape(engine, batch_size, seq_len);
 
     const uint32_t H = config.num_attention_heads();
@@ -595,7 +590,9 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
         .set("scale", 1.0f)
         .set("causal", true)
         .set("seq_q", seq_len)
-        .set("seq_kv", seq_len);
+        .set("seq_kv", seq_len)
+        .set("window_size", layer.is_global_attention() ? 0u
+                                                         : layer.sliding_window);
 
     cb.add_matmul(S("attn_proj"), attn_out,
                   W(arch, layer_idx, "attn.o_proj.weight"));
@@ -607,6 +604,172 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
 
     append_gemma4_mlp_ple_tail(
         cb, config, gemma, arch, layer_idx, seq_len);
+    return cb;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_layer_cached(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    const KVCacheParams& cache
+) {
+    if (!scratch_allocated_) {
+        throw std::runtime_error("GraphBuilder: call allocate_gemma4_scratch() first");
+    }
+    if (layer_idx >= gemma.layers.size() || batch_size == 0 || seq_len == 0 ||
+        batch_size > alloc_batch_ || seq_len > alloc_seq_ ||
+        cache.max_cache_len == 0 || cache.cache_position > cache.max_cache_len ||
+        seq_len > cache.max_cache_len - cache.cache_position ||
+        gemma.num_kv_shared_layers > gemma.layers.size()) {
+        throw std::invalid_argument("GraphBuilder: invalid cached Gemma 4 layer request");
+    }
+
+    const uint32_t first_shared = static_cast<uint32_t>(gemma.layers.size()) -
+                                  gemma.num_kv_shared_layers;
+    const bool shared = layer_idx >= first_shared;
+    const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
+    const uint32_t H = config.num_attention_heads();
+    const uint32_t KVH = config.num_key_value_heads();
+    const uint32_t HD = layer.head_dim;
+    const uint32_t window = layer.is_global_attention() ? 0u : layer.sliding_window;
+    if (H == 0 || KVH == 0 || HD == 0 || (shared && first_shared == 0)) {
+        throw std::invalid_argument("GraphBuilder: invalid cached Gemma 4 geometry");
+    }
+
+    const std::string q = G4(layer_idx, "q");
+    const std::string k = G4(layer_idx, "k");
+    const std::string v = G4(layer_idx, "v");
+    const std::string attn_out = G4(layer_idx, "attn_out");
+    const std::string cache_base = cache.kv_prefix + ".layer" +
+                                   std::to_string(layer_idx);
+    const std::string k_cache = cache_base + ".k";
+    const std::string v_cache = cache_base + ".v";
+    const TensorInfo* cached_k = engine.tensors().get(k_cache);
+    const TensorInfo* cached_v = engine.tensors().get(v_cache);
+    if (!cached_k || !cached_v || cached_k->shape.size() != 4 ||
+        cached_v->shape != cached_k->shape || cached_k->shape[0] < batch_size ||
+        cached_k->shape[1] < cache.max_cache_len ||
+        cached_k->shape[2] != KVH || cached_k->shape[3] != HD) {
+        throw std::invalid_argument("GraphBuilder: Gemma 4 KV alias shape mismatch");
+    }
+
+    set_active_scratch_shape(engine, batch_size, seq_len);
+    auto set_seq = [&](CommandBuffer& commands) {
+        commands.commands().back().set("seq_len", seq_len);
+    };
+    auto add_rope = [&](CommandBuffer& commands, const std::string& tensor,
+                        uint32_t heads) {
+        commands.add_rope(tensor, tensor, layer.rope_theta, HD,
+                          cache.cache_position, layer.partial_rotary_factor,
+                          layer.rope_type == ROPE_PROPORTIONAL);
+        auto& rope = commands.commands().back();
+        rope.set("num_heads", heads).set("seq_len", seq_len);
+        if (seq_len == 1) rope.set("device_pos", uint32_t{1});
+    };
+
+    CommandBuffer cb;
+    cb.reserve(shared ? 26 : 34);
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   W(arch, layer_idx, "ln_attn_in.weight"),
+                   config.rms_norm_eps());
+    cb.add_matmul(q, S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
+    set_seq(cb);
+    cb.add_rmsnorm(q, q, W(arch, layer_idx, "attn.q_norm.weight"),
+                   config.rms_norm_eps(), HD);
+    add_rope(cb, q, H);
+
+    if (!shared) {
+        cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
+        set_seq(cb);
+        cb.add_matmul(v, S("normed"), W(arch, layer_idx, "attn.v_proj.weight"));
+        set_seq(cb);
+        cb.add_rmsnorm(k, k, W(arch, layer_idx, "attn.k_norm.weight"),
+                       config.rms_norm_eps(), HD);
+        cb.add_rmsnorm_no_weight(v, v, config.rms_norm_eps(), HD);
+        add_rope(cb, k, KVH);
+        cb.add_kv_cache_update(k_cache, v_cache, k, v,
+                               cache.cache_position, cache.max_cache_len,
+                               KVH, HD, seq_len);
+        if (seq_len == 1) cb.commands().back().set("device_pos", uint32_t{1});
+    }
+
+    if (seq_len > 1) {
+        auto& attention = cb.add_op(op::ATTENTION_PREFILL_CACHED(), attn_out);
+        attention.in({q, k_cache, v_cache})
+            .set("num_heads", H)
+            .set("num_kv_heads", KVH)
+            .set("head_dim", HD)
+            .set("scale", 1.0f)
+            .set("seq_len", seq_len)
+            .set("past_len", cache.cache_position)
+            .set("max_seq_len", cache.max_cache_len)
+            .set("window_size", window);
+    } else {
+        cb.add_attention_cached(attn_out, q, k_cache, v_cache,
+                                H, KVH, HD, cache.cache_position + 1,
+                                cache.max_cache_len, window);
+        auto& attention = cb.commands().back();
+        attention.set("scale", 1.0f).set("device_pos", uint32_t{1});
+    }
+
+    cb.add_matmul(S("attn_proj"), attn_out,
+                  W(arch, layer_idx, "attn.o_proj.weight"));
+    set_seq(cb);
+    cb.add_rmsnorm(S("attn_proj"), S("attn_proj"),
+                   W(arch, layer_idx, "ln_attn_post.weight"),
+                   config.rms_norm_eps());
+    cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
+    append_gemma4_mlp_ple_tail(cb, config, gemma, arch, layer_idx, seq_len);
+    return cb;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_forward_cached(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    const std::string& input_tokens,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    const KVCacheParams& cache
+) {
+    if (config.arch() != "gemma4" || gemma.layers.size() != arch.num_layers ||
+        arch.num_layers != config.num_hidden_layers()) {
+        throw std::invalid_argument("GraphBuilder: invalid complete Gemma 4 contract");
+    }
+
+    CommandBuffer cb = build_gemma4_input(
+        engine, config, gemma, arch, input_tokens, batch_size, seq_len);
+    cb.reserve(cb.size() + arch.num_layers * 30 + 4);
+    for (uint32_t layer = 0; layer < arch.num_layers; ++layer) {
+        cb.append(build_gemma4_layer_cached(
+            engine, config, gemma, arch, layer, batch_size, seq_len, cache));
+    }
+
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   WG(arch, arch.final_norm_name), config.rms_norm_eps());
+    const std::string& lm_head = arch.lm_head_name.empty()
+        ? arch.embedding_name : arch.lm_head_name;
+    cb.add_matmul(S("logits"), S("normed"), WG(arch, lm_head));
+    auto& logits = cb.commands().back();
+    if (seq_len > 1) {
+        logits.set("seq_len", uint32_t{1});
+        logits.set("row_offset", seq_len - 1);
+    } else {
+        logits.set("seq_len", seq_len);
+    }
+
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_LOGIT_SOFTCAP)) {
+        const float cap = config.get<float>("final_logit_softcapping", 30.0f);
+        if (!(cap > 0.0f)) {
+            throw std::invalid_argument("GraphBuilder: invalid Gemma 4 logit softcap");
+        }
+        cb.add_softcap(S("logits"), S("logits"), cap);
+    }
     return cb;
 }
 

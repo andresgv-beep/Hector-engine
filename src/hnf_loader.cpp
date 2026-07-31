@@ -14,6 +14,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 // ============================================================================
 // MINIMAL JSON PARSER
@@ -800,7 +801,7 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     if (s == "hq51k") return dtype::HQ51K();
     if (s == "int8") return dtype::INT8();
     if (s == "int32") return dtype::INT32();
-    return dtype::FP16();
+    return DTYPE_INVALID;
 }
 
 // ============================================================================
@@ -819,6 +820,33 @@ bool HnfLoader::load_tensors(std::ifstream& f, Engine& engine) {
 
 bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
                             TensorRegistry& registry) {
+    const DTypeID dtype = dtype_from_string(entry.dtype);
+    if (dtype == DTYPE_INVALID) {
+        std::cerr << "HnfLoader: Unknown dtype: " << entry.dtype
+                  << " (" << entry.name << ")" << std::endl;
+        return false;
+    }
+    if (entry.shape.empty()) {
+        std::cerr << "HnfLoader: Empty shape: " << entry.name << std::endl;
+        return false;
+    }
+
+    size_t numel = 1;
+    for (uint32_t dim : entry.shape) {
+        if (dim == 0 || numel > std::numeric_limits<size_t>::max() / dim) {
+            std::cerr << "HnfLoader: Invalid shape: " << entry.name << std::endl;
+            return false;
+        }
+        numel *= dim;
+    }
+    const size_t expected_size = dtype_size(dtype, numel);
+    if (expected_size == 0 || entry.size != expected_size) {
+        std::cerr << "HnfLoader: Size mismatch: " << entry.name
+                  << " manifest=" << entry.size
+                  << " expected=" << expected_size << std::endl;
+        return false;
+    }
+
     // Use block_id_from_name() — single source of truth, covers all blocks
     BlockID block_id = block_id_from_name(entry.block);
     if (block_id == BLOCK_RESERVED_1) {
@@ -858,6 +886,7 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
                    entry.name.find("token_embedding") != std::string::npos;
 
     void* d_ptr = nullptr;
+    void* allocation_ptr = nullptr;
     cudaError_t err;
     if (to_host) {
         void* h_ptr = nullptr;
@@ -867,10 +896,12 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
             err = cudaHostGetDevicePointer(&d_ptr, h_ptr, 0);
         }
         if (err != cudaSuccess) {
+            if (h_ptr) cudaFreeHost(h_ptr);
             std::cerr << "HnfLoader: host-mapped alloc failed para " << entry.name
                       << " — cayendo a VRAM" << std::endl;
             to_host = false;
         } else {
+            allocation_ptr = h_ptr;
             std::cout << "  [RAM] " << entry.name << " ("
                       << entry.size / (1024 * 1024) << " MB fuera de VRAM)" << std::endl;
         }
@@ -878,9 +909,16 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     if (!to_host) {
         err = cudaMalloc(&d_ptr, entry.size);
         if (err != cudaSuccess) {
-            std::cerr << "HnfLoader: cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
+            size_t free_bytes = 0;
+            size_t total_bytes = 0;
+            cudaMemGetInfo(&free_bytes, &total_bytes);
+            std::cerr << "HnfLoader: cudaMalloc failed for " << entry.name
+                      << " (" << entry.size << " bytes, "
+                      << free_bytes << " free): " << cudaGetErrorString(err)
+                      << std::endl;
             return false;
         }
+        allocation_ptr = d_ptr;
         err = cudaMemcpy(d_ptr, host_data.data(), entry.size, cudaMemcpyHostToDevice);
         if (err != cudaSuccess) {
             cudaFree(d_ptr);
@@ -892,9 +930,11 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     TensorInfo info;
     info.ptr = d_ptr;
     info.shape = entry.shape;
-    info.dtype = dtype_from_string(entry.dtype);
+    info.dtype = dtype;
     info.size_bytes = entry.size;
     info.owns_memory = true;
+    info.host_mapped = to_host;
+    info.allocation_ptr = allocation_ptr;
     
     registry.register_tensor(entry.name, info);
     return true;

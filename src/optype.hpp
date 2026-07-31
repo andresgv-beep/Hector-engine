@@ -139,9 +139,12 @@ namespace op {
     inline OpTypeID RELU() { return OpTypeRegistry::instance().get_id("relu"); }
     inline OpTypeID SOFTMAX() { return OpTypeRegistry::instance().get_id("softmax"); }
     inline OpTypeID SOFTCAP() { return OpTypeRegistry::instance().get_id("softcap"); }
+    inline OpTypeID SILU_MUL() { return OpTypeRegistry::instance().get_id("silu_mul"); }
+    inline OpTypeID GELU_MUL() { return OpTypeRegistry::instance().get_id("gelu_mul"); }
     
     inline OpTypeID RMSNORM() { return OpTypeRegistry::instance().get_id("rmsnorm"); }
     inline OpTypeID LAYERNORM() { return OpTypeRegistry::instance().get_id("layernorm"); }
+    inline OpTypeID ADD_RMSNORM() { return OpTypeRegistry::instance().get_id("add_rmsnorm"); }
     
     inline OpTypeID MATMUL() { return OpTypeRegistry::instance().get_id("matmul"); }
     inline OpTypeID MATMUL_T() { return OpTypeRegistry::instance().get_id("matmul_t"); }
@@ -151,6 +154,8 @@ namespace op {
     inline OpTypeID ATTENTION() { return OpTypeRegistry::instance().get_id("attention"); }
     inline OpTypeID ATTENTION_CACHED() { return OpTypeRegistry::instance().get_id("attention_cached"); }
     inline OpTypeID KV_CACHE_UPDATE() { return OpTypeRegistry::instance().get_id("kv_cache_update"); }
+    inline OpTypeID QK_NORM_ROPE() { return OpTypeRegistry::instance().get_id("qk_norm_rope"); }
+    inline OpTypeID ATTENTION_PREFILL_CACHED() { return OpTypeRegistry::instance().get_id("attention_prefill_cached"); }
     
     inline OpTypeID DEQUANT() { return OpTypeRegistry::instance().get_id("dequant"); }
     

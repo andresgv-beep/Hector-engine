@@ -38,7 +38,8 @@ __global__ void attention_naive_kernel(
     int num_kv_heads,
     int head_dim,
     float scale,
-    bool causal
+    bool causal,
+    int window_size
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = batch_size * seq_q * num_heads * head_dim;
@@ -56,7 +57,7 @@ __global__ void attention_naive_kernel(
     float max_score = -1e10f;
     
     for (int k = 0; k < seq_kv; k++) {
-        if (causal && k > s) continue;
+        if ((causal && k > s) || (window_size > 0 && k + window_size <= s)) continue;
         float score = 0.0f;
         for (int dd = 0; dd < head_dim; dd++) {
             float q_val = __half2float(Q[b * seq_q * num_heads * head_dim + 
@@ -70,7 +71,7 @@ __global__ void attention_naive_kernel(
     }
     
     for (int k = 0; k < seq_kv; k++) {
-        if (causal && k > s) continue;
+        if ((causal && k > s) || (window_size > 0 && k + window_size <= s)) continue;
         float score = 0.0f;
         for (int dd = 0; dd < head_dim; dd++) {
             float q_val = __half2float(Q[b * seq_q * num_heads * head_dim + 
@@ -85,7 +86,7 @@ __global__ void attention_naive_kernel(
     
     float out_val = 0.0f;
     for (int k = 0; k < seq_kv; k++) {
-        if (causal && k > s) continue;
+        if ((causal && k > s) || (window_size > 0 && k + window_size <= s)) continue;
         float score = 0.0f;
         for (int dd = 0; dd < head_dim; dd++) {
             float q_val = __half2float(Q[b * seq_q * num_heads * head_dim + 
@@ -108,14 +109,14 @@ void launch_attention_fp16(
     const half* q, const half* k, const half* v, half* output,
     int batch_size, int seq_q, int seq_kv,
     int num_heads, int num_kv_heads, int head_dim,
-    float scale, bool causal, cudaStream_t stream
+    float scale, bool causal, int window_size, cudaStream_t stream
 ) {
     int total = batch_size * seq_q * num_heads * head_dim;
     int block_size = 256;
     int num_blocks = (total + block_size - 1) / block_size;
     attention_naive_kernel<<<num_blocks, block_size, 0, stream>>>(
         q, k, v, output, batch_size, seq_q, seq_kv,
-        num_heads, num_kv_heads, head_dim, scale, causal
+        num_heads, num_kv_heads, head_dim, scale, causal, window_size
     );
 }
 
@@ -143,8 +144,8 @@ constexpr int WARP_SIZE = 32;
 // seq/16 posiciones. smem del merge: 16×(2+256)×4B ≈ 16.5 KB ✓
 constexpr int ATTN_WARPS = 16;  // Warps per head
 constexpr int ATTN_BLOCK = ATTN_WARPS * WARP_SIZE;  // 512 threads per block
-constexpr int MAX_HD_PER_THREAD = 8;   // head_dim up to 256
-constexpr int MAX_HD2_PER_THREAD = 4;  // ídem en pares (half2): 256/2/32
+constexpr int MAX_HD_PER_THREAD = 16;  // head_dim up to 512 (Gemma 4 global)
+constexpr int MAX_HD2_PER_THREAD = 8;  // idem in half2 units
 
 // Shared memory layout for merge:
 //   float partial_max[ATTN_WARPS]
@@ -162,7 +163,8 @@ __global__ void attention_cached_v2_kernel(
     int num_kv_heads,
     int head_dim,
     int max_seq_len,
-    float scale
+    float scale,
+    int window_size
 ) {
     // Block = 4 warps for 1 head
     const int head_id = blockIdx.x;  // Which (batch, head) pair
@@ -191,8 +193,10 @@ __global__ void attention_cached_v2_kernel(
     const int kv_head_offset = kv_h * head_dim;
     
     // Each warp processes a chunk of seq_len
-    const int chunk = (seq_len + ATTN_WARPS - 1) / ATTN_WARPS;
-    const int pos_start = warp_id * chunk;
+    const int first_pos = window_size > 0 ? max(0, seq_len - window_size) : 0;
+    const int active_len = seq_len - first_pos;
+    const int chunk = (active_len + ATTN_WARPS - 1) / ATTN_WARPS;
+    const int pos_start = first_pos + warp_id * chunk;
     const int pos_end = min(pos_start + chunk, seq_len);
     
     // Online softmax accumulators (per warp)
@@ -314,7 +318,8 @@ __global__ void attention_cached_v2_kernel(
 void launch_attention_cached_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
-    int head_dim, int max_seq_len, float scale, cudaStream_t stream
+    int head_dim, int max_seq_len, float scale, int window_size,
+    cudaStream_t stream
 ) {
     int num_blocks = batch_size * num_heads;
     
@@ -324,7 +329,7 @@ void launch_attention_cached_fp16(
     attention_cached_v2_kernel<<<num_blocks, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         batch_size, seq_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale
+        max_seq_len, scale, window_size
     );
 }
 
@@ -340,7 +345,8 @@ __global__ void attention_cached_v2_kernel_dp(
     int num_kv_heads,
     int head_dim,
     int max_seq_len,
-    float scale
+    float scale,
+    int window_size
 ) {
     int seq_len = *d_seq_len;
     
@@ -376,8 +382,10 @@ __global__ void attention_cached_v2_kernel_dp(
     const half2* K2 = reinterpret_cast<const half2*>(K_cache);
     const half2* V2 = reinterpret_cast<const half2*>(V_cache);
 
-    const int chunk = (seq_len + ATTN_WARPS - 1) / ATTN_WARPS;
-    const int pos_start = warp_id * chunk;
+    const int first_pos = window_size > 0 ? max(0, seq_len - window_size) : 0;
+    const int active_len = seq_len - first_pos;
+    const int chunk = (active_len + ATTN_WARPS - 1) / ATTN_WARPS;
+    const int pos_start = first_pos + warp_id * chunk;
     const int pos_end = min(pos_start + chunk, seq_len);
 
     float running_max = -1e10f;
@@ -488,7 +496,8 @@ __global__ void attention_cached_v2_kernel_dp(
 void launch_attention_cached_fp16_dp(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int batch_size, const int32_t* d_seq_len, int num_heads, int num_kv_heads,
-    int head_dim, int max_seq_len, float scale, cudaStream_t stream
+    int head_dim, int max_seq_len, float scale, int window_size,
+    cudaStream_t stream
 ) {
     int num_blocks = batch_size * num_heads;
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
@@ -496,7 +505,7 @@ void launch_attention_cached_fp16_dp(
     attention_cached_v2_kernel_dp<<<num_blocks, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         batch_size, d_seq_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale
+        max_seq_len, scale, window_size
     );
 }
 
@@ -663,7 +672,8 @@ __global__ void attention_prefill_cached_kernel(
     int num_kv_heads,
     int head_dim,
     int max_seq_len,
-    float scale
+    float scale,
+    int window_size
 ) {
     const int q_idx = blockIdx.x;        // 0..seq_new-1
     const int h = blockIdx.y;            // 0..num_heads-1
@@ -683,8 +693,10 @@ __global__ void attention_prefill_cached_kernel(
     }
 
     const int kv_head_offset = kv_h * head_dim;
-    const int chunk = (total_kv + ATTN_WARPS - 1) / ATTN_WARPS;
-    const int pos_start = warp_id * chunk;
+    const int first_pos = window_size > 0 ? max(0, total_kv - window_size) : 0;
+    const int active_len = total_kv - first_pos;
+    const int chunk = (active_len + ATTN_WARPS - 1) / ATTN_WARPS;
+    const int pos_start = first_pos + warp_id * chunk;
     const int pos_end = min(pos_start + chunk, total_kv);
 
     float running_max = -1e10f;
@@ -763,14 +775,15 @@ __global__ void attention_prefill_cached_kernel(
 void launch_attention_prefill_cached_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads,
-    int head_dim, int max_seq_len, float scale, cudaStream_t stream
+    int head_dim, int max_seq_len, float scale, int window_size,
+    cudaStream_t stream
 ) {
     dim3 grid(seq_new, num_heads);
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
     attention_prefill_cached_kernel<<<grid, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         seq_new, past_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale
+        max_seq_len, scale, window_size
     );
 }
 

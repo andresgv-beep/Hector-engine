@@ -50,7 +50,7 @@ correctitud.
 | Capas con KV compartido | 20 |
 | Softcap final | 30,0 |
 | PLE por capa | 256 |
-| RoPE proporcional | `ROPE_PROPORTIONAL = 8` |
+| RoPE por capa | local: default, θ=10.000, rotary=1,0; global: proporcional (`8`), θ=1.000.000, rotary=0,25 |
 | Escala de atención | 1,0 (no `1/sqrt(head_dim)`) |
 
 Las capas no son uniformes. El HNF incluye una extensión binaria `GM4X` con
@@ -273,11 +273,13 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 - **Fase activa:** Fase 6 — atención alternada y KV compartido.
 - **Última fase completada:** Fase 5 — grafo Gemma 4 por capa.
-- **Siguiente acción exacta:** definir el layout KV heterogéneo y sus aliases
-  compartidos, conservando estados de dimensión 256 para local y 512 para
-  global antes de conectar prefill o decode.
+- **Siguiente acción exacta:** capturar logits de una implementación de
+  referencia para un prompt corto y otro mayor de 512 tokens y compararlos con
+  el forward cached real ya operativo; no cerrar Fase 6 solo con consistencia
+  interna prefill/decode.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
-  primitivas, ruta PLE y grafo Gemma 4 explícito con scratch por capa.
+  primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
+  cached completo.
 
 ## Registro de trabajo
 
@@ -291,3 +293,5 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-07-31 | Fase 4 | Lookup HQ51K terminado; ruta PLE aún incompleta | Fila real 42: 8960 valores desde solo 7000 bytes, igualdad con decoder CPU |
 | 2026-07-31 | Fase 4 | Ruta PLE completa verificada y cerrada | Filas 0/42/262143; preparación de 35 segmentos max abs 0,015625; inyección en capas 0/4/15/34 max abs 0,00390625; workspace 17,5 MiB para 1x512 |
 | 2026-07-31 | Fase 5 | Grafo heterogéneo por capa verificado y cerrado | PLE multi-token; capas reales 0-4 encadenadas contra CPU, global HD512 max abs 0,0234375; cola MLP/PLE de capa 15 a 12288 max abs 0,0273438 |
+| 2026-07-31 | Baseline | Suite legacy reparada: 11/11 tests pasan | Ops fusionadas son builtins reutilizables; mock HNF corregido; loader rechaza size/dtype inválidos y libera correctamente RAM mapeada |
+| 2026-07-31 | Fase 6 (parcial) | Layout KV y forward cached completo operativos | 15 slots físicos; capas 15-34 aliasan local 13/global 14; máscaras prefill/decode incluido límite >512; HD512; HNF real prefill vs decode max/mean 0 y mismo argmax 236772 |

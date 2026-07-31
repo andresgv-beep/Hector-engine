@@ -102,8 +102,8 @@ void CommandBuffer::add_rmsnorm_no_weight(const std::string& dst,
 void CommandBuffer::add_add_rmsnorm(const std::string& residual_dst, const std::string& normed_dst,
                                      const std::string& a, const std::string& b,
                                      const std::string& weight, float eps) {
-    auto id = OpTypeRegistry::instance().get_id("add_rmsnorm");
-    add_op(id, normed_dst).in({a, b, weight}).set("eps", eps).set("output_residual", residual_dst);
+    add_op(op::ADD_RMSNORM(), normed_dst).in({a, b, weight})
+        .set("eps", eps).set("output_residual", residual_dst);
 }
 
 void CommandBuffer::add_layernorm(const std::string& dst, const std::string& src,
@@ -136,7 +136,8 @@ void CommandBuffer::add_attention(const std::string& dst,
                                    const std::string& q, const std::string& k, const std::string& v,
                                    uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_dim,
                                    bool causal,
-                                   uint32_t seq_q, uint32_t seq_kv) {
+                                   uint32_t seq_q, uint32_t seq_kv,
+                                   uint32_t window_size) {
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     auto& cmd = add_op(op::ATTENTION(), dst);
     cmd.in({q, k, v});
@@ -147,13 +148,15 @@ void CommandBuffer::add_attention(const std::string& dst,
     cmd.set("causal", causal);
     if (seq_q > 0) cmd.set("seq_q", seq_q);
     if (seq_kv > 0) cmd.set("seq_kv", seq_kv);
+    if (window_size > 0) cmd.set("window_size", window_size);
 }
 
 void CommandBuffer::add_attention_cached(const std::string& dst,
                                           const std::string& q,
                                           const std::string& k_cache, const std::string& v_cache,
                                           uint32_t num_heads, uint32_t num_kv_heads, uint32_t head_dim,
-                                          uint32_t seq_len, uint32_t max_seq_len) {
+                                          uint32_t seq_len, uint32_t max_seq_len,
+                                          uint32_t window_size) {
     float scale = 1.0f / std::sqrt(static_cast<float>(head_dim));
     add_op(op::ATTENTION_CACHED(), dst)
         .in({q, k_cache, v_cache})
@@ -162,7 +165,8 @@ void CommandBuffer::add_attention_cached(const std::string& dst,
         .set("head_dim", head_dim)
         .set("scale", scale)
         .set("seq_len", seq_len)
-        .set("max_seq_len", max_seq_len);
+        .set("max_seq_len", max_seq_len)
+        .set("window_size", window_size);
 }
 
 void CommandBuffer::add_kv_cache_update(const std::string& k_cache, const std::string& v_cache,

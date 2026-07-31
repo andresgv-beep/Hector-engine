@@ -9,6 +9,20 @@
 
 namespace helios {
 
+namespace {
+
+void release_tensor_memory(TensorInfo& info) {
+    if (!info.owns_memory) return;
+    void* allocation = info.allocation_ptr ? info.allocation_ptr : info.ptr;
+    if (!allocation) return;
+    if (info.host_mapped) cudaFreeHost(allocation);
+    else cudaFree(allocation);
+    info.ptr = nullptr;
+    info.allocation_ptr = nullptr;
+}
+
+} // namespace
+
 // ============================================================================
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
@@ -86,6 +100,7 @@ void* TensorRegistry::allocate_and_register(
     info.dtype = dtype;
     info.size_bytes = size_bytes;
     info.owns_memory = true;
+    info.allocation_ptr = ptr;
     
     // Register
     register_tensor(name, std::move(info));
@@ -173,9 +188,7 @@ void TensorRegistry::remove(const std::string& name) {
     if (info.owns_memory) {
         owned_bytes_ -= info.size_bytes;
         // Free GPU memory
-        if (info.ptr) {
-            cudaFree(info.ptr);
-        }
+        release_tensor_memory(info);
     }
     
     tensors_.erase(it);
@@ -184,9 +197,7 @@ void TensorRegistry::remove(const std::string& name) {
 void TensorRegistry::clear() {
     // Free all owned memory
     for (auto& [name, info] : tensors_) {
-        if (info.owns_memory && info.ptr) {
-            cudaFree(info.ptr);
-        }
+        release_tensor_memory(info);
     }
     
     tensors_.clear();
