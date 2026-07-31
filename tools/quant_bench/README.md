@@ -171,6 +171,45 @@ el layout y el kernel son correctos y el ahorro es real, pero ninguna asignació
 probada sobrevive al A/B de conversación. No se tira: puede servir en otro
 modelo o en tensores concretos.
 
+### El reparto que sí funciona (medido 2026-07-31 noche)
+
+Un GGUF Q3_K_M que trajo Andrés dio la pista: llama.cpp pone `ffn_gate` y
+`ffn_up` en Q3_K pero **`ffn_down` en Q5_K**. Ese punto intermedio no se había
+probado — se fue de "todo el MLP a 3 bits" (se rompe) a "solo gate" (limpio
+pero 53 MiB). Medido sobre 1755 posiciones de los dos corpus:
+
+| perfil | aciertos | tamaño | vs el actual |
+|---|---:|---:|---:|
+| todo 4 bits (producción hoy) | 87,7% | 3306 MB | — |
+| gate3 + up3 + **down4** + embed5 | 86,4% | 2640 MB | p=0,10 |
+| **gate3 + up3 + down5 + embed5** | **88,1%** | **2747 MB** | **p=0,73** |
+
+**559 MB menos con calidad estadísticamente idéntica.** Y confirmado en los dos
+corpus por separado (87,7%/88,7% frente a 87,5%/88,1%), no es efecto de uno.
+
+Bajar también `down` a 4 bits ahorra 107 MB más pero pierde 1,3 puntos y cae en
+la zona ambigua (p=0,10). No compensa: `down_proj` escribe directo al flujo
+residual y ahí el error no se lava, mientras que `gate` y `up` alimentan la no
+linealidad y parte del error se pierde por el camino.
+
+**Esto rescata HQ3.1K.** El encoder, el layout y el kernel de GPT son correctos;
+lo que estaba mal era a qué matrices se aplicaban. El cambio es de mapper.
+
+Desglose honesto del ahorro, porque no todo es mérito del 3 bits:
+
+| | MB |
+|---|---:|
+| embeddings fp16 → HQ5.1K | −452 |
+| gate + up a HQ3.1K | −224 |
+| subir `down` a HQ5.1K (peaje) | +112 |
+
+**Falta el A/B.** 88,1% es métrica de banco, y el banco ya dejó pasar HQ3.1K
+una vez. La diferencia es que aquí el perfil es indistinguible de uno que *ya
+funciona en producción*, lo que da mucha mejor base de partida que el 83% del
+intento anterior. Pero decide `tools/hq31_ab.py`.
+
+### Orden de trabajo
+
 Lo que queda, por orden de relación beneficio/riesgo:
 
 1. **Tabla de embeddings a HQ5.1K.** Hoy va en fp16 (742 MB, 22% del fichero).
