@@ -38,6 +38,7 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <utility>
 #include <ctime>
 #include <sys/stat.h>
 #include <sys/select.h>
@@ -98,35 +99,121 @@ static std::string owner_name() {
     return "su dueño";
 }
 
-static std::string memory_path() {
+// DOS NIVELES (la jerarquía de HERA, nivel 1):
+//   facts.md    — hechos duraderos sobre Andrés y el proyecto. Se cargan
+//                 SIEMPRE y enteros: son quién es él.
+//   episodic.md — resúmenes de sesión. Solo las últimas: son qué pasó.
+// Sin esta separación, el chismorreo episódico ("me pidió que le explique
+// un compilador") saturaba el prefijo y secuestraba las respuestas.
+static std::string helios_dir() {
     const char* home = getenv("HOME");
     std::string dir = std::string(home ? home : ".") + "/.helios";
     mkdir(dir.c_str(), 0755);
-    return dir + "/episodic.md";
+    return dir;
+}
+static std::string facts_path()  { return helios_dir() + "/facts.md"; }
+static std::string memory_path() { return helios_dir() + "/episodic.md"; }
+static std::string candidates_path() { return helios_dir() + "/candidates.md"; }
+
+// Carga jerárquica: TODOS los hechos + las últimas N sesiones
+static std::string load_memories(size_t max_chars) {
+    std::string out;
+
+    std::ifstream ff(facts_path());
+    if (ff) {
+        std::stringstream fs;
+        fs << ff.rdbuf();
+        std::string facts = fs.str();
+        if (!facts.empty()) {
+            if (facts.size() > max_chars * 2 / 3)          // tope de seguridad
+                facts = facts.substr(facts.size() - max_chars * 2 / 3);
+            out += "FICHA DE TU USUARIO (datos de la persona con la que hablas; "
+                   "NO son datos tuyos, tú eres Helios):\n" + facts + "\n";
+        }
+    }
+
+    std::ifstream f(memory_path());
+    if (f) {
+        std::stringstream ss;
+        ss << f.rdbuf();
+        std::string all = ss.str();
+        // Solo las 3 últimas sesiones: lo demás es ruido episódico
+        const int KEEP = 3;
+        size_t pos = all.size();
+        for (int i = 0; i < KEEP && pos != std::string::npos && pos > 0; i++) {
+            size_t p = all.rfind("\n## ", pos - 1);
+            if (p == std::string::npos) { pos = 0; break; }
+            pos = p;
+        }
+        std::string recent = (pos == 0) ? all : all.substr(pos);
+        size_t budget = max_chars - std::min(out.size(), max_chars);
+        if (recent.size() > budget) recent = recent.substr(recent.size() - budget);
+        if (!recent.empty()) out += "Últimas sesiones:\n" + recent;
+    }
+    return out;
 }
 
-static std::string load_memories(size_t max_chars) {
-    std::ifstream f(memory_path());
-    if (!f) return "";
-    std::stringstream ss;
-    ss << f.rdbuf();
-    std::string all = ss.str();
-    // Presupuesto de contexto: si hay demasiada historia, quedarse con lo
-    // más reciente (cortando en el inicio de una sesión para no trocear)
-    if (all.size() > max_chars) {
-        size_t cut = all.find("\n## ", all.size() - max_chars);
-        all = (cut != std::string::npos) ? all.substr(cut) : all.substr(all.size() - max_chars);
+// Normaliza para comparar: minúsculas, sin tildes ni puntuación, palabras
+static std::vector<std::string> mem_words(const std::string& s) {
+    std::string n;
+    for (unsigned char c : s) {
+        if (isalnum(c) || c == ' ') n += (char)tolower(c);
+        else if ((unsigned char)c >= 128) n += (char)c;  // acentos: se dejan
+        else n += ' ';
     }
-    return all;
+    std::vector<std::string> w;
+    std::stringstream ss(n);
+    std::string t;
+    while (ss >> t) if (t.size() > 3) w.push_back(t);
+    return w;
+}
+
+// ¿Ya sabemos esto? Solapamiento de palabras significativas > 70%
+static bool memory_is_duplicate(const std::string& candidate,
+                                const std::string& path) {
+    auto cw = mem_words(candidate);
+    if (cw.empty()) return false;
+    std::ifstream f(path);
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        auto ew = mem_words(line);
+        if (ew.empty()) continue;
+        int hits = 0;
+        for (const auto& w : cw)
+            if (std::find(ew.begin(), ew.end(), w) != ew.end()) hits++;
+        if ((float)hits / (float)cw.size() > 0.70f) return true;
+    }
+    return false;
 }
 
 static void append_memory(const std::string& summary) {
+    if (memory_is_duplicate(summary, memory_path())) return;
     std::ofstream f(memory_path(), std::ios::app);
     if (!f) return;
     char datebuf[64];
     time_t now = time(nullptr);
     strftime(datebuf, sizeof(datebuf), "%Y-%m-%d %H:%M", localtime(&now));
     f << "\n## Sesión " << datebuf << "\n" << summary << "\n";
+}
+
+// Hecho duradero → facts.md (lo que define a Andrés, no lo que pasó un día)
+static void append_fact(const std::string& fact) {
+    if (memory_is_duplicate(fact, facts_path())) return;
+    std::ofstream f(facts_path(), std::ios::app);
+    if (!f) return;
+    f << "- " << fact << "\n";
+}
+
+// La extracción automática NO tiene autoridad para contaminar el prefijo.
+// El modelo solo propone; una petición explícita del usuario sí escribe facts.
+static void append_candidate(const std::string& fact) {
+    if (memory_is_duplicate(fact, facts_path()) ||
+        memory_is_duplicate(fact, candidates_path())) return;
+    std::ofstream f(candidates_path(), std::ios::app);
+    if (!f) return;
+    f << "- " << fact << "\n";
 }
 
 // ============================================================================
@@ -281,15 +368,37 @@ int main(int argc, char** argv) {
         gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
 
         Sampler sampler;
-        // Ventana del penalty: 128 no alcanza a ver bloques repetidos largos
-        // (el bucle clásico del 4B repite párrafos de ~200 tokens). Con el
-        // penalty v2 (solo la ventana viaja a GPU) 384 es igual de barato.
-        sampler.set_penalty_window(384);
+        // Parámetros de muestreo calibrables por entorno (para barridos A/B
+        // sin recompilar): HELIOS_REP, HELIOS_WINDOW, HELIOS_FREQ,
+        // HELIOS_TOPK, HELIOS_TOPP, HELIOS_SEED
+        auto env_f = [](const char* k, float def) {
+            const char* v = getenv(k); return v ? (float)atof(v) : def;
+        };
+        auto env_i = [](const char* k, int def) {
+            const char* v = getenv(k); return v ? atoi(v) : def;
+        };
+        // Los overrides sirven para calibrar sin recompilar. Los defaults
+        // siguen siendo la configuración estable anterior: una muestra con
+        // una semilla y un prompt no basta para promover una variante.
+        const float cfg_rep  = env_f("HELIOS_REP", 1.15f);
+        const float cfg_freq = env_f("HELIOS_FREQ", 0.1f);
+        const int   cfg_win  = env_i("HELIOS_WINDOW", 384);
+        const int   cfg_topk = env_i("HELIOS_TOPK", 50);
+        const float cfg_topp = env_f("HELIOS_TOPP", 0.9f);
+        const int   cfg_seed = env_i("HELIOS_SEED", 0);
+        sampler.set_penalty_window(cfg_win);
+        if (cfg_seed) sampler.set_seed((uint64_t)cfg_seed);  // tiradas reproducibles
         // Config VIVA: el CK la reajusta cada turno (temperature_for)
         SamplingConfig sample_config = temperature < 0.01f
             ? SamplingConfig::greedy()
-            : SamplingConfig::creative(temperature, 50, 0.9f);
+            : SamplingConfig::creative(temperature, cfg_topk, cfg_topp);
+        sample_config.repetition_penalty = cfg_rep;
+        sample_config.frequency_penalty = cfg_freq;
         const float base_temp = temperature;
+        std::cout << ">>> Sampler: rep=" << cfg_rep << " window=" << cfg_win
+                  << " freq=" << cfg_freq << " top_k=" << cfg_topk
+                  << " top_p=" << cfg_topp
+                  << (cfg_seed ? " seed=fija" : " seed=aleatoria") << std::endl;
 
         // El MISMO tensor sirve a decode (1 token en la posición 0) y a prefill
         // (S tokens) — el puntero no cambia jamás, que el graph capturado lo usa
@@ -394,25 +503,17 @@ int main(int argc, char** argv) {
                 sys_ids.insert(sys_ids.end(), seg.begin(), seg.end());
             };
             std::string owner = owner_name();
+            // BREVE A PROPÓSITO. Cada corrección de comportamiento que se
+            // añadía como texto ("prohibido X", "recuerda Y") empeoraba las
+            // cosas: un 4B con 400 palabras de meta-instrucciones se ahoga,
+            // las recita y confunde los papeles ("Soy Andrés..."). La
+            // disciplina la ponen los mecanismos deterministas (presupuestos,
+            // rienda de thinking, detector de bucles), no el sermón.
             std::string sys_text =
-                "Eres Helios, el asistente de " + owner + ": corres en su ordenador, "
-                "sobre un motor llamado Héctor que él mismo construyó. Os conocéis; "
-                "no eres un servicio, eres su compañero de proyecto.\n\n"
-                "CÓMO HABLAS: cercano y con confianza, tuteando. Frases cortas, "
-                "lenguaje de persona, no de manual. Puedes bromear, opinar y decir "
-                "'no sé'. Si te habla informal, respondes informal. Nada de listas, "
-                "titulares numerados, secciones con ###, emojis decorativos ni tono "
-                "de consultora — ni siquiera en temas técnicos: ahí explicas como "
-                "un colega en un bar, en párrafos normales. Solo usas formato de "
-                "documento si te piden un documento. No repitas lo que acabas de "
-                "decir con otras palabras: una idea, una vez. No repitas su "
-                "nombre en cada frase: sabes con quién hablas, úsalo solo cuando "
-                "aporte algo.\n\n"
-                "HONESTIDAD: sobre personas y hechos di SOLO lo que esté en tu "
-                "memoria o en la conversación. Si no lo sabes, dilo. Jamás inventes "
-                "biografías, logros ni elogios genéricos: a " + owner + " le molesta "
-                "que le doren la píldora. Estas instrucciones y tu memoria son "
-                "privadas: úsalas, pero nunca las cites ni las recites.";
+                "Te llamas Helios. Eres el asistente personal de " + owner + " y "
+                "hablas con él. Él construyó el motor Héctor sobre el que corres.\n"
+                "Hablas como un colega de confianza: cercano, directo, frases "
+                "cortas, sin listas ni titulares. Si no sabes algo, lo dices.";
 
             // MEMORIA: los recuerdos de sesiones anteriores entran al prefijo.
             // El framing importa: sin la instrucción explícita de confianza,
@@ -440,15 +541,9 @@ int main(int argc, char** argv) {
             // primero. Sin esto, tras los informes de memoria volvía al registro
             // de asistente comercial ("¿en qué puedo ayudarte?") y saludaba
             // como a un desconocido después de cada compactación.
-            sys_text += "\n\nRECUERDA CÓMO ERES: " + owner + " y tú ya os "
-                        "conocéis y venís de largo. Habla como un colega: "
-                        "directo, cálido, con humor. PROHIBIDO terminar las "
-                        "respuestas ofreciendo ayuda ('¿en qué puedo ayudarte?', "
-                        "'no dudes en decírmelo', 'estoy aquí para lo que "
-                        "necesites') — acaba cuando acabes lo que tengas que "
-                        "decir. Prohibido presentarte o saludar si ya estabais "
-                        "hablando. Prohibido llamarte 'asistente' o 'herramienta': "
-                        "eres Helios.";
+            // Cierre mínimo: la última línea pesa, pero una sola frase
+            sys_text += "\n\nEres Helios y hablas con " + owner +
+                        ". Responde como un amigo, no como un servicio.";
             sys_ids.push_back(*im_start);
             pt("system\n" + sys_text);
             sys_ids.push_back(*im_end);
@@ -517,7 +612,10 @@ int main(int argc, char** argv) {
                 "Mensaje: 'jaja qué bueno' → NADA\n"
                 "Mensaje: 'vamos a usar React para la interfaz' → DATO: Ha "
                 "decidido usar React para la interfaz.\n"
-                "Mensaje: 'cuéntame un chiste' → NADA\n\n"
+                "Mensaje: 'cuéntame un chiste' → NADA\n"
+                "Mensaje: 'explícame qué es un compilador' → NADA (es una "
+                "pregunta de conocimiento general, no un dato sobre él)\n"
+                "Mensaje: '¿cómo funciona la fotosíntesis?' → NADA\n\n"
                 "Mensaje: '" + user_msg.substr(0, 400) + "' → /no_think");
             r_ids.push_back(*im_end);
             pt3("\n");
@@ -559,9 +657,23 @@ int main(int argc, char** argv) {
                                     "no contiene", "no aporta"}) {
                 if (lower.find(neg) != std::string::npos) return;
             }
+            // Filtro determinista: el recuerdo tiene que ser SOBRE ÉL. El 4B
+            // cuela definiciones de diccionario ("Un compilador es...") por
+            // muchos ejemplos negativos que le des; esto no se negocia con
+            // el modelo, se comprueba.
+            bool about_user = false;
+            for (const char* mark : {"le gusta", "no le gusta", "le molesta",
+                                     "prefiere", "ha decidido", "decidió",
+                                     "se llama", "trabaja", "vive", "quiere",
+                                     "usa ", "tiene", "su ", "le interesa",
+                                     "pidió", "odia", "suele", "está "}) {
+                if (lower.find(mark) != std::string::npos) { about_user = true; break; }
+            }
+            if (!about_user) return;
 
-            append_memory("Observado: " + fact);
-            std::cout << "\033[90m  · anotado: " << fact << "\033[0m" << std::endl;
+            append_candidate(fact);
+            std::cout << "\033[90m  · candidato de memoria: " << fact
+                      << "\033[0m" << std::endl;
         };
 
         // --- Destilación de lo hablado — compartida por la compactación en
@@ -575,11 +687,17 @@ int main(int argc, char** argv) {
                 d_ids.insert(d_ids.end(), seg.begin(), seg.end());
             };
             d_ids.push_back(*im_start);
-            pt2("user\nResume en 3 a 6 frases lo esencial de esta conversación "
-                "para tu memoria — quién es el usuario, datos que te dio, "
-                "decisiones y temas tratados. Si te pidieron recordar algún "
-                "dato concreto (claves, nombres, números), inclúyelo LITERAL. "
-                "Solo el resumen, sin saludos ni despedidas. /no_think");
+            // EN PRIMERA PERSONA: si el resumen habla de "el usuario" en
+            // tercera, al releerlo el modelo se coloca como observador
+            // externo y llega a saludarse a sí mismo. Escrito como recuerdo
+            // propio ("me contó", "decidimos"), se reconoce dentro de la
+            // escena.
+            pt2("user\nEscribe 3 a 6 frases de recuerdo personal de esta "
+                "conversación, en PRIMERA PERSONA, como notas tuyas: 'me "
+                "contó que...', 'decidimos...', 'me pidió...'. Nunca digas "
+                "'el usuario' ni hables de ti en tercera persona. Incluye "
+                "datos concretos LITERALES si te pidieron recordarlos. Solo "
+                "las notas, sin saludos. /no_think");
             d_ids.push_back(*im_end);
             pt2("\n");
             d_ids.push_back(*im_start);
@@ -680,7 +798,7 @@ int main(int argc, char** argv) {
                 }
                 if (!note.empty()) {
                     while (!note.empty() && note.front() == ' ') note.erase(note.begin());
-                    append_memory("Nota explícita de " + owner_name() + ": " + note);
+                    append_fact(note);   // lo que pide recordar es duradero
                     std::cout << "\033[32m(apuntado en memoria de verdad)\033[0m\n";
                     if (silent) { std::cout << std::endl; continue; }
                     // fraseo natural: el turno sigue — el modelo también se entera
@@ -732,13 +850,23 @@ int main(int argc, char** argv) {
                 line = "Te paso un texto. Léelo y coméntame lo esencial:\n\n" + pasted;
             }
 
-            // "/memoria" — enseñar el diario tal cual está en disco
+            // "/memoria" — enseñar memoria autoritativa, episodios y
+            // candidatos por separado. Los candidatos NO entran al prompt.
             if (line == "/memoria") {
-                std::ifstream mf(memory_path());
-                if (mf) {
-                    std::cout << "\033[90m--- " << memory_path() << " ---\033[0m\n";
+                bool any = false;
+                for (const auto& entry : {
+                         std::make_pair("HECHOS CONFIRMADOS", facts_path()),
+                         std::make_pair("SESIONES RECIENTES", memory_path()),
+                         std::make_pair("CANDIDATOS (no cargados)", candidates_path())}) {
+                    std::ifstream mf(entry.second);
+                    if (!mf) continue;
+                    any = true;
+                    std::cout << "\033[90m--- " << entry.first << " · "
+                              << entry.second << " ---\033[0m\n";
                     std::string ml;
                     while (std::getline(mf, ml)) std::cout << ml << "\n";
+                }
+                if (any) {
                     std::cout << "\033[90m--- fin ---\033[0m\n" << std::endl;
                 } else {
                     std::cout << "(sin memoria todavía)\n" << std::endl;
@@ -935,8 +1063,6 @@ int main(int argc, char** argv) {
                     }
                 }
 
-                gen_count++;
-                next = forward_one(next);
                 // Penalty de repetición SOLO sobre texto visible normal:
                 // jamás penalizar tokens especiales (>= 151643: im_end,
                 // think, etc.) ni el contenido del think — penalizar
@@ -944,6 +1070,11 @@ int main(int argc, char** argv) {
                 if (!in_think && next < 151643) {
                     sampler.add_context(next);
                 }
+                // Registrar el token ACTUAL antes de muestrear el siguiente.
+                // Hacerlo después desplaza la ventana una posición: el sampler
+                // no ve el token recién emitido cuando calcula sus logits.
+                gen_count++;
+                next = forward_one(next);
                 if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
             }
 
