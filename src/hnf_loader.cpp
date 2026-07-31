@@ -674,20 +674,48 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
         return false;
     }
     
+    // ¿Este tensor vive en RAM? La tabla de embeddings ocupa 1.16 GB en un 8B
+    // pero por token solo se lee UNA fila (8 KB). Tenerla en VRAM es malgastar
+    // memoria carísima: en RAM anclada+mapeada la GPU lee esa fila por PCIe en
+    // ~0.3 µs sobre los ~18.000 µs que dura un token (0.002% de coste).
+    // Los pesos que SÍ se leen enteros cada token (capas, lm_head) jamás:
+    // PCIe es 15× más lento que la VRAM.
+    const char* off = getenv("HELIOS_EMBED_IN_RAM");
+    bool to_host = off && *off == '1' &&
+                   entry.name.find("token_embedding") != std::string::npos;
+
     void* d_ptr = nullptr;
-    cudaError_t err = cudaMalloc(&d_ptr, entry.size);
-    if (err != cudaSuccess) {
-        std::cerr << "HnfLoader: cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
-        return false;
+    cudaError_t err;
+    if (to_host) {
+        void* h_ptr = nullptr;
+        err = cudaHostAlloc(&h_ptr, entry.size, cudaHostAllocMapped);
+        if (err == cudaSuccess) {
+            memcpy(h_ptr, host_data.data(), entry.size);
+            err = cudaHostGetDevicePointer(&d_ptr, h_ptr, 0);
+        }
+        if (err != cudaSuccess) {
+            std::cerr << "HnfLoader: host-mapped alloc failed para " << entry.name
+                      << " — cayendo a VRAM" << std::endl;
+            to_host = false;
+        } else {
+            std::cout << "  [RAM] " << entry.name << " ("
+                      << entry.size / (1024 * 1024) << " MB fuera de VRAM)" << std::endl;
+        }
     }
-    
-    err = cudaMemcpy(d_ptr, host_data.data(), entry.size, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-        cudaFree(d_ptr);
-        std::cerr << "HnfLoader: cudaMemcpy failed" << std::endl;
-        return false;
+    if (!to_host) {
+        err = cudaMalloc(&d_ptr, entry.size);
+        if (err != cudaSuccess) {
+            std::cerr << "HnfLoader: cudaMalloc failed: " << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+        err = cudaMemcpy(d_ptr, host_data.data(), entry.size, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cudaFree(d_ptr);
+            std::cerr << "HnfLoader: cudaMemcpy failed" << std::endl;
+            return false;
+        }
     }
-    
+
     TensorInfo info;
     info.ptr = d_ptr;
     info.shape = entry.shape;

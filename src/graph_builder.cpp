@@ -362,7 +362,10 @@ void GraphBuilder::allocate_scratch(
     }
     
     // Output
-    alloc("logits", {B, L, V});
+    // Solo UNA fila: desde que el lm_head calcula únicamente la última
+    // posición (row_offset), las demás filas nunca se escriben ni se leen.
+    // Con vocab 152k y prefill de 512 eran 155 MB de VRAM tirados.
+    alloc("logits", {B, 1, V});
     
     scratch_allocated_ = true;
 }

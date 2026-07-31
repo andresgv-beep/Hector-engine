@@ -39,6 +39,7 @@
 #include <thread>
 #include <algorithm>
 #include <utility>
+#include <set>
 #include <ctime>
 #include <sys/stat.h>
 #include <sys/select.h>
@@ -177,22 +178,57 @@ static std::vector<std::string> mem_words(const std::string& s) {
     return w;
 }
 
-// ¿Ya sabemos esto? Solapamiento de palabras significativas > 70%
+// ¿Ya sabemos esto? Compara por CONTENCIÓN entre entradas completas.
+//
+// La versión anterior comparaba el candidato contra cada LÍNEA suelta: una
+// nota de 15 líneas contra una línea daba solapamiento bajísimo y colaba.
+// Así se duplicó tres veces el mismo capítulo de una historia en el diario.
+//
+// Ahora: se parte el fichero en ENTRADAS (bloques '## ...' o líneas '- ...'),
+// se usan conjuntos de palabras significativas, y el criterio es la
+// contención sobre el MENOR de los dos — así detecta también cuando el
+// candidato es un trozo de algo ya guardado, o una versión ampliada.
 static bool memory_is_duplicate(const std::string& candidate,
                                 const std::string& path) {
-    auto cw = mem_words(candidate);
-    if (cw.empty()) return false;
+    auto cwv = mem_words(candidate);
+    if (cwv.empty()) return false;
+    std::set<std::string> cw(cwv.begin(), cwv.end());
+    if (cw.size() < 3) return false;   // demasiado corto para juzgar
+
     std::ifstream f(path);
     if (!f) return false;
-    std::string line;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        auto ew = mem_words(line);
-        if (ew.empty()) continue;
-        int hits = 0;
-        for (const auto& w : cw)
-            if (std::find(ew.begin(), ew.end(), w) != ew.end()) hits++;
-        if ((float)hits / (float)cw.size() > 0.70f) return true;
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string all = ss.str();
+
+    // Trocear en entradas: los bloques '## ' del diario, o cada '- ' de facts
+    std::vector<std::string> entries;
+    size_t pos = 0;
+    while (pos < all.size()) {
+        size_t next = all.find("\n## ", pos);
+        std::string block = all.substr(pos, next == std::string::npos
+                                            ? std::string::npos : next - pos);
+        if (block.find("\n- ") != std::string::npos || block.rfind("- ", 0) == 0) {
+            std::stringstream bs(block);
+            std::string ln;
+            while (std::getline(bs, ln))
+                if (!ln.empty() && ln[0] != '#') entries.push_back(ln);
+        } else {
+            entries.push_back(block);
+        }
+        if (next == std::string::npos) break;
+        pos = next + 1;
+    }
+
+    for (const auto& e : entries) {
+        auto ewv = mem_words(e);
+        if (ewv.size() < 3) continue;
+        std::set<std::string> ew(ewv.begin(), ewv.end());
+        size_t inter = 0;
+        for (const auto& w : cw) if (ew.count(w)) inter++;
+        // Contención sobre el menor: pilla copias, trozos y ampliaciones
+        double cont = (double)inter / (double)std::min(cw.size(), ew.size());
+        if (cont > 0.65) return true;
     }
     return false;
 }
@@ -438,6 +474,11 @@ int main(int argc, char** argv) {
         int user_turns = 0;
         bool fast_mode = false;
         std::string last_user_msg, last_reply;  // para el puente de compactación
+        // Últimos intercambios literales: con UNO solo, tras compactar el
+        // modelo veía siempre el mismo contexto y repetía la misma respuesta
+        // palabra por palabra (una historia no podía avanzar). Con varios, la
+        // conversación conserva progresión al otro lado del reset.
+        std::vector<std::pair<std::string,std::string>> recent_turns;
         const float SPEAK_PACE_TOKS = 18.0f;   // ritmo de lectura humana
         auto hexos_last = std::chrono::high_resolution_clock::now();
 
@@ -540,8 +581,12 @@ int main(int argc, char** argv) {
             // Presupuesto de memoria proporcional al contexto: 3000 caracteres
             // (~800 tokens) se comen el 40% de un contexto de 2048 y dejan sin
             // sitio a la conversación.
+            // El prefijo NO puede comerse el contexto: con 2048 posiciones y
+            // 3000 caracteres de memoria ocupaba el 51%, dejando ~300 de aire
+            // → compactaba en cada turno y la conversación no avanzaba nunca.
+            // Tope: ~1/4 del contexto (≈3 caracteres por token).
             std::string memories = load_memories(
-                std::min<size_t>(3000, kv_config.max_seq_len));
+                std::min<size_t>(3000, (size_t)kv_config.max_seq_len * 3 / 4));
             if (!memories.empty()) {
                 sys_text += "\n\nTU MEMORIA de sesiones anteriores. Es real y es "
                             "tuya: la escribiste tú al final de cada sesión. La "
@@ -577,18 +622,27 @@ int main(int argc, char** argv) {
             // cada compactación el modelo repetía su última respuesta palabra
             // por palabra pasara lo que pasara. Como turno cerrado, es pasado.
             if (!last_exchange.empty()) {
-                size_t sep = last_exchange.find("\n\x01");
-                if (sep != std::string::npos) {
-                    std::string u = last_exchange.substr(0, sep);
-                    std::string a = last_exchange.substr(sep + 2);
-                    sys_ids.push_back(*im_start);
-                    pt("user\n" + u);
-                    sys_ids.push_back(*im_end);
-                    pt("\n");
-                    sys_ids.push_back(*im_start);
-                    pt("assistant\n" + a);
-                    sys_ids.push_back(*im_end);
-                    pt("\n");
+                // Varios intercambios separados por \x02, cada uno user\x01asst
+                size_t start = 0;
+                while (start < last_exchange.size()) {
+                    size_t end = last_exchange.find('\x02', start);
+                    std::string turn = last_exchange.substr(
+                        start, end == std::string::npos ? std::string::npos : end - start);
+                    size_t sep = turn.find("\n\x01");
+                    if (sep != std::string::npos) {
+                        std::string u = turn.substr(0, sep);
+                        std::string a = turn.substr(sep + 2);
+                        sys_ids.push_back(*im_start);
+                        pt("user\n" + u);
+                        sys_ids.push_back(*im_end);
+                        pt("\n");
+                        sys_ids.push_back(*im_start);
+                        pt("assistant\n" + a);
+                        sys_ids.push_back(*im_end);
+                        pt("\n");
+                    }
+                    if (end == std::string::npos) break;
+                    start = end + 1;
                 }
             }
             (void)forward_batch(sys_ids);
@@ -731,8 +785,14 @@ int main(int argc, char** argv) {
                 "y " + owner_name() + ". Escribe 3 a 6 frases de recuerdo "
                 "personal en PRIMERA PERSONA, como notas tuyas: 'me contó "
                 "que...', 'decidimos...', 'me pidió...'. Nunca digas 'el "
-                "usuario' ni te presentes ni saludes. Incluye datos concretos "
-                "LITERALES si te pidieron recordarlos. Solo las notas.\n\n"
+                "usuario' ni te presentes ni saludes.\n\n"
+                "IMPORTANTE: son NOTAS SOBRE lo que pasó, nunca una copia del "
+                "contenido. Si contaste una historia, escribe 'le conté un "
+                "relato sobre X' — jamás reproduzcas el relato. Si explicaste "
+                "algo, escribe 'le expliqué X', no la explicación. Copiar el "
+                "contenido hace que luego lo repitas en vez de continuarlo. "
+                "Solo los datos concretos que te pidieran recordar van "
+                "literales.\n\n"
                 + body + "\n/no_think");
             d_ids.push_back(*im_end);
             pt2("\n");
@@ -766,7 +826,15 @@ int main(int argc, char** argv) {
             std::transform(low.begin(), low.end(), low.begin(), ::tolower);
             std::string own = owner_name();
             std::transform(own.begin(), own.end(), own.begin(), ::tolower);
-            bool bad = summary.size() < 20;
+            // Guardia contra COPIA de contenido: unas notas de 3-6 frases no
+            // pasan de ~700 caracteres. Más largo = el modelo ha copiado el
+            // contenido (una historia, una explicación) en vez de resumirlo, y
+            // eso acaba en el prefijo haciéndole recitar en vez de continuar.
+            bool bad = summary.size() < 20 || summary.size() > 700;
+            // Marcadores de copia literal: encabezados, comillas de relato
+            for (const char* cp : {"**\"", "(Continuación)", "\n# ", "\n## ",
+                                   "Capítulo", "capítulo"})
+                if (summary.find(cp) != std::string::npos) bad = true;
             for (const char* g : {"hola", "¡hola", "buenas", "hey "})
                 if (low.rfind(g, 0) == 0) bad = true;
             for (const char* b : {"el usuario", "assistant", "<|im_start|>",
@@ -987,12 +1055,16 @@ int main(int argc, char** argv) {
                 // Separador \n\x01 para partirlo en turnos ChatML. La respuesta
                 // se corta en frontera de frase: truncar a lo bruto dejaba un
                 // turno propio acabado en el aire.
+                // VARIOS intercambios recientes, no solo el último: con uno
+                // solo el modelo veía el mismo contexto tras cada compactación
+                // y repetía su respuesta literal (una historia no avanzaba).
                 std::string exch;
-                if (!last_user_msg.empty()) {
-                    std::string rep = last_reply.substr(0, 600);
+                for (auto& t : recent_turns) {
+                    std::string rep = t.second.substr(0, 500);
                     size_t stop = rep.find_last_of(".\n!?");
-                    if (stop != std::string::npos && stop > 100) rep = rep.substr(0, stop + 1);
-                    exch = last_user_msg.substr(0, 400) + "\n\x01" + rep;
+                    if (stop != std::string::npos && stop > 80) rep = rep.substr(0, stop + 1);
+                    if (!exch.empty()) exch += "\x02";          // separador de turno
+                    exch += t.first.substr(0, 300) + "\n\x01" + rep;
                 }
                 prefill_prefix(notes, exch, false);
                 std::cout << " hecho — contexto " << kv_cache.position()
@@ -1252,6 +1324,12 @@ int main(int argc, char** argv) {
                 if (nt != std::string::npos) clean.erase(nt, 10);
                 session_transcript += "[" + owner_name() + "]: " + clean + "\n"
                                     + "[Helios]: " + last_reply + "\n";
+                // Ring de los últimos intercambios (sobreviven a la compactación)
+                recent_turns.push_back({clean, last_reply});
+                const size_t KEEP_TURNS =
+                    kv_config.max_seq_len >= 3072 ? 3 : 2;
+                while (recent_turns.size() > KEEP_TURNS)
+                    recent_turns.erase(recent_turns.begin());
                 const size_t MAXTR = 8000;
                 if (session_transcript.size() > MAXTR) {
                     size_t start = session_transcript.size() - MAXTR;
