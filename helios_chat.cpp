@@ -207,12 +207,17 @@ static void append_memory(const std::string& summary) {
     f << "\n## Sesión " << datebuf << "\n" << summary << "\n";
 }
 
-// Hecho duradero → facts.md (lo que define al dueño, no lo que pasó un día)
-static void append_fact(const std::string& fact) {
+// Hecho duradero → facts.md (lo que define al dueño, no lo que pasó un día).
+// `quoted` = son palabras textuales del dueño ("apunta esto: mi perro...").
+// Guardarlas tal cual es veneno: al releer "mi perro se llama X" el modelo
+// lo repite en primera persona y se cree que es él. Con atribución explícita
+// queda claro de quién son las palabras sin perder el dato literal.
+static void append_fact(const std::string& fact, bool quoted = false) {
     if (memory_is_duplicate(fact, facts_path())) return;
     std::ofstream f(facts_path(), std::ios::app);
     if (!f) return;
-    f << "- " << fact << "\n";
+    if (quoted) f << "- Él dijo textualmente: \"" << fact << "\"\n";
+    else        f << "- " << fact << "\n";
 }
 
 // La extracción automática NO tiene autoridad para contaminar el prefijo.
@@ -364,7 +369,11 @@ int main(int argc, char** argv) {
         kv_config.num_kv_heads = model_config.num_key_value_heads();
         kv_config.head_dim = model_config.head_dim();
         kv_config.max_batch_size = 1;
-        kv_config.max_seq_len = 4096;
+        // HELIOS_CTX permite ajustarlo al modelo: un 8B deja menos VRAM libre
+        // para el cache. Con compactación en caliente, un contexto menor solo
+        // significa que la conversación respira más a menudo, no que muera.
+        kv_config.max_seq_len = (uint32_t)std::max(512,
+            (getenv("HELIOS_CTX") ? atoi(getenv("HELIOS_CTX")) : 4096));
         KVCache kv_cache;
         if (!kv_cache.allocate(kv_config)) throw std::runtime_error("KV alloc failed");
         std::string kv_prefix = "_kv";
@@ -490,10 +499,10 @@ int main(int argc, char** argv) {
                 engine.sync();
                 kv_cache.advance((uint32_t)n);
 
+                // El grafo ya calcula SOLO la última posición → fila 0
                 auto* logits_info = gb.get_logits(engine);
-                const half* last_row = (const half*)logits_info->ptr +
-                                       (size_t)(n - 1) * model_config.vocab_size();
-                next = sampler.sample(last_row, model_config.vocab_size(),
+                next = sampler.sample((const half*)logits_info->ptr,
+                                      model_config.vocab_size(),
                                       sample_config, stream);
                 total_tokens += n;
                 done += n;
@@ -528,7 +537,11 @@ int main(int argc, char** argv) {
             // El framing importa: sin la instrucción explícita de confianza,
             // el reflejo de alineamiento del modelo ("no tengo acceso a datos
             // personales") le gana a su propia memoria.
-            std::string memories = load_memories(3000);
+            // Presupuesto de memoria proporcional al contexto: 3000 caracteres
+            // (~800 tokens) se comen el 40% de un contexto de 2048 y dejan sin
+            // sitio a la conversación.
+            std::string memories = load_memories(
+                std::min<size_t>(3000, kv_config.max_seq_len));
             if (!memories.empty()) {
                 sys_text += "\n\nTU MEMORIA de sesiones anteriores. Es real y es "
                             "tuya: la escribiste tú al final de cada sesión. La "
@@ -685,10 +698,23 @@ int main(int argc, char** argv) {
                       << "\033[0m" << std::endl;
         };
 
-        // --- Destilación de lo hablado — compartida por la compactación en
-        // caliente y por la despedida ---
-        auto distill_session = [&]() -> std::string {
-            if (kv_cache.position() + 400 >= kv_config.max_seq_len) return "";
+        // --- Destilación desde la TRANSCRIPCIÓN EN RAM, con el KV limpio ---
+        // Antes se destilaba sobre el KV moribundo y se abandonaba en silencio
+        // si no quedaba hueco (posición ≥ max-400). Como una sola respuesta
+        // larga salta esa ventana, la sesión se perdía sin aviso: ni diario ni
+        // notas. Ahora la transcripción vive en RAM y la destilación ocurre
+        // SIEMPRE en contexto recién reseteado — nunca depende del hueco.
+        auto distill_from_transcript = [&](const std::string& transcript) -> std::string {
+            if (transcript.empty()) return "";
+            kv_cache.reset();
+            sampler.clear_context();   // la ventana de penalty no cruza el reset
+
+            std::string body = transcript;
+            const size_t MAXT = 6000;
+            if (body.size() > MAXT) {
+                size_t cut = body.find('\n', body.size() - MAXT);
+                body = body.substr(cut == std::string::npos ? body.size() - MAXT : cut + 1);
+            }
 
             std::vector<int32_t> d_ids;
             auto pt2 = [&](const std::string& s) {
@@ -701,12 +727,13 @@ int main(int argc, char** argv) {
             // externo y llega a saludarse a sí mismo. Escrito como recuerdo
             // propio ("me contó", "decidimos"), se reconoce dentro de la
             // escena.
-            pt2("user\nEscribe 3 a 6 frases de recuerdo personal de esta "
-                "conversación, en PRIMERA PERSONA, como notas tuyas: 'me "
-                "contó que...', 'decidimos...', 'me pidió...'. Nunca digas "
-                "'el usuario' ni hables de ti en tercera persona. Incluye "
-                "datos concretos LITERALES si te pidieron recordarlos. Solo "
-                "las notas, sin saludos. /no_think");
+            pt2("user\nEstas son las notas de una conversación entre tú (Helios) "
+                "y " + owner_name() + ". Escribe 3 a 6 frases de recuerdo "
+                "personal en PRIMERA PERSONA, como notas tuyas: 'me contó "
+                "que...', 'decidimos...', 'me pidió...'. Nunca digas 'el "
+                "usuario' ni te presentes ni saludes. Incluye datos concretos "
+                "LITERALES si te pidieron recordarlos. Solo las notas.\n\n"
+                + body + "\n/no_think");
             d_ids.push_back(*im_end);
             pt2("\n");
             d_ids.push_back(*im_start);
@@ -732,7 +759,61 @@ int main(int argc, char** argv) {
             while (!summary.empty() &&
                    (summary.front() == '\n' || summary.front() == ' '))
                 summary.erase(summary.begin());
+
+            // GUARDIAS: el 4B a veces devuelve un saludo, invierte los papeles
+            // o filtra plantilla. Se comprueba, no se confía.
+            std::string low = summary;
+            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+            std::string own = owner_name();
+            std::transform(own.begin(), own.end(), own.begin(), ::tolower);
+            bool bad = summary.size() < 20;
+            for (const char* g : {"hola", "¡hola", "buenas", "hey "})
+                if (low.rfind(g, 0) == 0) bad = true;
+            for (const char* b : {"el usuario", "assistant", "<|im_start|>",
+                                  "<think>"})
+                if (low.find(b) != std::string::npos) bad = true;
+            if (low.find("soy " + own) != std::string::npos) bad = true;
+            if (bad) {
+                if (getenv("HELIOS_DEBUG"))
+                    std::cerr << "\n[debug] destilación rechazada: "
+                              << summary.substr(0, 200) << "\n";
+                return "";
+            }
             return summary;
+        };
+
+        // Transcripción de la sesión en RAM (independiente del KV)
+        std::string session_transcript;
+        auto transcript_tail = [&](size_t max_chars) -> std::string {
+            if (session_transcript.size() <= max_chars) return session_transcript;
+            size_t start = session_transcript.size() - max_chars;
+            size_t nl = session_transcript.find('\n', start);
+            return session_transcript.substr(nl == std::string::npos ? start : nl + 1);
+        };
+
+        // Destilar SIEMPRE deja rastro: si el modelo falla, va la cola cruda
+        auto consolidate = [&](const char* momento) -> std::string {
+            if (session_transcript.empty()) return "";
+            std::string notes = distill_from_transcript(session_transcript);
+            if (notes.empty()) {
+                notes = distill_from_transcript(session_transcript);  // 1 reintento
+            }
+            if (notes.empty()) {
+                std::cout << "\033[33m(destilación vacía en " << momento
+                          << " — guardando transcripción cruda)\033[0m" << std::endl;
+                // Respaldo crudo: quedarse con lo que DIJO ÉL, no con las
+                // parrafadas del modelo (que solo meten ruido en el diario)
+                std::string raw, ln;
+                std::stringstream ts(session_transcript);
+                std::string own_tag = "[" + owner_name() + "]:";
+                while (std::getline(ts, ln))
+                    if (ln.rfind(own_tag, 0) == 0) raw += ln + "\n";
+                if (raw.size() > 1200) raw = raw.substr(raw.size() - 1200);
+                notes = "(notas sin destilar — lo que dijo él)\n" +
+                        (raw.empty() ? transcript_tail(600) : raw);
+            }
+            append_memory(notes);   // NUNCA se pierde la sesión
+            return notes;
         };
 
         std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /pegar · /salir" << std::endl;
@@ -764,8 +845,8 @@ int main(int argc, char** argv) {
                     if (!more.empty() && more[0] == '/') { pending_cmd = more; break; }
                     line += "\n" + more;
                     joined++;
-                    if (line.size() > 9000) {
-                        std::cout << "\033[33m(pegote truncado a 9000 caracteres)\033[0m\n";
+                    if (line.size() > (size_t)kv_config.max_seq_len * 2) {
+                        std::cout << "\033[33m(pegote truncado al tamaño del contexto)\033[0m\n";
                         break;
                     }
                 }
@@ -807,7 +888,7 @@ int main(int argc, char** argv) {
                 }
                 if (!note.empty()) {
                     while (!note.empty() && note.front() == ' ') note.erase(note.begin());
-                    append_fact(note);   // lo que pide recordar es duradero
+                    append_fact(note, /*quoted=*/true);  // son SUS palabras
                     std::cout << "\033[32m(apuntado en memoria de verdad)\033[0m\n";
                     if (silent) { std::cout << std::endl; continue; }
                     // fraseo natural: el turno sigue — el modelo también se entera
@@ -827,7 +908,9 @@ int main(int argc, char** argv) {
                 std::stringstream dss;
                 dss << df.rdbuf();
                 std::string doc = dss.str();
-                const size_t DOC_MAX = 9000;  // ~2300 tokens: margen en ctx 4096
+                // Proporcional al contexto (~3 chars/token, dejando sitio a
+                // prefijo y respuesta): con ctx 2048, 9000 chars no caben.
+                const size_t DOC_MAX = (size_t)kv_config.max_seq_len * 2;
                 if (doc.size() > DOC_MAX) {
                     doc = doc.substr(0, DOC_MAX);
                     std::cout << "\033[33m(documento truncado a " << DOC_MAX
@@ -850,7 +933,7 @@ int main(int argc, char** argv) {
                     pasted += pl + "\n";
                 }
                 if (pasted.empty()) { std::cout << "(nada pegado)\n" << std::endl; continue; }
-                const size_t PASTE_MAX = 9000;
+                const size_t PASTE_MAX = (size_t)kv_config.max_seq_len * 2;
                 if (pasted.size() > PASTE_MAX) {
                     pasted = pasted.substr(0, PASTE_MAX);
                     std::cout << "\033[33m(texto truncado a " << PASTE_MAX << " caracteres)\033[0m\n";
@@ -887,18 +970,29 @@ int main(int argc, char** argv) {
             // Se destila lo hablado, se resetea el KV, y se re-prefillea
             // identidad + memoria + resumen de la propia sesión + último
             // intercambio literal. La conversación respira. (~1-2 s)
-            if (kv_cache.position() + 1200 > kv_config.max_seq_len) {
+            // Margen proporcional: con 1200 fijo y contexto 2048, compactaba en
+            // CADA turno (el prefijo ya ocupa ~850) — la conversación no
+            // avanzaba nunca y el modelo repetía su respuesta anterior.
+            const uint32_t compact_margin =
+                std::min<uint32_t>(1200, kv_config.max_seq_len / 3);
+            if (kv_cache.position() + compact_margin > kv_config.max_seq_len) {
                 std::cout << "\033[90m(reorganizando recuerdos..." << std::flush;
-                std::string notes = distill_session();
-                if (!notes.empty()) append_memory(notes);  // también al diario
+                // Orden nuevo: la destilación resetea el KV y trabaja sobre la
+                // transcripción en RAM, así que siempre tiene sitio.
+                std::string notes = consolidate("compactación");
 
                 kv_cache.reset();
+                sampler.clear_context();
 
-                // Separador \n\x01 para poder partirlo en turnos ChatML
+                // Separador \n\x01 para partirlo en turnos ChatML. La respuesta
+                // se corta en frontera de frase: truncar a lo bruto dejaba un
+                // turno propio acabado en el aire.
                 std::string exch;
                 if (!last_user_msg.empty()) {
-                    exch = last_user_msg.substr(0, 400) + "\n\x01" +
-                           last_reply.substr(0, 600);
+                    std::string rep = last_reply.substr(0, 600);
+                    size_t stop = rep.find_last_of(".\n!?");
+                    if (stop != std::string::npos && stop > 100) rep = rep.substr(0, stop + 1);
+                    exch = last_user_msg.substr(0, 400) + "\n\x01" + rep;
                 }
                 prefill_prefix(notes, exch, false);
                 std::cout << " hecho — contexto " << kv_cache.position()
@@ -938,6 +1032,38 @@ int main(int argc, char** argv) {
             push_text("\n");
             turn_ids.push_back(*im_start);
             push_text("assistant\n");
+
+            // ¿CABE EL TURNO? Un pegote grande (un árbol de ficheros, un
+            // documento) puede llenar el contexto entero durante SU PROPIO
+            // prefill: el modelo se queda sin sitio para responder y emite
+            // basura. La compactación previa no basta — mira la posición
+            // ANTES del turno, no su tamaño.
+            const uint32_t RESERVE_GEN = 320;   // hueco mínimo para responder
+            uint32_t room = (kv_config.max_seq_len > kv_cache.position() + RESERVE_GEN)
+                          ? kv_config.max_seq_len - kv_cache.position() - RESERVE_GEN
+                          : 0;
+            if (turn_ids.size() > room) {
+                // 1) compactar y reintentar con el contexto recién liberado
+                std::cout << "\033[90m(turno grande — reorganizando...)\033[0m"
+                          << std::endl;
+                std::string notes = consolidate("turno grande");
+                kv_cache.reset();
+                sampler.clear_context();
+                prefill_prefix(notes, "", false);
+                room = (kv_config.max_seq_len > kv_cache.position() + RESERVE_GEN)
+                     ? kv_config.max_seq_len - kv_cache.position() - RESERVE_GEN
+                     : 0;
+            }
+            if (turn_ids.size() > room && room > 64) {
+                // 2) aún no cabe: recortar el contenido conservando el cierre
+                // del turno (los 4 últimos ids son <|im_end|>\n<|im_start|>assistant\n)
+                size_t keep_tail = 8;
+                std::vector<int32_t> tail(turn_ids.end() - keep_tail, turn_ids.end());
+                turn_ids.resize(room - keep_tail);
+                turn_ids.insert(turn_ids.end(), tail.begin(), tail.end());
+                std::cout << "\033[33m(mensaje recortado: no cabía en el contexto — "
+                          << room << " posiciones disponibles)\033[0m" << std::endl;
+            }
 
             auto t0 = std::chrono::high_resolution_clock::now();
             int32_t next = forward_batch(turn_ids);
@@ -1119,6 +1245,22 @@ int main(int argc, char** argv) {
                       << " · ctx " << kv_cache.position() << "/" << kv_config.max_seq_len
                       << "]\033[0m" << std::endl;
 
+            // Transcripción en RAM: sobrevive a cualquier reset del KV
+            {
+                std::string clean = user_msg;
+                size_t nt = clean.find(" /no_think");
+                if (nt != std::string::npos) clean.erase(nt, 10);
+                session_transcript += "[" + owner_name() + "]: " + clean + "\n"
+                                    + "[Helios]: " + last_reply + "\n";
+                const size_t MAXTR = 8000;
+                if (session_transcript.size() > MAXTR) {
+                    size_t start = session_transcript.size() - MAXTR;
+                    size_t nl = session_transcript.find('\n', start);
+                    session_transcript = session_transcript.substr(
+                        nl == std::string::npos ? start : nl + 1);
+                }
+            }
+
             // Reflexión post-turno: el CK decide qué merece memoria, sin que
             // el usuario tenga que decir "recuerda". Corre mientras él lee.
             if (worth_reflecting) reflect_and_capture(user_msg, last_reply);
@@ -1132,13 +1274,10 @@ int main(int argc, char** argv) {
         const char* nod = getenv("HELIOS_NO_DISTILL");
         if (user_turns > 0 && !(nod && *nod == '1')) {
             std::cout << "\n\033[90m(consolidando memoria...\033[0m" << std::flush;
-            std::string summary = distill_session();
-            if (!summary.empty()) {
-                append_memory(summary);
-                std::cout << "\033[90m guardada)\033[0m" << std::endl;
-            } else {
-                std::cout << "\033[90m sin nada que guardar)\033[0m" << std::endl;
-            }
+            std::string summary = consolidate("despedida");
+            std::cout << "\033[90m" << (summary.empty() ? " sin nada que guardar)"
+                                                        : " guardada)")
+                      << "\033[0m" << std::endl;
         }
 
         hexos.update_inference(0.0f, total_tokens, false);

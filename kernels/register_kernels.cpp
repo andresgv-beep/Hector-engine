@@ -376,37 +376,46 @@ void register_linear_kernels(Engine& engine) {
         if (seq_len > 0) {
             M = static_cast<int>(seq_len);
         }
-        
+
         int K = K_input;
-        
+
+        // row_offset: procesar solo desde esa fila del input. Lo usa el
+        // lm_head en prefill — de S posiciones solo importa la última, y
+        // calcular vocab×S logits para tirar S-1 es el mayor desperdicio del
+        // prefill (además obliga a descuantizar la matriz entera a un búfer
+        // temporal enorme). Con esto, el lm_head del prefill es un GEMV.
+        const half* in_ptr = as_fp16_const(input);
+        uint32_t row_offset = cmd.get<uint32_t>("row_offset", 0);
+        if (row_offset > 0) in_ptr += (size_t)row_offset * K;
+
         // Select kernel based on weight dtype
         if (weight->dtype == dtype::HQ4K()) {
             launch_matmul_hq4k(
-                as_fp16_const(input), as_u8_const(weight), as_fp16(output),
+                in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );
         } else if (weight->dtype == dtype::HQ5K()) {
             launch_matmul_hq5k(
-                as_fp16_const(input), as_u8_const(weight), as_fp16(output),
+                in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );
         } else if (weight->dtype == dtype::HQ41K()) {
             launch_matmul_hq41k(
-                as_fp16_const(input), as_u8_const(weight), as_fp16(output),
+                in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );
         } else if (weight->dtype == dtype::HQ51K()) {
             launch_matmul_hq51k(
-                as_fp16_const(input), as_u8_const(weight), as_fp16(output),
+                in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );
         } else {
             launch_matmul_fp16(
-                as_fp16_const(input), as_fp16_const(weight), as_fp16(output),
+                in_ptr, as_fp16_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );

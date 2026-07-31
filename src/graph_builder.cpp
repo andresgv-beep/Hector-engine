@@ -438,13 +438,22 @@ CommandBuffer GraphBuilder::build_forward(
     }
     
     // 4. LM head (logits)
-    if (!arch.lm_head_name.empty()) {
-        cb.add_matmul(S("logits"), S("normed"), WG(arch, arch.lm_head_name));
-    cb.commands().back().set("seq_len", seq_len);
-    } else {
-        // Tied embeddings
-        cb.add_matmul(S("logits"), S("normed"), WG(arch, arch.embedding_name));
-    cb.commands().back().set("seq_len", seq_len);
+    // En prefill (seq>1) solo importa la ÚLTIMA posición: es de donde sale el
+    // token siguiente. Calcular vocab×seq logits para tirar seq-1 filas es el
+    // mayor desperdicio del prefill y obliga a descuantizar la matriz entera
+    // (1.16 GB en un 8B). Con row_offset el lm_head del prefill es un GEMV y
+    // los logits quedan SIEMPRE en la fila 0.
+    {
+        const std::string& w = arch.lm_head_name.empty()
+            ? arch.embedding_name : arch.lm_head_name;
+        cb.add_matmul(S("logits"), S("normed"), WG(arch, w));
+        auto& c = cb.commands().back();
+        if (seq_len > 1) {
+            c.set("seq_len", (uint32_t)1);
+            c.set("row_offset", (uint32_t)(seq_len - 1));
+        } else {
+            c.set("seq_len", seq_len);
+        }
     }
     
     return cb;
