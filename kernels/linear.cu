@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cstdint>
+#include "hqs_common.cuh"
 
 namespace helios {
 namespace kernels {
@@ -198,6 +199,68 @@ void launch_embedding_fp16(
     int block_size = min(256, dim);
     
     embedding_fp16_kernel<<<total_tokens, block_size, 0, stream>>>(
+        indices, table, output, total_tokens, vocab_size, dim
+    );
+}
+
+__global__ void embedding_hq51k_kernel(
+    const int32_t* __restrict__ indices,
+    const uint8_t* __restrict__ table,
+    half* __restrict__ output,
+    int total_tokens,
+    int vocab_size,
+    int dim
+) {
+    using namespace hqs;
+    int token = blockIdx.x;
+    if (token >= total_tokens) return;
+    int row = indices[token];
+    half* dst = output + size_t(token) * dim;
+    if (row < 0 || row >= vocab_size) {
+        for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+            dst[d] = __float2half(0.0f);
+        }
+        return;
+    }
+
+    const size_t blocks_per_row = (size_t(dim) + SUPER_BLOCK_SIZE - 1) /
+                                  SUPER_BLOCK_SIZE;
+    for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+        const size_t block_index = size_t(row) * blocks_per_row +
+                                   size_t(d) / SUPER_BLOCK_SIZE;
+        const int in_block = d % SUPER_BLOCK_SIZE;
+        const int group = in_block / GROUP_SIZE;
+        const int in_group = in_block % GROUP_SIZE;
+        const uint8_t* block = table + block_index * HQ51K_BLOCK_SIZE;
+
+        float min_f = 0.0f;
+        float scoeff = 0.0f;
+        decode_compact_group(block, group, min_f, scoeff, 1.0f / HQ5K_Q_MAX);
+        const uint8_t* payload = block + COMPACT_HEADER_SIZE + group * 5;
+        uint64_t packed = uint64_t(payload[0]) |
+                          (uint64_t(payload[1]) << 8) |
+                          (uint64_t(payload[2]) << 16) |
+                          (uint64_t(payload[3]) << 24) |
+                          (uint64_t(payload[4]) << 32);
+        uint32_t q = uint32_t((packed >> (in_group * 5)) & 0x1f);
+        dst[d] = __float2half(fmaf(float(q), scoeff, min_f));
+    }
+}
+
+void launch_embedding_hq51k(
+    const int32_t* indices,
+    const uint8_t* table,
+    half* output,
+    int batch_size,
+    int seq_len,
+    int vocab_size,
+    int dim,
+    cudaStream_t stream
+) {
+    if (batch_size <= 0 || seq_len <= 0 || vocab_size <= 0 || dim <= 0) return;
+    int total_tokens = batch_size * seq_len;
+    int block_size = min(256, dim);
+    embedding_hq51k_kernel<<<total_tokens, block_size, 0, stream>>>(
         indices, table, output, total_tokens, vocab_size, dim
     );
 }

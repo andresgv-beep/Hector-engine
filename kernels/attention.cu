@@ -596,6 +596,49 @@ __global__ void rope_kernel_dp(
     qk[i1] = __float2half(y1);
 }
 
+// Gemma 4 proportional RoPE keeps a head_dim-sized frequency vector. Only the
+// first `proportion * head_dim / 2` angles are non-zero, but rotation pairs are
+// still formed across the two halves of the full head.
+template <bool DEVICE_POSITION>
+__global__ void rope_proportional_kernel(
+    half* __restrict__ qk,
+    int batch_size,
+    int seq_len,
+    int num_heads,
+    int head_dim,
+    int rope_angles,
+    int position_offset,
+    const int32_t* __restrict__ d_position_offset,
+    float theta_base,
+    float scaling_factor
+) {
+    if constexpr (DEVICE_POSITION) position_offset = *d_position_offset;
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = batch_size * seq_len * num_heads * rope_angles;
+    if (idx >= total) return;
+
+    int pair = idx % rope_angles;
+    int h = (idx / rope_angles) % num_heads;
+    int s = (idx / (rope_angles * num_heads)) % seq_len;
+    int b = idx / (rope_angles * num_heads * seq_len);
+
+    float pos = float(s + position_offset) / scaling_factor;
+    float freq = 1.0f / powf(theta_base, float(2 * pair) / float(head_dim));
+    float angle = pos * freq;
+    float cos_val = cosf(angle);
+    float sin_val = sinf(angle);
+
+    int base_idx = b * seq_len * num_heads * head_dim +
+                   s * num_heads * head_dim + h * head_dim;
+    int i0 = base_idx + pair;
+    int i1 = base_idx + pair + head_dim / 2;
+    float x0 = __half2float(qk[i0]);
+    float x1 = __half2float(qk[i1]);
+    qk[i0] = __float2half(x0 * cos_val - x1 * sin_val);
+    qk[i1] = __float2half(x0 * sin_val + x1 * cos_val);
+}
+
 // ============================================================================
 // PREFILL ATTENTION SOBRE CACHE
 // ============================================================================
@@ -917,6 +960,46 @@ void launch_rope_inplace_fp16_dp(
     rope_kernel_dp<<<num_blocks, block_size, 0, stream>>>(
         qk, batch_size, seq_len, num_heads, head_dim, rotary_dim,
         d_position_offset, theta, scaling_factor
+    );
+}
+
+void launch_rope_proportional_inplace_fp16(
+    half* qk,
+    int batch_size, int seq_len, int num_heads, int head_dim,
+    float rotary_proportion, int position_offset,
+    float theta, float scaling_factor, cudaStream_t stream
+) {
+    if (head_dim <= 0 || (head_dim & 1) != 0) return;
+    if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
+    int rope_angles = int(rotary_proportion * float(head_dim) / 2.0f);
+    rope_angles = max(0, min(rope_angles, head_dim / 2));
+    if (rope_angles == 0) return;
+    int total = batch_size * seq_len * num_heads * rope_angles;
+    int block_size = 256;
+    int num_blocks = (total + block_size - 1) / block_size;
+    rope_proportional_kernel<false><<<num_blocks, block_size, 0, stream>>>(
+        qk, batch_size, seq_len, num_heads, head_dim, rope_angles,
+        position_offset, nullptr, theta, scaling_factor
+    );
+}
+
+void launch_rope_proportional_inplace_fp16_dp(
+    half* qk,
+    int batch_size, int seq_len, int num_heads, int head_dim,
+    float rotary_proportion, const int32_t* d_position_offset,
+    float theta, float scaling_factor, cudaStream_t stream
+) {
+    if (head_dim <= 0 || (head_dim & 1) != 0 || d_position_offset == nullptr) return;
+    if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
+    int rope_angles = int(rotary_proportion * float(head_dim) / 2.0f);
+    rope_angles = max(0, min(rope_angles, head_dim / 2));
+    if (rope_angles == 0) return;
+    int total = batch_size * seq_len * num_heads * rope_angles;
+    int block_size = 256;
+    int num_blocks = (total + block_size - 1) / block_size;
+    rope_proportional_kernel<true><<<num_blocks, block_size, 0, stream>>>(
+        qk, batch_size, seq_len, num_heads, head_dim, rope_angles,
+        0, d_position_offset, theta, scaling_factor
     );
 }
 

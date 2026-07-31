@@ -56,6 +56,12 @@ void CommandBuffer::add_mul(const std::string& dst, const std::string& a, const 
     add_op(op::MUL(), dst).in({a, b});
 }
 
+void CommandBuffer::add_mul_scalar_tensor(const std::string& dst,
+                                           const std::string& input,
+                                           const std::string& scalar) {
+    add_op(op::MUL_SCALAR_TENSOR(), dst).in({input, scalar});
+}
+
 void CommandBuffer::add_bias(const std::string& dst, const std::string& input, const std::string& bias) {
     add_op(op::ADD_BIAS(), dst).in({input, bias});
 }
@@ -74,6 +80,10 @@ void CommandBuffer::add_gelu(const std::string& dst, const std::string& src) {
 
 void CommandBuffer::add_softmax(const std::string& dst, const std::string& src, int32_t dim) {
     add_op(op::SOFTMAX(), dst).in({src}).set("dim", dim);
+}
+
+void CommandBuffer::add_softcap(const std::string& dst, const std::string& src, float cap) {
+    add_op(op::SOFTCAP(), dst).in({src}).set("cap", cap);
 }
 
 void CommandBuffer::add_rmsnorm(const std::string& dst, const std::string& src,
@@ -102,12 +112,15 @@ void CommandBuffer::add_matmul_t(const std::string& dst, const std::string& a, c
 }
 
 void CommandBuffer::add_rope(const std::string& dst, const std::string& src,
-                              float theta, uint32_t dim, uint32_t offset) {
+                              float theta, uint32_t dim, uint32_t offset,
+                              float partial_rotary, bool proportional) {
     add_op(op::ROPE(), dst)
         .in({src})
         .set("theta", theta)
         .set("dim", dim)
-        .set("offset", offset);
+        .set("offset", offset)
+        .set("partial_rotary", partial_rotary)
+        .set("proportional", uint32_t(proportional));
 }
 
 void CommandBuffer::add_attention(const std::string& dst,

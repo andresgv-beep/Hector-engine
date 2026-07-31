@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 // ============================================================================
 // MINIMAL JSON PARSER
@@ -179,6 +180,11 @@ HnfLoader::~HnfLoader() { close(); }
 
 bool HnfLoader::open(const std::string& path) {
     close();
+    config_.params.clear();
+    block_configs_.clear();
+    gemma4_config_ = Gemma4Config{};
+    has_gemma4_config_ = false;
+    last_error_.clear();
     file_.open(path, std::ios::binary);
     if (!file_.is_open()) { std::cerr << "HnfLoader: Cannot open: " << path << std::endl; return false; }
     file_path_ = path;
@@ -186,7 +192,10 @@ bool HnfLoader::open(const std::string& path) {
     if (!read_header(file_) || !read_block_table(file_) || !read_manifest(file_) || !parse_manifest()) {
         close(); return false;
     }
-    read_execution_hints(file_);
+    if (!read_execution_hints(file_)) {
+        close();
+        return false;
+    }
     load_tokenizer();
     return true;
 }
@@ -360,19 +369,28 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
 // ============================================================================
 
 bool HnfLoader::load(const std::string& path, Engine& engine) {
+    config_.params.clear();
+    block_configs_.clear();
+    gemma4_config_ = Gemma4Config{};
+    has_gemma4_config_ = false;
+    last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
     if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) return false;
-    read_execution_hints(f);
+    if (!read_execution_hints(f)) return false;
     return load_tensors(f, engine);
 }
 
 bool HnfLoader::load_metadata(const std::string& path) {
+    config_.params.clear();
+    block_configs_.clear();
+    gemma4_config_ = Gemma4Config{};
+    has_gemma4_config_ = false;
+    last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) return false;
     if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) return false;
-    read_execution_hints(f);
-    return true;
+    return read_execution_hints(f);
 }
 
 // ============================================================================
@@ -437,7 +455,13 @@ bool HnfLoader::parse_manifest() {
 // ============================================================================
 
 bool HnfLoader::read_execution_hints(std::ifstream& f) {
-    bool has_binary = read_execution_hints_binary(f);
+    const bool binary_present = blocks_[BLOCK_EXEC_HINTS_BIN].size > 0;
+    const bool has_binary = read_execution_hints_binary(f);
+    if (binary_present && !has_binary) {
+        if (last_error_.empty()) last_error_ = "invalid binary execution hints";
+        std::cerr << "HnfLoader: " << last_error_ << std::endl;
+        return false;
+    }
 //    if (has_binary) std::cout << "HnfLoader: Binary hints loaded (O(1))" << std::endl;
     
     const BlockEntry& json_block = blocks_[BLOCK_EXEC_HINTS];
@@ -446,11 +470,17 @@ bool HnfLoader::read_execution_hints(std::ifstream& f) {
         std::string json; json.resize(json_block.size);
         f.read(&json[0], json_block.size);
         if (f.good()) {
-            parse_execution_hints(json);
+            if (!parse_execution_hints(json)) {
+                last_error_ = "invalid JSON execution hints";
+                return false;
+            }
 //            if (!has_binary) std::cout << "HnfLoader: JSON hints loaded (fallback)" << std::endl;
         }
     }
-    return has_binary || json_block.size > 0;
+    // Legacy HNF files may have no hint blocks at all. Preserve the historical
+    // fallback where graph detection derives the architecture from tensors.
+    // A present-but-invalid binary block is still rejected above.
+    return true;
 }
 
 bool HnfLoader::read_execution_hints_binary(std::ifstream& f) {
@@ -466,36 +496,177 @@ bool HnfLoader::read_execution_hints_binary(std::ifstream& f) {
 }
 
 bool HnfLoader::parse_execution_hints_binary(const uint8_t* data, size_t size) {
-    if (size < sizeof(ExecutionHintsBin)) return false;
-    const auto* h = reinterpret_cast<const ExecutionHintsBin*>(data);
-    if (h->magic != HINTS_MAGIC) return false;
+    if (size < sizeof(ExecutionHintsBin)) {
+        last_error_ = "binary execution hints header is truncated";
+        return false;
+    }
+
+    ExecutionHintsBin hints{};
+    std::memcpy(&hints, data, sizeof(hints));
+    if (hints.magic != HINTS_MAGIC) {
+        last_error_ = "binary execution hints have invalid magic";
+        return false;
+    }
+    if (hints.version_major != 1) {
+        last_error_ = "unsupported binary execution hints major version";
+        return false;
+    }
+
+    auto range_fits = [size](uint32_t offset, size_t bytes) {
+        const size_t start = static_cast<size_t>(offset);
+        return start <= size && bytes <= size - start;
+    };
+
+    TextModelConfigBin text_config{};
+    bool has_text_config = false;
+    if (hints.text_offset > 0) {
+        if (!range_fits(hints.text_offset, sizeof(TextModelConfigBin))) {
+            last_error_ = "binary text config is outside the hints block";
+            return false;
+        }
+        std::memcpy(&text_config, data + hints.text_offset, sizeof(text_config));
+        has_text_config = true;
+
+        if (text_config.arch == ARCH_GEMMA4 &&
+            !parse_gemma4_extension(data, size, hints, text_config)) {
+            return false;
+        }
+    } else if (hints.num_text_models != 0) {
+        last_error_ = "binary hints declare a text model without a text config";
+        return false;
+    }
     
     // Text → config_ (default) AND block_configs_[TEXT]
-    if (h->text_offset > 0 && h->text_offset + sizeof(TextModelConfigBin) <= size) {
-        const auto* cfg = reinterpret_cast<const TextModelConfigBin*>(data + h->text_offset);
-        apply_text_config_bin(*cfg, config_);
-        apply_text_config_bin(*cfg, block_configs_[BLOCK_TEXT_MODEL]);
+    if (has_text_config) {
+        apply_text_config_bin(text_config, config_);
+        apply_text_config_bin(text_config, block_configs_[BLOCK_TEXT_MODEL]);
     }
     // Vision
-    if (h->vision_offset > 0 && h->vision_offset + sizeof(VisionModelConfigBin) <= size) {
-        apply_vision_config_bin(*reinterpret_cast<const VisionModelConfigBin*>(data + h->vision_offset));
+    if (hints.vision_offset > 0) {
+        if (!range_fits(hints.vision_offset, sizeof(VisionModelConfigBin))) {
+            last_error_ = "binary vision config is outside the hints block";
+            return false;
+        }
+        VisionModelConfigBin vision_config{};
+        std::memcpy(&vision_config, data + hints.vision_offset, sizeof(vision_config));
+        apply_vision_config_bin(vision_config);
     }
     // Cortex → block_configs_[CORTEX] (single call, no wrapper)
-    if (h->cortex_offset > 0 && h->cortex_offset + sizeof(TextModelConfigBin) <= size) {
-        apply_text_config_bin(*reinterpret_cast<const TextModelConfigBin*>(data + h->cortex_offset),
-                              block_configs_[BLOCK_CORTEX]);
+    if (hints.cortex_offset > 0) {
+        if (!range_fits(hints.cortex_offset, sizeof(TextModelConfigBin))) {
+            last_error_ = "binary cortex config is outside the hints block";
+            return false;
+        }
+        TextModelConfigBin cortex_config{};
+        std::memcpy(&cortex_config, data + hints.cortex_offset, sizeof(cortex_config));
+        apply_text_config_bin(cortex_config, block_configs_[BLOCK_CORTEX]);
     }
     // Code → block_configs_[CODE_EXEC] (single call, no wrapper)
-    if (h->code_offset > 0 && h->code_offset + sizeof(TextModelConfigBin) <= size) {
-        apply_text_config_bin(*reinterpret_cast<const TextModelConfigBin*>(data + h->code_offset),
-                              block_configs_[BLOCK_CODE_EXEC]);
+    if (hints.code_offset > 0) {
+        if (!range_fits(hints.code_offset, sizeof(TextModelConfigBin))) {
+            last_error_ = "binary code config is outside the hints block";
+            return false;
+        }
+        TextModelConfigBin code_config{};
+        std::memcpy(&code_config, data + hints.code_offset, sizeof(code_config));
+        apply_text_config_bin(code_config, block_configs_[BLOCK_CODE_EXEC]);
     }
     
-    config_.set("text_enabled", (h->flags & 0x0001) != 0);
-    config_.set("vision_enabled", (h->flags & 0x0002) != 0);
-    config_.set("audio_enabled", (h->flags & 0x0004) != 0);
-    config_.set("code_enabled", (h->flags & 0x0008) != 0);
-    config_.set("cortex_enabled", (h->flags & 0x0010) != 0);
+    config_.set("text_enabled", (hints.flags & 0x0001) != 0);
+    config_.set("vision_enabled", (hints.flags & 0x0002) != 0);
+    config_.set("audio_enabled", (hints.flags & 0x0004) != 0);
+    config_.set("code_enabled", (hints.flags & 0x0008) != 0);
+    config_.set("cortex_enabled", (hints.flags & 0x0010) != 0);
+    return true;
+}
+
+bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
+                                       const ExecutionHintsBin& hints,
+                                       const TextModelConfigBin& text_config) {
+    if (std::memcmp(hints.reserved + 8, "GM4X", 4) != 0) {
+        last_error_ = "Gemma 4 binary hints are missing the GM4X marker";
+        return false;
+    }
+
+    uint32_t extension_offset = 0;
+    uint32_t extension_size = 0;
+    std::memcpy(&extension_offset, hints.reserved, sizeof(extension_offset));
+    std::memcpy(&extension_size, hints.reserved + 4, sizeof(extension_size));
+
+    const size_t start = static_cast<size_t>(extension_offset);
+    const size_t bytes = static_cast<size_t>(extension_size);
+    if (start > size || bytes > size - start || bytes < sizeof(Gemma4ExtensionHeaderBin)) {
+        last_error_ = "GM4X extension is outside the binary hints block";
+        return false;
+    }
+
+    Gemma4ExtensionHeaderBin header{};
+    std::memcpy(&header, data + start, sizeof(header));
+    if (std::memcmp(header.magic, "GM4X", 4) != 0) {
+        last_error_ = "GM4X extension has invalid magic";
+        return false;
+    }
+    if (header.version != 1) {
+        last_error_ = "unsupported GM4X version";
+        return false;
+    }
+    if (header.layer_record_size != sizeof(Gemma4LayerConfigBin)) {
+        last_error_ = "unsupported GM4X layer record size";
+        return false;
+    }
+    if (header.layer_count == 0 || header.layer_count != text_config.num_hidden_layers) {
+        last_error_ = "GM4X layer count does not match the text config";
+        return false;
+    }
+
+    const size_t record_count = static_cast<size_t>(header.layer_count);
+    if (record_count > (bytes - sizeof(header)) / sizeof(Gemma4LayerConfigBin)) {
+        last_error_ = "GM4X layer records are truncated";
+        return false;
+    }
+    const size_t required_size = sizeof(header) + record_count * sizeof(Gemma4LayerConfigBin);
+    if (required_size != bytes) {
+        last_error_ = "GM4X extension size does not match its layer records";
+        return false;
+    }
+
+    Gemma4Config parsed{};
+    parsed.version = header.version;
+    parsed.flags = header.flags;
+    parsed.global_head_dim = header.global_head_dim;
+    parsed.ple_hidden_size = header.ple_hidden_size;
+    parsed.num_kv_shared_layers = header.num_kv_shared_layers;
+    parsed.layers.reserve(record_count);
+
+    for (size_t i = 0; i < record_count; ++i) {
+        Gemma4LayerConfigBin record{};
+        const size_t record_offset = start + sizeof(header) + i * sizeof(record);
+        std::memcpy(&record, data + record_offset, sizeof(record));
+
+        if (record.attention_kind > 1 || record.rope_type > ROPE_PROPORTIONAL ||
+            record.head_dim == 0 || record.intermediate_size == 0 ||
+            !std::isfinite(record.rope_theta) || record.rope_theta <= 0.0f ||
+            !std::isfinite(record.partial_rotary_factor) ||
+            record.partial_rotary_factor <= 0.0f) {
+            last_error_ = "GM4X layer " + std::to_string(i) + " has invalid fields";
+            return false;
+        }
+
+        Gemma4LayerConfig layer{};
+        layer.attention_kind = record.attention_kind;
+        layer.sliding_window = record.sliding_window;
+        layer.head_dim = record.head_dim;
+        layer.intermediate_size = record.intermediate_size;
+        layer.rope_type = record.rope_type;
+        layer.flags = record.flags;
+        layer.rope_theta = record.rope_theta;
+        layer.partial_rotary_factor = record.partial_rotary_factor;
+        layer.kv_share_group = record.kv_share_group;
+        parsed.layers.push_back(layer);
+    }
+
+    gemma4_config_ = std::move(parsed);
+    has_gemma4_config_ = true;
     return true;
 }
 
@@ -506,9 +677,10 @@ bool HnfLoader::parse_execution_hints_binary(const uint8_t* data, size_t size) {
 void HnfLoader::apply_text_config_bin(const TextModelConfigBin& cfg, ModelConfig& target) {
     static const char* arch_names[] = {
         "unknown","llama","llama2","llama3","qwen","qwen2",
-        "phi3","phi4","gemma","gemma2","mistral","mixtral","deepseek","clip","siglip"
+        "phi3","phi4","gemma","gemma2","mistral","mixtral","deepseek","clip","siglip","gemma4"
     };
-    target.set("arch", std::string(arch_names[std::min(cfg.arch, 14u)]));
+    const uint32_t arch_index = cfg.arch <= ARCH_GEMMA4 ? cfg.arch : ARCH_UNKNOWN;
+    target.set("arch", std::string(arch_names[arch_index]));
     
     static const char* dtype_names[] = {"fp16","bf16","fp32"};
     target.set("dtype", std::string(dtype_names[std::min(cfg.dtype, 2u)]));
@@ -536,8 +708,9 @@ void HnfLoader::apply_text_config_bin(const TextModelConfigBin& cfg, ModelConfig
     target.set("norm_type", std::string(norm_types[std::min(cfg.norm_type, 1u)]));
     target.set("rms_norm_eps", (double)cfg.rms_norm_eps);
     
-    static const char* rope_types[] = {"default","llama3","linear","dynamic","yarn","longrope","su","none"};
-    target.set("rope_type", std::string(rope_types[std::min(cfg.rope_type, 7u)]));
+    static const char* rope_types[] = {"default","llama3","linear","dynamic","yarn","longrope","su","none","proportional"};
+    const uint32_t rope_index = cfg.rope_type <= ROPE_PROPORTIONAL ? cfg.rope_type : ROPE_DEFAULT;
+    target.set("rope_type", std::string(rope_types[rope_index]));
     target.set("rope_theta", (double)cfg.rope_theta);
     target.set("rope_scaling_factor", (double)cfg.rope_scaling_factor);
     target.set("partial_rotary_factor", (double)cfg.partial_rotary_factor);

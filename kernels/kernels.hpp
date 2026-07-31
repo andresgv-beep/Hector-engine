@@ -91,6 +91,12 @@ void launch_mul_fp16(
     cudaStream_t stream = nullptr
 );
 
+void launch_mul_scalar_tensor_fp16(
+    const half* input, const half* scalar, half* output,
+    size_t numel,
+    cudaStream_t stream = nullptr
+);
+
 void launch_scale_fp16(
     const half* input, half* output,
     float scalar,
@@ -162,6 +168,12 @@ void launch_gelu_mul_fp16(
     cudaStream_t stream = nullptr
 );
 
+void launch_softcap_fp16(
+    const half* input, half* output,
+    float cap, size_t numel,
+    cudaStream_t stream = nullptr
+);
+
 // ============================================================================
 // NORMALIZATION KERNELS
 // ============================================================================
@@ -170,6 +182,15 @@ void launch_rmsnorm_fp16(
     const half* input,      // [batch, dim]
     const half* weight,     // [dim]
     half* output,           // [batch, dim]
+    int batch_size,
+    int dim,
+    float eps,
+    cudaStream_t stream = nullptr
+);
+
+void launch_rmsnorm_no_weight_fp16(
+    const half* input,
+    half* output,
     int batch_size,
     int dim,
     float eps,
@@ -248,6 +269,30 @@ void launch_rope_inplace_fp16_dp(
     int num_heads,
     int head_dim,
     int rotary_dim,
+    const int32_t* d_position_offset,
+    float theta,
+    float scaling_factor,
+    cudaStream_t stream
+);
+
+// Gemma 4 proportional RoPE rotates cross-half pairs selected by a proportion
+// of head_dim. It is not equivalent to ordinary contiguous partial RoPE.
+void launch_rope_proportional_inplace_fp16(
+    half* qk,
+    int batch_size, int seq_len,
+    int num_heads, int head_dim,
+    float rotary_proportion,
+    int position_offset,
+    float theta,
+    float scaling_factor = 1.0f,
+    cudaStream_t stream = nullptr
+);
+
+void launch_rope_proportional_inplace_fp16_dp(
+    half* qk,
+    int batch_size, int seq_len,
+    int num_heads, int head_dim,
+    float rotary_proportion,
     const int32_t* d_position_offset,
     float theta,
     float scaling_factor,
@@ -360,6 +405,17 @@ void launch_embedding_fp16(
     const int32_t* indices, // [batch, seq]
     const half* table,      // [vocab, dim]
     half* output,           // [batch, seq, dim]
+    int batch_size,
+    int seq_len,
+    int vocab_size,
+    int dim,
+    cudaStream_t stream = nullptr
+);
+
+void launch_embedding_hq51k(
+    const int32_t* indices,
+    const uint8_t* table,
+    half* output,
     int batch_size,
     int seq_len,
     int vocab_size,

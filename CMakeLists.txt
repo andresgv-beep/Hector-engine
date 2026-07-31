@@ -62,6 +62,7 @@ set(ENGINE_SOURCES
     src/command.cpp
     src/engine.cpp
     src/hnf_loader.cpp
+    src/gemma4_validator.cpp
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
@@ -145,6 +146,14 @@ target_link_libraries(test_kernels PRIVATE helios-engine)
 add_executable(test_hnf_loader tests/test_hnf_loader.cpp)
 target_link_libraries(test_hnf_loader PRIVATE helios-engine)
 
+# Gemma 4 HNF/GM4X metadata contract (no model weights or CUDA allocations)
+add_executable(test_gemma4_metadata tests/test_gemma4_metadata.cpp)
+target_link_libraries(test_gemma4_metadata PRIVATE helios-engine)
+
+# Gemma 4 numerical primitives, isolated from graph construction
+add_executable(test_gemma4_primitives tests/test_gemma4_primitives.cu)
+target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
+
 # Real HNF inspector (with block loading test)
 add_executable(inspect_hnf test_real_hnf.cpp)
 target_link_libraries(inspect_hnf PRIVATE helios-engine)
@@ -157,6 +166,8 @@ add_test(NAME CommandBufferTest COMMAND test_command)
 add_test(NAME EngineTest COMMAND test_engine)
 add_test(NAME KernelTest COMMAND test_kernels)
 add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
+add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
+add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 
 # GraphBuilder test
 add_executable(test_graph_builder test_graph_builder.cpp)

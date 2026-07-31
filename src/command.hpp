@@ -158,12 +158,15 @@ public:
     void add_add(const std::string& dst, const std::string& a, const std::string& b);
     void add_bias(const std::string& dst, const std::string& input, const std::string& bias);
     void add_mul(const std::string& dst, const std::string& a, const std::string& b);
+    void add_mul_scalar_tensor(const std::string& dst, const std::string& input,
+                               const std::string& scalar);
     void add_scale(const std::string& dst, const std::string& src, float scalar);
     
     // Activations
     void add_silu(const std::string& dst, const std::string& src);
     void add_gelu(const std::string& dst, const std::string& src);
     void add_softmax(const std::string& dst, const std::string& src, int32_t dim = -1);
+    void add_softcap(const std::string& dst, const std::string& src, float cap);
     
     // Normalization
     void add_rmsnorm(const std::string& dst, const std::string& src, 
@@ -180,7 +183,8 @@ public:
     
     // Position encoding
     void add_rope(const std::string& dst, const std::string& src,
-                  float theta, uint32_t dim, uint32_t offset = 0);
+                  float theta, uint32_t dim, uint32_t offset = 0,
+                  float partial_rotary = 1.0f, bool proportional = false);
     
     // Attention (Q, K, V as separate inputs)
     void add_attention(const std::string& dst,

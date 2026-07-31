@@ -244,5 +244,33 @@ void launch_gelu_mul_fp16(
     );
 }
 
+// Gemma final-logit softcap: tanh(x / cap) * cap.
+__global__ void softcap_fp16_kernel(
+    const half* __restrict__ input,
+    half* __restrict__ output,
+    float cap,
+    size_t numel
+) {
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
+    for (size_t i = idx; i < numel; i += stride) {
+        const float x = __half2float(input[i]);
+        output[i] = __float2half(tanhf(x / cap) * cap);
+    }
+}
+
+void launch_softcap_fp16(
+    const half* input, half* output,
+    float cap, size_t numel,
+    cudaStream_t stream
+) {
+    if (numel == 0 || cap <= 0.0f) return;
+    int num_blocks = (numel + ACTIVATION_BLOCK_SIZE - 1) / ACTIVATION_BLOCK_SIZE;
+    num_blocks = min(num_blocks, 65535);
+    softcap_fp16_kernel<<<num_blocks, ACTIVATION_BLOCK_SIZE, 0, stream>>>(
+        input, output, cap, numel
+    );
+}
+
 } // namespace kernels
 } // namespace helios

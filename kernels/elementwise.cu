@@ -107,6 +107,34 @@ void launch_mul_fp16(
     );
 }
 
+// Broadcast multiplication by a learned scalar tensor (Gemma 4 layer_scalar).
+__global__ void mul_scalar_tensor_fp16_kernel(
+    const half* __restrict__ input,
+    const half* __restrict__ scalar,
+    half* __restrict__ output,
+    size_t numel
+) {
+    const float value = __half2float(scalar[0]);
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    size_t stride = blockDim.x * gridDim.x;
+    for (size_t i = idx; i < numel; i += stride) {
+        output[i] = __float2half(__half2float(input[i]) * value);
+    }
+}
+
+void launch_mul_scalar_tensor_fp16(
+    const half* input, const half* scalar, half* output,
+    size_t numel,
+    cudaStream_t stream
+) {
+    if (numel == 0) return;
+    int num_blocks = (numel + ELEMENTWISE_BLOCK_SIZE - 1) / ELEMENTWISE_BLOCK_SIZE;
+    num_blocks = min(num_blocks, 65535);
+    mul_scalar_tensor_fp16_kernel<<<num_blocks, ELEMENTWISE_BLOCK_SIZE, 0, stream>>>(
+        input, scalar, output, numel
+    );
+}
+
 // ============================================================================
 // SCALE KERNEL
 // ============================================================================

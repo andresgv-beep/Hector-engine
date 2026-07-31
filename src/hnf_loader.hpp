@@ -131,6 +131,7 @@ enum ExecArch : uint32_t {
     ARCH_MISTRAL = 10, ARCH_MIXTRAL = 11,
     ARCH_DEEPSEEK = 12,
     ARCH_CLIP = 13, ARCH_SIGLIP = 14,
+    ARCH_GEMMA4 = 15,
 };
 
 // DType enum
@@ -157,6 +158,7 @@ enum ExecNormType : uint32_t {
 enum ExecRoPEType : uint32_t {
     ROPE_DEFAULT = 0, ROPE_LLAMA3 = 1, ROPE_LINEAR = 2, ROPE_DYNAMIC = 3,
     ROPE_YARN = 4, ROPE_LONGROPE = 5, ROPE_SU = 6, ROPE_NONE = 7,
+    ROPE_PROPORTIONAL = 8,
 };
 
 // Flags for TextModelConfigBin
@@ -250,7 +252,71 @@ struct VisionModelConfigBin {
 };
 static_assert(sizeof(VisionModelConfigBin) == 64, "VisionModelConfigBin must be 64 bytes");
 
+// Gemma 4 extension stored inside block 0xB. The parent hint header points to
+// this structure through reserved[0..8] and carries a second "GM4X" marker in
+// reserved[8..12]. All fields are little-endian on disk.
+struct Gemma4ExtensionHeaderBin {
+    char     magic[4];
+    uint16_t version;
+    uint16_t layer_record_size;
+    uint32_t layer_count;
+    uint32_t flags;
+    uint32_t global_head_dim;
+    uint32_t ple_hidden_size;
+    uint32_t num_kv_shared_layers;
+    uint32_t reserved;
+};
+static_assert(sizeof(Gemma4ExtensionHeaderBin) == 32,
+              "Gemma4ExtensionHeaderBin must be 32 bytes");
+
+struct Gemma4LayerConfigBin {
+    uint32_t attention_kind;         // 0=sliding, 1=full
+    uint32_t sliding_window;
+    uint32_t head_dim;
+    uint32_t intermediate_size;
+    uint32_t rope_type;              // ExecRoPEType
+    uint32_t flags;
+    float    rope_theta;
+    float    partial_rotary_factor;
+    int32_t  kv_share_group;         // -1 until sharing groups are assigned
+    uint32_t reserved;
+};
+static_assert(sizeof(Gemma4LayerConfigBin) == 40,
+              "Gemma4LayerConfigBin must be 40 bytes");
+
 #pragma pack(pop)
+
+constexpr uint32_t GEMMA4_EXT_FLAG_PLE              = (1u << 0);
+constexpr uint32_t GEMMA4_EXT_FLAG_LAYER_SCALAR     = (1u << 1);
+constexpr uint32_t GEMMA4_EXT_FLAG_LOGIT_SOFTCAP    = (1u << 2);
+constexpr uint32_t GEMMA4_EXT_FLAG_SHARED_KV        = (1u << 3);
+constexpr uint32_t GEMMA4_EXT_FLAG_DOUBLE_WIDE_MLP  = (1u << 4);
+constexpr uint32_t GEMMA4_EXT_FLAG_FOUR_NORM_BLOCK  = (1u << 5);
+
+struct Gemma4LayerConfig {
+    uint32_t attention_kind = 0;
+    uint32_t sliding_window = 0;
+    uint32_t head_dim = 0;
+    uint32_t intermediate_size = 0;
+    uint32_t rope_type = ROPE_DEFAULT;
+    uint32_t flags = 0;
+    float rope_theta = 10000.0f;
+    float partial_rotary_factor = 1.0f;
+    int32_t kv_share_group = -1;
+
+    bool is_global_attention() const { return attention_kind == 1; }
+};
+
+struct Gemma4Config {
+    uint16_t version = 0;
+    uint32_t flags = 0;
+    uint32_t global_head_dim = 0;
+    uint32_t ple_hidden_size = 0;
+    uint32_t num_kv_shared_layers = 0;
+    std::vector<Gemma4LayerConfig> layers;
+
+    bool has_flag(uint32_t flag) const { return (flags & flag) != 0; }
+};
 
 // ============================================================================
 // MODEL CONFIG (from execution_hints)
@@ -430,6 +496,11 @@ public:
     
     // Default config (text/primary model)
     const ModelConfig& config() const { return config_; }
+
+    // Gemma 4 keeps authoritative per-layer geometry in the GM4X extension.
+    bool has_gemma4_config() const { return has_gemma4_config_; }
+    const Gemma4Config& gemma4_config() const { return gemma4_config_; }
+    const std::string& last_error() const { return last_error_; }
     
     // Config por bloque específico (para multimodal)
     const ModelConfig& config_for_block(BlockID block_id) const {
@@ -489,6 +560,9 @@ private:
     BlockEntry blocks_[HNF_BLOCK_COUNT];
     ModelConfig config_;                                    // Default/text config
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs
+    Gemma4Config gemma4_config_;
+    bool has_gemma4_config_ = false;
+    std::string last_error_;
     std::vector<TensorEntry> tensors_;
     std::string manifest_json_;
     
@@ -511,6 +585,9 @@ private:
     // Binary hints parsing (priority over JSON)
     bool read_execution_hints_binary(std::ifstream& f);
     bool parse_execution_hints_binary(const uint8_t* data, size_t size);
+    bool parse_gemma4_extension(const uint8_t* data, size_t size,
+                                const ExecutionHintsBin& hints,
+                                const TextModelConfigBin& text_config);
     // Single generic version — no duplicated apply per block
     void apply_text_config_bin(const TextModelConfigBin& cfg, ModelConfig& target);
     void apply_vision_config_bin(const VisionModelConfigBin& cfg);

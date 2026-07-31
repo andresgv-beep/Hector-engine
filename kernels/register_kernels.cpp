@@ -125,6 +125,20 @@ void register_elementwise_kernels(Engine& engine) {
             ctx.stream
         );
     });
+
+    // MUL_SCALAR_TENSOR — broadcast a learned [1] tensor over an activation.
+    engine.register_kernel(op::MUL_SCALAR_TENSOR(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* scalar = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        if (!input || !scalar || !output || scalar->numel() != 1) {
+            throw std::runtime_error("MUL_SCALAR_TENSOR: expected input and scalar [1]");
+        }
+        launch_mul_scalar_tensor_fp16(
+            as_fp16_const(input), as_fp16_const(scalar), as_fp16(output),
+            input->numel(), ctx.stream
+        );
+    });
     
     // SCALE
     engine.register_kernel(op::SCALE(), [](ExecContext& ctx, const Command& cmd) {
@@ -196,6 +210,19 @@ void register_activation_kernels(Engine& engine) {
             as_fp16_const(input), as_fp16(output),
             input->numel(),
             ctx.stream
+        );
+    });
+
+    engine.register_kernel(op::SOFTCAP(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* output = ctx.output;
+        float cap = cmd.get<float>("cap", 0.0f);
+        if (!input || !output || cap <= 0.0f) {
+            throw std::runtime_error("SOFTCAP: missing tensors or non-positive cap");
+        }
+        launch_softcap_fp16(
+            as_fp16_const(input), as_fp16(output), cap,
+            input->numel(), ctx.stream
         );
     });
     
@@ -280,7 +307,6 @@ void register_norm_kernels(Engine& engine) {
         int dim = (int)cmd.get<uint32_t>("dim", 0);
         if (dim == 0) dim = input->shape.back();
         int batch = input->numel() / dim;
-        
         launch_rmsnorm_fp16(
             as_fp16_const(input), as_fp16_const(weight), as_fp16(output),
             batch, dim, eps,
@@ -449,11 +475,20 @@ void register_memory_kernels(Engine& engine) {
         int vocab = table->shape[0];
         int dim = table->shape[1];
         
-        launch_embedding_fp16(
-            as_i32(indices), as_fp16_const(table), as_fp16(output),
-            batch, seq, vocab, dim,
-            ctx.stream
-        );
+        if (table->dtype == dtype::FP16()) {
+            launch_embedding_fp16(
+                as_i32(indices), as_fp16_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
+        } else if (table->dtype == dtype::HQ51K()) {
+            launch_embedding_hq51k(
+                as_i32(indices), as_u8_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
+        } else {
+            throw std::runtime_error("EMBEDDING: unsupported table dtype " +
+                                     std::string(dtype_name(table->dtype)));
+        }
     });
     
     // SPLIT_QKV - Zero-copy for decode (batch_seq=1), kernel for prefill
@@ -592,6 +627,7 @@ void register_attention_kernels(Engine& engine) {
         uint32_t offset = cmd.get<uint32_t>("offset", 0);
         float partial_rotary = cmd.get<float>("partial_rotary", 1.0f);
         float scaling_factor = cmd.get<float>("rope_scaling_factor", 1.0f);
+        bool proportional = cmd.get<uint32_t>("proportional", 0) != 0;
         
         int rotary_dim = (int)(head_dim * partial_rotary);
         rotary_dim = (rotary_dim / 2) * 2;
@@ -638,7 +674,13 @@ void register_attention_kernels(Engine& engine) {
         
         // device_pos: offset leído de device (permite CUDA Graph capture-once)
         if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
-            launch_rope_inplace_fp16_dp(
+            if (proportional) {
+                launch_rope_proportional_inplace_fp16_dp(
+                    as_fp16(output), batch, seq, num_heads, head_dim,
+                    partial_rotary, engine.device_cache_pos(), theta,
+                    scaling_factor, ctx.stream
+                );
+            } else launch_rope_inplace_fp16_dp(
                     as_fp16(output),
                     batch, seq, num_heads, head_dim,
                     rotary_dim,
@@ -647,7 +689,12 @@ void register_attention_kernels(Engine& engine) {
                     ctx.stream
                 );
         } else {
-            launch_rope_inplace_fp16(
+            if (proportional) {
+                launch_rope_proportional_inplace_fp16(
+                    as_fp16(output), batch, seq, num_heads, head_dim,
+                    partial_rotary, offset, theta, scaling_factor, ctx.stream
+                );
+            } else launch_rope_inplace_fp16(
                     as_fp16(output),
                     batch, seq, num_heads, head_dim,
                     rotary_dim,

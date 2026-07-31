@@ -131,12 +131,14 @@ namespace op {
     inline OpTypeID ADD() { return OpTypeRegistry::instance().get_id("add"); }
     inline OpTypeID ADD_BIAS() { return OpTypeRegistry::instance().get_id("add_bias"); }
     inline OpTypeID MUL() { return OpTypeRegistry::instance().get_id("mul"); }
+    inline OpTypeID MUL_SCALAR_TENSOR() { return OpTypeRegistry::instance().get_id("mul_scalar_tensor"); }
     inline OpTypeID SCALE() { return OpTypeRegistry::instance().get_id("scale"); }
     
     inline OpTypeID SILU() { return OpTypeRegistry::instance().get_id("silu"); }
     inline OpTypeID GELU() { return OpTypeRegistry::instance().get_id("gelu"); }
     inline OpTypeID RELU() { return OpTypeRegistry::instance().get_id("relu"); }
     inline OpTypeID SOFTMAX() { return OpTypeRegistry::instance().get_id("softmax"); }
+    inline OpTypeID SOFTCAP() { return OpTypeRegistry::instance().get_id("softcap"); }
     
     inline OpTypeID RMSNORM() { return OpTypeRegistry::instance().get_id("rmsnorm"); }
     inline OpTypeID LAYERNORM() { return OpTypeRegistry::instance().get_id("layernorm"); }

@@ -57,7 +57,7 @@ __global__ void rmsnorm_fp16_kernel(
     // Step 2: Normalize and apply weight
     for (int i = threadIdx.x; i < dim; i += blockDim.x) {
         float val = __half2float(row_in[i]);
-        float w = __half2float(weight[i]);
+        float w = weight ? __half2float(weight[i]) : 1.0f;
         float normalized = val * rms_inv * w;
         row_out[i] = __float2half(normalized);
     }
@@ -81,6 +81,23 @@ void launch_rmsnorm_fp16(
     
     rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
         input, weight, output, batch_size, dim, eps
+    );
+}
+
+void launch_rmsnorm_no_weight_fp16(
+    const half* input,
+    half* output,
+    int batch_size,
+    int dim,
+    float eps,
+    cudaStream_t stream
+) {
+    if (batch_size == 0 || dim == 0) return;
+    int block_size = min(256, dim);
+    block_size = max(32, block_size);
+    size_t smem_size = block_size * sizeof(float);
+    rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
+        input, nullptr, output, batch_size, dim, eps
     );
 }
 

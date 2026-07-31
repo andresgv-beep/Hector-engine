@@ -45,6 +45,10 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "mul"; info.category = "elementwise";
     info.min_inputs = 2; info.max_inputs = 2;
     register_op(info);
+
+    info = OpTypeInfo{}; info.name = "mul_scalar_tensor"; info.category = "elementwise";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
     
     info = OpTypeInfo{}; info.name = "scale"; info.category = "elementwise";
     info.min_inputs = 1; info.max_inputs = 1;
@@ -65,6 +69,10 @@ void OpTypeRegistry::register_builtins() {
     
     info = OpTypeInfo{}; info.name = "softmax"; info.category = "activation";
     info.min_inputs = 1; info.max_inputs = 1; info.is_reduction = true;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "softcap"; info.category = "activation";
+    info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
     
     // Normalization
