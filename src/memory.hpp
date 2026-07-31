@@ -44,11 +44,12 @@ struct MemoryPoolConfig {
     // Size of pool (0 = auto-detect based on available VRAM)
     size_t pool_size_bytes = 0;
     
-    // If auto-detect, what fraction of free VRAM to use (0.0-1.0)
-    float auto_fraction = 0.8f;
+    // If auto-detect, what fraction of free VRAM to use (0.0-1.0).
+    // Opt-in: an inference engine must not reserve most VRAM just by existing.
+    float auto_fraction = 0.0f;
     
-    // Minimum pool size (even with auto-detect)
-    size_t min_size_bytes = 256 * 1024 * 1024;  // 256 MB
+    // Minimum pool size (even with auto-detect). Also opt-in by default.
+    size_t min_size_bytes = 0;
     
     // Maximum pool size (even with auto-detect)
     size_t max_size_bytes = 0;  // 0 = no limit

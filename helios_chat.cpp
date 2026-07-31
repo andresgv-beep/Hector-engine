@@ -5,7 +5,7 @@
 //
 // El embrión del runtime conversacional de HELIOS. Junta todo lo probado:
 //   - CUDA Graph replay (command buffer una vez, replay por token)
-//   - Plantilla ChatML con tokens especiales por id (no BPE)
+//   - Plantilla nativa por arquitectura (ChatML o Gemma 4 canónica)
 //   - Streaming de texto con EOS real del tokenizer
 //   - Telemetría a HEXOS vía blackboard
 //
@@ -28,6 +28,8 @@
 #include "src/sampler.hpp"
 #include "src/hexos_bridge.hpp"
 #include "src/kv_cache.hpp"
+#include "src/gemma4_kv_cache.hpp"
+#include "src/chat_template.hpp"
 #include "kernels/kernels.hpp"
 #include <iostream>
 #include <fstream>
@@ -391,13 +393,45 @@ int main(int argc, char** argv) {
         const HTFTokenizer* tokenizer = loader.tokenizer("text");
         if (!tokenizer) throw std::runtime_error("El chat necesita tokenizer embebido");
 
-        auto im_start = tokenizer->token_to_id("<|im_start|>");
-        auto im_end   = tokenizer->token_to_id("<|im_end|>");
-        if (!im_start || !im_end)
-            throw std::runtime_error("Modelo sin tokens ChatML — usa un instruct");
-        int32_t eos_id = tokenizer->eos_token_id().value_or(151645);
-        auto think_open  = tokenizer->token_to_id("<think>");
-        auto think_close = tokenizer->token_to_id("</think>");
+        const bool is_gemma4 = loader.has_gemma4_config();
+        auto turn_start = tokenizer->token_to_id(
+            is_gemma4 ? "<|turn>" : "<|im_start|>");
+        auto turn_end = tokenizer->token_to_id(
+            is_gemma4 ? "<turn|>" : "<|im_end|>");
+        if (!turn_start || !turn_end) {
+            throw std::runtime_error(is_gemma4
+                ? "Gemma 4 sin tokens de turno canónicos"
+                : "Modelo sin tokens ChatML — usa un instruct");
+        }
+        int32_t eos_id = tokenizer->eos_token_id().value_or(
+            is_gemma4 ? 1 : 151645);
+        auto think_open = is_gemma4
+            ? std::optional<int32_t>{}
+            : tokenizer->token_to_id("<think>");
+        auto think_close = is_gemma4
+            ? std::optional<int32_t>{}
+            : tokenizer->token_to_id("</think>");
+
+        auto encode_gemma_messages = [&](const std::vector<ChatMessage>& messages,
+                                         bool add_generation_prompt) {
+            Gemma4ChatOptions options;
+            options.add_generation_prompt = add_generation_prompt;
+            return tokenizer->encode(format_gemma4_chat(messages, options),
+                                     false, false);
+        };
+
+        // Fragmento incremental: la conversación ya contiene el BOS y los
+        // turnos anteriores en KV, así que se elimina únicamente el BOS que la
+        // plantilla completa coloca al principio.
+        auto encode_gemma_user_fragment = [&](const std::string& content) {
+            auto ids = encode_gemma_messages({{"user", content}}, true);
+            const int32_t bos = tokenizer->bos_token_id().value_or(2);
+            if (ids.empty() || ids.front() != bos) {
+                throw std::runtime_error("La plantilla Gemma 4 no comienza por BOS");
+            }
+            ids.erase(ids.begin());
+            return ids;
+        };
 
         // --- KV cache ---
         KVCacheConfig kv_config;
@@ -411,15 +445,53 @@ int main(int argc, char** argv) {
         kv_config.max_seq_len = (uint32_t)std::max(512,
             (getenv("HELIOS_CTX") ? atoi(getenv("HELIOS_CTX")) : 4096));
         KVCache kv_cache;
-        if (!kv_cache.allocate(kv_config)) throw std::runtime_error("KV alloc failed");
+        Gemma4KVCache gemma_kv_cache;
         std::string kv_prefix = "_kv";
-        register_kv_cache(engine, kv_cache, kv_prefix);
+        if (is_gemma4) {
+            if (!gemma_kv_cache.allocate(loader.gemma4_config(),
+                                          model_config.num_key_value_heads(), 1,
+                                          kv_config.max_seq_len)) {
+                throw std::runtime_error("Gemma 4 heterogeneous KV alloc failed");
+            }
+            gemma_kv_cache.register_tensors(engine, kv_prefix);
+        } else {
+            if (!kv_cache.allocate(kv_config)) {
+                throw std::runtime_error("KV alloc failed");
+            }
+            register_kv_cache(engine, kv_cache, kv_prefix);
+        }
+
+        auto cache_position = [&]() -> uint32_t {
+            return is_gemma4 ? gemma_kv_cache.position() : kv_cache.position();
+        };
+        auto cache_advance = [&](uint32_t tokens) {
+            if (is_gemma4) gemma_kv_cache.advance(tokens);
+            else kv_cache.advance(tokens);
+        };
+        auto cache_reset = [&]() {
+            if (is_gemma4) gemma_kv_cache.reset();
+            else kv_cache.reset();
+        };
+        auto cache_rewind = [&](uint32_t position) {
+            if (is_gemma4) gemma_kv_cache.rewind_to(position);
+            else kv_cache.rewind_to(position);
+        };
+        auto cache_total_bytes = [&]() -> size_t {
+            return is_gemma4 ? gemma_kv_cache.total_bytes()
+                             : kv_config.total_bytes();
+        };
 
         GraphBuilder gb;
         auto arch = gb.detect_architecture(engine, "text");
         // Scratch para prefill por lotes (hasta PREFILL_CHUNK tokens por forward)
         const uint32_t PREFILL_CHUNK = 512;
-        gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
+        if (is_gemma4) {
+            gb.allocate_gemma4_scratch(engine, model_config,
+                                       loader.gemma4_config(), arch,
+                                       1, PREFILL_CHUNK);
+        } else {
+            gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
+        }
 
         Sampler sampler;
         // Parámetros de muestreo calibrables por entorno (para barridos A/B
@@ -434,11 +506,11 @@ int main(int argc, char** argv) {
         // Los overrides sirven para calibrar sin recompilar. Los defaults
         // siguen siendo la configuración estable anterior: una muestra con
         // una semilla y un prompt no basta para promover una variante.
-        const float cfg_rep  = env_f("HELIOS_REP", 1.15f);
-        const float cfg_freq = env_f("HELIOS_FREQ", 0.1f);
+        const float cfg_rep  = env_f("HELIOS_REP", is_gemma4 ? 1.0f : 1.15f);
+        const float cfg_freq = env_f("HELIOS_FREQ", is_gemma4 ? 0.0f : 0.1f);
         const int   cfg_win  = env_i("HELIOS_WINDOW", 384);
-        const int   cfg_topk = env_i("HELIOS_TOPK", 50);
-        const float cfg_topp = env_f("HELIOS_TOPP", 0.9f);
+        const int   cfg_topk = env_i("HELIOS_TOPK", is_gemma4 ? 64 : 50);
+        const float cfg_topp = env_f("HELIOS_TOPP", is_gemma4 ? 0.95f : 0.9f);
         const int   cfg_seed = env_i("HELIOS_SEED", 0);
         sampler.set_penalty_window(cfg_win);
         if (cfg_seed) sampler.set_seed((uint64_t)cfg_seed);  // tiradas reproducibles
@@ -462,7 +534,7 @@ int main(int argc, char** argv) {
         if (hexos.connect()) {
             std::cout << ">>> HEXOS conectado — telemetría activa" << std::endl;
             hexos.update_vram_budgets(3400,
-                (uint32_t)(kv_config.total_bytes() / 1024 / 1024), 0);
+                (uint32_t)(cache_total_bytes() / 1024 / 1024), 0);
             // El proto-CK (presupuestos, rienda, governor) vive aquí
             hexos.announce_cognitive();
         }
@@ -485,21 +557,31 @@ int main(int argc, char** argv) {
         // forward de UN token: devuelve el token muestreado
         auto forward_one = [&](int32_t token) -> int32_t {
             auto* input_info = engine.tensors().get("input_tokens");
+            input_info->shape = {1, 1};
             cudaMemcpy(input_info->ptr, &token, sizeof(int32_t), cudaMemcpyHostToDevice);
-            uint32_t position = kv_cache.position();
+            uint32_t position = cache_position();
             engine.update_device_cache_pos(position, 1);
 
             if (!cb_built) {
-                cb = gb.build_forward_cached(engine, model_config, arch,
-                                             "input_tokens", 1, 1,
-                                             kv_prefix, position, kv_config.max_seq_len);
+                if (is_gemma4) {
+                    const KVCacheParams params{
+                        kv_prefix, position, kv_config.max_seq_len};
+                    cb = gb.build_gemma4_forward_cached(
+                        engine, model_config, loader.gemma4_config(), arch,
+                        "input_tokens", 1, 1, params);
+                } else {
+                    cb = gb.build_forward_cached(engine, model_config, arch,
+                                                 "input_tokens", 1, 1,
+                                                 kv_prefix, position,
+                                                 kv_config.max_seq_len);
+                }
                 cb_built = true;
                 engine.execute(cb);
                 engine.sync();
             } else {
                 engine.execute_graph_replay(cb);
             }
-            kv_cache.advance(1);
+            cache_advance(1);
 
             auto* logits_info = gb.get_logits(engine);
             int32_t next = sampler.sample((const half*)logits_info->ptr,
@@ -528,17 +610,27 @@ int main(int argc, char** argv) {
                 if (n == 1) { next = forward_one(ids[done]); done += 1; continue; }
 
                 auto* input_info = engine.tensors().get("input_tokens");
+                input_info->shape = {1, static_cast<uint32_t>(n)};
                 cudaMemcpy(input_info->ptr, ids.data() + done, n * sizeof(int32_t),
                            cudaMemcpyHostToDevice);
 
-                uint32_t position = kv_cache.position();
-                auto pcb = gb.build_forward_cached(engine, model_config, arch,
-                                                   "input_tokens", 1, (uint32_t)n,
-                                                   kv_prefix, position,
-                                                   kv_config.max_seq_len);
+                uint32_t position = cache_position();
+                CommandBuffer pcb;
+                if (is_gemma4) {
+                    const KVCacheParams params{
+                        kv_prefix, position, kv_config.max_seq_len};
+                    pcb = gb.build_gemma4_forward_cached(
+                        engine, model_config, loader.gemma4_config(), arch,
+                        "input_tokens", 1, static_cast<uint32_t>(n), params);
+                } else {
+                    pcb = gb.build_forward_cached(
+                        engine, model_config, arch, "input_tokens", 1,
+                        static_cast<uint32_t>(n), kv_prefix, position,
+                        kv_config.max_seq_len);
+                }
                 engine.execute(pcb);
                 engine.sync();
-                kv_cache.advance((uint32_t)n);
+                cache_advance(static_cast<uint32_t>(n));
 
                 // El grafo ya calcula SOLO la última posición → fila 0
                 auto* logits_info = gb.get_logits(engine);
@@ -611,16 +703,19 @@ int main(int argc, char** argv) {
             // Cierre mínimo: la última línea pesa, pero una sola frase
             sys_text += "\n\nEres Helios y hablas con " + owner +
                         ". Responde como un amigo, no como un servicio.";
-            sys_ids.push_back(*im_start);
-            pt("system\n" + sys_text);
-            sys_ids.push_back(*im_end);
-            pt("\n");
+            std::vector<ChatMessage> gemma_messages;
+            if (is_gemma4) {
+                gemma_messages.push_back({"system", sys_text});
+            } else {
+                sys_ids.push_back(*turn_start);
+                pt("system\n" + sys_text);
+                sys_ids.push_back(*turn_end);
+                pt("\n");
+            }
 
-            // El último intercambio va como TURNOS ChatML reales, no como texto
-            // dentro del system. Metido como texto, el prompt terminaba con
-            // "Helios: <respuesta>" y los induction heads lo copiaban: tras
-            // cada compactación el modelo repetía su última respuesta palabra
-            // por palabra pasara lo que pasara. Como turno cerrado, es pasado.
+            // El último intercambio va como turnos reales, no como texto
+            // dentro del system. Así la compactación conserva la conversación
+            // sin inducir al modelo a copiar literalmente su última respuesta.
             if (!last_exchange.empty()) {
                 // Varios intercambios separados por \x02, cada uno user\x01asst
                 size_t start = 0;
@@ -632,18 +727,26 @@ int main(int argc, char** argv) {
                     if (sep != std::string::npos) {
                         std::string u = turn.substr(0, sep);
                         std::string a = turn.substr(sep + 2);
-                        sys_ids.push_back(*im_start);
-                        pt("user\n" + u);
-                        sys_ids.push_back(*im_end);
-                        pt("\n");
-                        sys_ids.push_back(*im_start);
-                        pt("assistant\n" + a);
-                        sys_ids.push_back(*im_end);
-                        pt("\n");
+                        if (is_gemma4) {
+                            gemma_messages.push_back({"user", u});
+                            gemma_messages.push_back({"assistant", a});
+                        } else {
+                            sys_ids.push_back(*turn_start);
+                            pt("user\n" + u);
+                            sys_ids.push_back(*turn_end);
+                            pt("\n");
+                            sys_ids.push_back(*turn_start);
+                            pt("assistant\n" + a);
+                            sys_ids.push_back(*turn_end);
+                            pt("\n");
+                        }
                     }
                     if (end == std::string::npos) break;
                     start = end + 1;
                 }
+            }
+            if (is_gemma4) {
+                sys_ids = encode_gemma_messages(gemma_messages, false);
             }
             (void)forward_batch(sys_ids);
 
@@ -663,8 +766,8 @@ int main(int argc, char** argv) {
         // mecanismo "reflexión a coste cero" del CK v4. ---
         auto reflect_and_capture = [&](const std::string& user_msg,
                                        const std::string& reply) {
-            if (kv_cache.position() + 300 >= kv_config.max_seq_len) return;
-            const uint32_t saved_pos = kv_cache.position();
+            if (cache_position() + 300 >= kv_config.max_seq_len) return;
+            const uint32_t saved_pos = cache_position();
 
             std::vector<int32_t> r_ids;
             auto pt3 = [&](const std::string& s) {
@@ -672,8 +775,8 @@ int main(int argc, char** argv) {
                 r_ids.insert(r_ids.end(), seg.begin(), seg.end());
             };
             // Few-shot: un 4B extrae mucho mejor con ejemplos que con reglas
-            r_ids.push_back(*im_start);
-            pt3("user\nEres un extractor de datos. Te doy un mensaje del usuario "
+            const std::string reflection_prompt =
+                "Eres un extractor de datos. Te doy un mensaje del usuario "
                 "y respondes SOLO con una de estas dos cosas:\n"
                 "- 'DATO: <hecho en una frase>' si el mensaje contiene un hecho "
                 "duradero sobre él (nombre, trabajo, gustos, familia, "
@@ -692,17 +795,24 @@ int main(int argc, char** argv) {
                 "Mensaje: 'explícame qué es un compilador' → NADA (es una "
                 "pregunta de conocimiento general, no un dato sobre él)\n"
                 "Mensaje: '¿cómo funciona la fotosíntesis?' → NADA\n\n"
-                "Mensaje: '" + user_msg.substr(0, 400) + "' → /no_think");
-            r_ids.push_back(*im_end);
-            pt3("\n");
-            r_ids.push_back(*im_start);
-            pt3("assistant\n");
+                "Mensaje: '" + user_msg.substr(0, 400) + "' →" +
+                (is_gemma4 ? "" : " /no_think");
+            if (is_gemma4) {
+                r_ids = encode_gemma_user_fragment(reflection_prompt);
+            } else {
+                r_ids.push_back(*turn_start);
+                pt3("user\n" + reflection_prompt);
+                r_ids.push_back(*turn_end);
+                pt3("\n");
+                r_ids.push_back(*turn_start);
+                pt3("assistant\n");
+            }
 
             int32_t rx = forward_batch(r_ids);
             std::string out;
             bool rthink = false;
             for (int i = 0; i < 60; i++) {
-                if (rx == eos_id || rx == *im_end) break;
+                if (rx == eos_id || rx == *turn_end) break;
                 std::string piece = tokenizer->decode({rx});
                 if ((think_open && rx == *think_open) ||
                     piece.find("<think>") != std::string::npos) rthink = true;
@@ -710,10 +820,10 @@ int main(int argc, char** argv) {
                 if (rthink && ((think_close && rx == *think_close) ||
                                piece.find("</think>") != std::string::npos)) rthink = false;
                 rx = forward_one(rx);
-                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
+                if (cache_position() >= kv_config.max_seq_len - 2) break;
             }
 
-            kv_cache.rewind_to(saved_pos);  // la reflexión no existió
+            cache_rewind(saved_pos);  // la reflexión no existió
 
             size_t p = out.find("DATO:");
             if (p == std::string::npos) return;
@@ -760,7 +870,7 @@ int main(int argc, char** argv) {
         // SIEMPRE en contexto recién reseteado — nunca depende del hueco.
         auto distill_from_transcript = [&](const std::string& transcript) -> std::string {
             if (transcript.empty()) return "";
-            kv_cache.reset();
+            cache_reset();
             sampler.clear_context();   // la ventana de penalty no cruza el reset
 
             std::string body = transcript;
@@ -775,13 +885,13 @@ int main(int argc, char** argv) {
                 auto seg = tokenizer->encode(s, false, false);
                 d_ids.insert(d_ids.end(), seg.begin(), seg.end());
             };
-            d_ids.push_back(*im_start);
             // EN PRIMERA PERSONA: si el resumen habla de "el usuario" en
             // tercera, al releerlo el modelo se coloca como observador
             // externo y llega a saludarse a sí mismo. Escrito como recuerdo
             // propio ("me contó", "decidimos"), se reconoce dentro de la
             // escena.
-            pt2("user\nEstas son las notas de una conversación entre tú (Helios) "
+            const std::string distill_prompt =
+                "Estas son las notas de una conversación entre tú (Helios) "
                 "y " + owner_name() + ". Escribe 3 a 6 frases de recuerdo "
                 "personal en PRIMERA PERSONA, como notas tuyas: 'me contó "
                 "que...', 'decidimos...', 'me pidió...'. Nunca digas 'el "
@@ -793,11 +903,17 @@ int main(int argc, char** argv) {
                 "contenido hace que luego lo repitas en vez de continuarlo. "
                 "Solo los datos concretos que te pidieran recordar van "
                 "literales.\n\n"
-                + body + "\n/no_think");
-            d_ids.push_back(*im_end);
-            pt2("\n");
-            d_ids.push_back(*im_start);
-            pt2("assistant\n");
+                + body + (is_gemma4 ? "" : "\n/no_think");
+            if (is_gemma4) {
+                d_ids = encode_gemma_user_fragment(distill_prompt);
+            } else {
+                d_ids.push_back(*turn_start);
+                pt2("user\n" + distill_prompt);
+                d_ids.push_back(*turn_end);
+                pt2("\n");
+                d_ids.push_back(*turn_start);
+                pt2("assistant\n");
+            }
 
             int32_t nx = forward_batch(d_ids);
 
@@ -805,7 +921,7 @@ int main(int argc, char** argv) {
             bool dthink = false;
             int dcount = 0;
             while (dcount < 300) {
-                if (nx == eos_id || nx == *im_end) break;
+                if (nx == eos_id || nx == *turn_end) break;
                 std::string piece = tokenizer->decode({nx});
                 if ((think_open && nx == *think_open) ||
                     piece.find("<think>") != std::string::npos) dthink = true;
@@ -814,7 +930,7 @@ int main(int argc, char** argv) {
                                piece.find("</think>") != std::string::npos)) dthink = false;
                 dcount++;
                 nx = forward_one(nx);
-                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
+                if (cache_position() >= kv_config.max_seq_len - 2) break;
             }
             while (!summary.empty() &&
                    (summary.front() == '\n' || summary.front() == ' '))
@@ -838,7 +954,7 @@ int main(int argc, char** argv) {
             for (const char* g : {"hola", "¡hola", "buenas", "hey "})
                 if (low.rfind(g, 0) == 0) bad = true;
             for (const char* b : {"el usuario", "assistant", "<|im_start|>",
-                                  "<think>"})
+                                  "<|turn>", "<think>"})
                 if (low.find(b) != std::string::npos) bad = true;
             if (low.find("soy " + own) != std::string::npos) bad = true;
             if (bad) {
@@ -1043,13 +1159,13 @@ int main(int argc, char** argv) {
             // avanzaba nunca y el modelo repetía su respuesta anterior.
             const uint32_t compact_margin =
                 std::min<uint32_t>(1200, kv_config.max_seq_len / 3);
-            if (kv_cache.position() + compact_margin > kv_config.max_seq_len) {
+            if (cache_position() + compact_margin > kv_config.max_seq_len) {
                 std::cout << "\033[90m(reorganizando recuerdos..." << std::flush;
                 // Orden nuevo: la destilación resetea el KV y trabaja sobre la
                 // transcripción en RAM, así que siempre tiene sitio.
                 std::string notes = consolidate("compactación");
 
-                kv_cache.reset();
+                cache_reset();
                 sampler.clear_context();
 
                 // Separador \n\x01 para partirlo en turnos ChatML. La respuesta
@@ -1067,7 +1183,7 @@ int main(int argc, char** argv) {
                     exch += t.first.substr(0, 300) + "\n\x01" + rep;
                 }
                 prefill_prefix(notes, exch, false);
-                std::cout << " hecho — contexto " << kv_cache.position()
+                std::cout << " hecho — contexto " << cache_position()
                           << "/" << kv_config.max_seq_len << ")\033[0m" << std::endl;
             }
 
@@ -1077,7 +1193,7 @@ int main(int argc, char** argv) {
             std::string user_msg = line;
             bool trivial = false;
             if (!user_forced && is_trivial_message(line)) {
-                user_msg += " /no_think";
+                if (!is_gemma4) user_msg += " /no_think";
                 trivial = true;
             }
 
@@ -1098,12 +1214,16 @@ int main(int argc, char** argv) {
                 auto seg = tokenizer->encode(s, false, false);
                 turn_ids.insert(turn_ids.end(), seg.begin(), seg.end());
             };
-            turn_ids.push_back(*im_start);
-            push_text("user\n" + user_msg);
-            turn_ids.push_back(*im_end);
-            push_text("\n");
-            turn_ids.push_back(*im_start);
-            push_text("assistant\n");
+            if (is_gemma4) {
+                turn_ids = encode_gemma_user_fragment(user_msg);
+            } else {
+                turn_ids.push_back(*turn_start);
+                push_text("user\n" + user_msg);
+                turn_ids.push_back(*turn_end);
+                push_text("\n");
+                turn_ids.push_back(*turn_start);
+                push_text("assistant\n");
+            }
 
             // ¿CABE EL TURNO? Un pegote grande (un árbol de ficheros, un
             // documento) puede llenar el contexto entero durante SU PROPIO
@@ -1111,24 +1231,24 @@ int main(int argc, char** argv) {
             // basura. La compactación previa no basta — mira la posición
             // ANTES del turno, no su tamaño.
             const uint32_t RESERVE_GEN = 320;   // hueco mínimo para responder
-            uint32_t room = (kv_config.max_seq_len > kv_cache.position() + RESERVE_GEN)
-                          ? kv_config.max_seq_len - kv_cache.position() - RESERVE_GEN
+            uint32_t room = (kv_config.max_seq_len > cache_position() + RESERVE_GEN)
+                          ? kv_config.max_seq_len - cache_position() - RESERVE_GEN
                           : 0;
             if (turn_ids.size() > room) {
                 // 1) compactar y reintentar con el contexto recién liberado
                 std::cout << "\033[90m(turno grande — reorganizando...)\033[0m"
                           << std::endl;
                 std::string notes = consolidate("turno grande");
-                kv_cache.reset();
+                cache_reset();
                 sampler.clear_context();
                 prefill_prefix(notes, "", false);
-                room = (kv_config.max_seq_len > kv_cache.position() + RESERVE_GEN)
-                     ? kv_config.max_seq_len - kv_cache.position() - RESERVE_GEN
+                room = (kv_config.max_seq_len > cache_position() + RESERVE_GEN)
+                     ? kv_config.max_seq_len - cache_position() - RESERVE_GEN
                      : 0;
             }
             if (turn_ids.size() > room && room > 64) {
                 // 2) aún no cabe: recortar el contenido conservando el cierre
-                // del turno (los 4 últimos ids son <|im_end|>\n<|im_start|>assistant\n)
+                // del turno (cierre de usuario + apertura del modelo)
                 size_t keep_tail = 8;
                 std::vector<int32_t> tail(turn_ids.end() - keep_tail, turn_ids.end());
                 turn_ids.resize(room - keep_tail);
@@ -1158,8 +1278,9 @@ int main(int argc, char** argv) {
                                 : (budget >= 1500 ? 1000 : 400));
 
             std::string think_tail;  // buffer para detectar </think> troceado
+            bool natural_stop = false;
             while (gen_count < HARD_CAP) {
-                if (next == eos_id || next == *im_end) {
+                if (next == eos_id || next == *turn_end) {
                     // TURNO MUDO: el modelo intenta terminar DENTRO del think
                     // sin haber dicho nada → cerrar el pensamiento y que hable
                     if (in_think && visible_count == 0 && think_close) {
@@ -1172,6 +1293,7 @@ int main(int argc, char** argv) {
                         std::cout << "|corte)\033[0m " << std::flush;
                         continue;
                     }
+                    natural_stop = true;
                     break;
                 }
 
@@ -1274,7 +1396,7 @@ int main(int argc, char** argv) {
                 // jamás penalizar tokens especiales (>= 151643: im_end,
                 // think, etc.) ni el contenido del think — penalizar
                 // </think> es lo que rompía el cierre del pensamiento
-                if (!in_think && next < 151643) {
+                if (!in_think && (is_gemma4 || next < 151643)) {
                     sampler.add_context(next);
                 }
                 // Registrar el token ACTUAL antes de muestrear el siguiente.
@@ -1282,16 +1404,17 @@ int main(int argc, char** argv) {
                 // no ve el token recién emitido cuando calcula sus logits.
                 gen_count++;
                 next = forward_one(next);
-                if (kv_cache.position() >= kv_config.max_seq_len - 2) break;
+                if (cache_position() >= kv_config.max_seq_len - 2) break;
             }
 
-            // CERRAR EL TURNO: si cortamos nosotros (presupuesto, bucle,
-            // techo), el <|im_end|> nunca entró al KV y el ChatML quedaba
-            // malformado — el turno siguiente del usuario se pegaba a una
-            // respuesta inacabada y el modelo derivaba (títulos rotos, tono
-            // cada vez más burocrático). Se cierra explícitamente.
-            if (budget_cut || loop_cut || think_cut || gen_count >= HARD_CAP) {
-                (void)forward_one(*im_end);
+            // CERRAR EL TURNO: el token terminal muestreado todavía no ha
+            // entrado al KV. Gemma 4 necesita siempre <turn|> antes del próximo
+            // usuario; ChatML conserva su comportamiento previo y solo fuerza
+            // el cierre cuando el runtime corta la respuesta.
+            const bool forced_stop = budget_cut || loop_cut || think_cut ||
+                                     gen_count >= HARD_CAP;
+            if ((is_gemma4 && natural_stop) || forced_stop) {
+                (void)forward_one(*turn_end);
                 auto nl2 = tokenizer->encode("\n", false, false);
                 for (int32_t t : nl2) (void)forward_one(t);
             }
@@ -1314,7 +1437,7 @@ int main(int argc, char** argv) {
                       << (think_cut ? " · pensamiento cortado" : "")
                       << " · prefill " << (int)prefill_ms << "ms"
                       << " · " << (gen_s > 0 ? (int)(gen_count / gen_s) : 0) << " tok/s"
-                      << " · ctx " << kv_cache.position() << "/" << kv_config.max_seq_len
+                      << " · ctx " << cache_position() << "/" << kv_config.max_seq_len
                       << "]\033[0m" << std::endl;
 
             // Transcripción en RAM: sobrevive a cualquier reset del KV

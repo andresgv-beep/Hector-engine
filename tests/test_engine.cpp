@@ -9,6 +9,14 @@
 
 using namespace helios;
 
+void test_default_scratch_is_opt_in() {
+    std::cout << "Test: Default scratch is opt-in... ";
+    Engine engine;
+    assert(engine.scratch().capacity() == 0);
+    assert(!engine.scratch().valid());
+    std::cout << "PASSED" << std::endl;
+}
+
 void test_kernel_registration() {
     std::cout << "Test: Kernel registration... ";
     
@@ -230,7 +238,9 @@ void test_missing_kernel_error() {
 void test_scratch_memory() {
     std::cout << "Test: Scratch memory... ";
     
-    Engine engine;
+    EngineConfig config;
+    config.scratch_pool.pool_size_bytes = 2 * 1024 * 1024;
+    Engine engine(config);
     
     // Allocate from scratch in kernel
     void* scratch_ptr = nullptr;
@@ -330,6 +340,7 @@ int main() {
     std::cout << std::endl;
     
     // Run tests
+    test_default_scratch_is_opt_in();
     test_kernel_registration();
     test_stub_kernels();
     test_tensor_resolution();

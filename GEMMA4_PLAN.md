@@ -7,10 +7,12 @@
 ## Objetivo y alcance
 
 Ejecutar en Héctor el bloque de texto de Gemma 4 E2B convertido al formato HNF
-v9 propio de HELIOS. La primera entrada será el modelo compacto ya generado:
+v9 propio de HELIOS. El artefacto de chat certificado es el checkpoint instruct:
 
-- HNF: `gemma4-e2b-text-compact.hnf`
-- Tamaño: 4.250.889.356 bytes (3,959 GiB)
+- Checkpoint: `google/gemma-4-E2B-it`, SHA256
+  `2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550`
+- HNF: `gemma4-e2b-it-text-compact.hnf`
+- Tamaño: 4.250.889.374 bytes (3,959 GiB)
 - Tensores: 601
 - Cuantización: 283 FP16, 213 HQ51K y 105 HQ41K
 - Validador estricto del convertidor: 0 errores, 0 avisos
@@ -271,15 +273,22 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 ## Estado actual
 
-- **Fase activa:** Fase 6 — atención alternada y KV compartido.
-- **Última fase completada:** Fase 5 — grafo Gemma 4 por capa.
-- **Siguiente acción exacta:** capturar logits de una implementación de
-  referencia para un prompt corto y otro mayor de 512 tokens y compararlos con
-  el forward cached real ya operativo; no cerrar Fase 6 solo con consistencia
-  interna prefill/decode.
+- **Fase activa:** Fase 8 — rendimiento y robustez.
+- **Última fase completada:** Fase 7 — generación y tokenizer.
+- **Siguiente acción exacta:** aislar sobre el checkpoint IT cuánto aportan al
+  afilado `lm_head`, MLP y PLE/atención, y decidir el perfil de producción con
+  evidencia; después ejecutar las regresiones restantes y perfilar el contexto
+  largo.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
+- **Hallazgo pendiente del conversor:** el HNF compacto afila la distribución
+  (`KL=0,123965`, masa top-1 `0,1161` frente a `0,0599` de referencia), mientras
+  el HNF FP16 reproduce la referencia. La calibración IT de 1.157 predicciones
+  localiza el mismo riesgo en las posiciones abiertas: cuando top-1 FP16 < 0,80,
+  el compacto sube la masa media de 0,4641 a 0,5525 y baja la entropía de 3,0674
+  a 2,6868. No es un defecto de Héctor ni de la ventana de 512; aislar la familia
+  de tensores antes de certificar calidad de sampling.
 
 ## Registro de trabajo
 
@@ -295,3 +304,18 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-07-31 | Fase 5 | Grafo heterogéneo por capa verificado y cerrado | PLE multi-token; capas reales 0-4 encadenadas contra CPU, global HD512 max abs 0,0234375; cola MLP/PLE de capa 15 a 12288 max abs 0,0273438 |
 | 2026-07-31 | Baseline | Suite legacy reparada: 11/11 tests pasan | Ops fusionadas son builtins reutilizables; mock HNF corregido; loader rechaza size/dtype inválidos y libera correctamente RAM mapeada |
 | 2026-07-31 | Fase 6 (parcial) | Layout KV y forward cached completo operativos | 15 slots físicos; capas 15-34 aliasan local 13/global 14; máscaras prefill/decode incluido límite >512; HD512; HNF real prefill vs decode max/mean 0 y mismo argmax 236772 |
+| 2026-07-31 | Fase 6 | Verificación externa FP32 completada y fase cerrada | HNF FP16: 3 tokens corr 0,999975, RMS 0,0907, KL 0,000254; 600 tokens corr 0,999879, RMS 0,0383, KL 0,000691; argmax coincide y top-10 9/10 y 10/10. Evidencia: `tools/GEMMA4_F6_VERIFICACION.md` |
+| 2026-07-31 | Fase 7 (parcial) | HTF3 y plantilla de texto canónica verificados | 262.144 vocab, 514.906 merges y 24 added tokens; vectores idénticos al JSON en ES/EN/Unicode/byte fallback/control tokens; suite 13/13 |
+| 2026-07-31 | Fase 7 (parcial) | Greedy completo estable; el supuesto chat no obedece | 23 tokens de prefill, ~124 tok/s; inglés responde París pero copia el prompt y español continúa el texto. Los experimentos posteriores demostraron que el checkpoint era base, no instruct |
+| 2026-07-31 | Fase 7 (experimento) | Elevar los 105 MLP a HQ5.1K no mejora calidad | Greedy idéntico; en tokens 42,43,44 la masa top-1 empeora de 0,1260 a 0,2115 y KL de 0,6667 a 0,7064. Se descarta el perfil y se prueba `lm_head` FP16 |
+| 2026-07-31 | Fase 7 (experimento) | `lm_head` FP16 mejora poco y no cambia greedy | En tokens 42,43,44 KL 0,6667→0,6469 y top-1 0,1260→0,1215, pero ES/EN generan exactamente lo mismo por 468 MiB extra. Siguiente aislamiento: tabla PLE FP16 en RAM |
+| 2026-07-31 | Fase 7 (experimento) | PLE FP16 tampoco cambia greedy | KL 0,6667→0,6313 pero ES/EN idénticos por +2,86 GiB; incluso el HNF totalmente FP16 repite igual. El greedy valida estabilidad, pero Gemma 4 exige evaluar su sampling oficial |
+| 2026-07-31 | Fase 7 (diagnóstico) | El checkpoint local es base, no instruct | SHA256 local `76dc84a5…` coincide exactamente con `google/gemma-4-E2B`; el oficial `E2B-it` es `2db5482b…`. Config local 4.914 bytes también coincide con base; instruct añade EOS 106. Explica las continuaciones/copias incluso en FP16 |
+| 2026-07-31 | Fase 7 (base) | Completion crudo validado en FP16 y compacto | Greedy idéntico: `The capital of France is Paris…`; sampling ES coherente; compacto 112-124 tok/s y FP16 60-64 tok/s. Sin NaN, crash ni crecimiento inesperado. Chat queda pendiente exclusivamente de pesos `E2B-it` |
+| 2026-07-31 | Fase 7 (IT) | Checkpoint instruct auténtico convertido y validado | SHA256 oficial `2db5482b…`; HNF de 4.250.889.374 bytes, 601 tensores; validador estricto 0 errores/0 avisos; contrato metadata 283/105/213 correcto |
+| 2026-07-31 | Fase 7 | Tokenizer, plantilla y chat real verificados; fase cerrada | HTF3 y plantilla canónica pasan; greedy ES/EN responde París y cierra turno; sampling oficial ES coherente e instrucción system respetada en EN; contexto de 2.945 tokens recupera `ORIÓN-27`; 104-109 tok/s en prompts cortos; Héctor 13/13 y convertidor 34/34 |
+| 2026-07-31 | Fase 8 (parcial) | Compacto IT comparado con HNF IT FP16 | Tres posiciones de chat: argmax coincide; top-10 9/10, 9/10 y 10/10; KL 0,000010, 0,000005 y 0,002833. En la posición menos forzada el compacto no afila el top-1: 0,9942 frente a 0,9988 FP16. Sampling oficial coherente en ambos; falta ampliar la calibración |
+| 2026-07-31 | Fase 8 (parcial) | Rendimiento y memoria medidos | Compacto: pico 1.906 MiB, 106,4-107,9 tok/s; FP16: 4.626 MiB, 58,8-59,5 tok/s. Contexto compacto de 2.945 tokens: prefill 1.411,95 ms y respuesta correcta. Evidencia y comandos en `tools/GEMMA4_F8_BENCHMARK.md` |
+| 2026-07-31 | Fase 8 (regresión) | Qwen3-4B y Qwen3-8B reales siguen operativos | Ambos cargan 399 tensores y generan París: 4B a 99,17 tok/s, 8B a 40,40 tok/s. `tests/qwen3_hq4k_v3.hnf` se excluye: está truncado (3.337.977.856 bytes reales frente a 4.533.663.705 declarados) y el validador encuentra 5 errores fatales |
+| 2026-07-31 | Fase 8 (producto) | `helios_chat` ejecuta Gemma 4 con su contrato nativo | Selección por arquitectura: plantilla canónica, KV heterogéneo/compartido, forward Gemma y sampling oficial. Smoke greedy responde París; sesión de dos turnos a 0,7 recuerda el número 17; CUDA Graph replay activo. Regresión `helios_chat` Qwen3-4B correcta a 101 tok/s |
+| 2026-07-31 | Fase 8 (calibración) | 1.158 posiciones IT separan motor, ventana y cuantización | FP16 coincide 98,27 % con FP32; compacto/FP16 79,53 %, estable antes/después de 512. En 293 posiciones con top-1 FP16 < 0,80, HQS sube la masa 0,4641→0,5525 y baja entropía 3,0674→2,6868. `gemma4_calibrate` deja NLL/entropía por posición; falta aislar familias de tensores |

@@ -24,6 +24,15 @@ void test_vram_query() {
     std::cout << "  Used:  " << info.used_gb() << " GB" << std::endl;
 }
 
+void test_default_pool_is_disabled() {
+    std::cout << "Test: Default pool is disabled... ";
+    MemoryPool pool;
+    assert(!pool.valid());
+    assert(pool.capacity() == 0);
+    assert(pool.allocate(1) == nullptr);
+    std::cout << "PASSED" << std::endl;
+}
+
 void test_basic_pool() {
     std::cout << "Test: Basic pool... ";
     
@@ -222,6 +231,7 @@ int main() {
     
     // Run tests
     test_vram_query();
+    test_default_pool_is_disabled();
     test_basic_pool();
     test_allocation();
     test_alignment();

@@ -104,7 +104,12 @@ struct HTFTextConfigBin {
     uint16_t num_added_tokens;
     uint8_t  encoding_type;   // 0=BPE, 1=SP, 2=WP, 3=Unigram
     uint8_t  flags;           // bit0: byte_level, bit1: add_prefix_space
-    uint8_t  reserved[8];
+    uint8_t  pre_tokenizer_type; // 1=split-space, merged with previous
+    uint8_t  decoder_type;       // 1=replace U+2581 with ASCII space
+    uint8_t  behaviour_flags;    // bit0: add BOS by default
+    uint8_t  normalizer_type;    // 1=replace ASCII space with U+2581
+    uint8_t  model_flags;        // bit0: byte fallback
+    uint8_t  reserved[3];
 };
 static_assert(sizeof(HTFTextConfigBin) == 32, "HTFTextConfigBin must be 32 bytes");
 
@@ -172,8 +177,16 @@ public:
     // ========================================
     
     uint32_t vocab_size() const { return vocab_size_; }
+    size_t merge_count() const { return merges_.size(); }
+    size_t added_token_count() const { return added_tokens_.size(); }
     EncodingType encoding_type() const { return encoding_type_; }
     bool byte_level() const { return byte_level_; }
+    bool byte_fallback() const { return byte_fallback_; }
+    bool add_prefix_space() const { return add_prefix_space_; }
+    bool add_bos_token_by_default() const { return add_bos_token_; }
+    bool space_to_metaspace_normalizer() const { return normalizer_type_ == 1; }
+    bool metaspace_decoder() const { return decoder_type_ == 1; }
+    bool is_htf_v13() const { return is_htf_v13_; }
     const std::vector<HTFDomain>& available_domains() const { return domains_; }
     
     // Get token string by ID
@@ -207,6 +220,7 @@ private:
     // ========================================
     
     std::vector<int32_t> encode_bpe(const std::string& text) const;
+    std::vector<int32_t> encode_bpe_segment(const std::string& text) const;
     std::vector<int32_t> encode_sentencepiece(const std::string& text) const;
     std::vector<int32_t> encode_wordpiece(const std::string& text) const;
     
@@ -241,6 +255,19 @@ private:
     uint32_t vocab_size_ = 0;
     EncodingType encoding_type_ = EncodingType::BPE;
     bool byte_level_ = false;
+    bool byte_fallback_ = false;
+    bool add_prefix_space_ = false;
+    bool add_bos_token_ = false;
+    uint8_t pre_tokenizer_type_ = 0;
+    uint8_t decoder_type_ = 0;
+    uint8_t normalizer_type_ = 0;
+
+    struct AddedToken {
+        std::string content;
+        int32_t id = -1;
+        uint8_t flags = 0;
+    };
+    std::vector<AddedToken> added_tokens_;
     
     // Special tokens
     std::optional<int32_t> bos_id_;

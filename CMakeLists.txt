@@ -67,6 +67,7 @@ set(ENGINE_SOURCES
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
+    src/chat_template.cpp
     src/hexos_bridge.cpp
 )
 
@@ -167,6 +168,14 @@ target_link_libraries(test_gemma4_graph PRIVATE helios-engine)
 add_executable(test_gemma4_kv tests/test_gemma4_kv.cu)
 target_link_libraries(test_gemma4_kv PRIVATE helios-engine)
 
+# Gemma 4 HTF3 tokenizer contract and reference vectors
+add_executable(test_gemma4_tokenizer tests/test_gemma4_tokenizer.cpp)
+target_link_libraries(test_gemma4_tokenizer PRIVATE helios-engine)
+
+# Canonical text-only Gemma 4 chat framing
+add_executable(test_chat_template tests/test_chat_template.cpp)
+target_link_libraries(test_chat_template PRIVATE helios-engine)
+
 # Real HNF inspector (with block loading test)
 add_executable(inspect_hnf test_real_hnf.cpp)
 target_link_libraries(inspect_hnf PRIVATE helios-engine)
@@ -184,6 +193,8 @@ add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)
+add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
+add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 
 # GraphBuilder test
 add_executable(test_graph_builder test_graph_builder.cpp)
@@ -204,6 +215,18 @@ target_link_libraries(test_tokenizer PRIVATE helios-engine)
 # Full generation test (tokenizer + forward + sampling + decode)
 add_executable(test_generate_full test_generate_full.cpp)
 target_link_libraries(test_generate_full PRIVATE helios-engine)
+
+# Gemma 4 complete greedy/sampled generation through heterogeneous/shared KV
+add_executable(test_gemma4_generate tests/test_gemma4_generate.cu)
+target_link_libraries(test_gemma4_generate PRIVATE helios-engine)
+
+# Gemma 4 raw-logit dump for converter quantization experiments
+add_executable(gemma4_dump_logits tools/gemma4_dump_logits.cu)
+target_link_libraries(gemma4_dump_logits PRIVATE helios-engine)
+
+# Gemma 4 token-by-token quality calibration (NLL/entropy/top-1)
+add_executable(gemma4_calibrate tools/gemma4_calibrate.cu)
+target_link_libraries(gemma4_calibrate PRIVATE helios-engine)
 
 # Multimodal test (CORTEX, CODE)
 add_executable(test_multimodal test_multimodal.cpp)

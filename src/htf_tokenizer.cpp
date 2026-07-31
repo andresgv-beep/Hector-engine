@@ -7,6 +7,7 @@
 #include <fstream>
 #include <cstring>
 #include <algorithm>
+#include <cstdio>
 #include <iostream>
 
 namespace helios {
@@ -108,6 +109,22 @@ bool HTFTokenizer::load(const uint8_t* data, size_t size,
     
     requested_domain_ = domain;
     target_vocab_size_ = target_vocab_size;
+    vocab_.clear();
+    vocab_inv_.clear();
+    merges_.clear();
+    merge_priority_.clear();
+    added_tokens_.clear();
+    byte_level_ = false;
+    byte_fallback_ = false;
+    add_prefix_space_ = false;
+    add_bos_token_ = false;
+    pre_tokenizer_type_ = 0;
+    decoder_type_ = 0;
+    normalizer_type_ = 0;
+    bos_id_.reset();
+    eos_id_.reset();
+    pad_id_.reset();
+    unk_id_.reset();
     
     // Parse header
     if (!parse_header(data, size)) {
@@ -378,7 +395,7 @@ bool HTFTokenizer::parse_text_domain_v13(const uint8_t* data, const HTFDomain& d
     
     // Parse added tokens — collect for later registration (after vocab parse)
     // AddedTokenEntry: [id:u32][content_len:u16][flags:u8][reserved:u8][content:var][padding to 4]
-    std::vector<std::pair<std::string, int32_t>> pending_added;
+    std::vector<AddedToken> pending_added;
     for (uint32_t i = 0; i < added_count && offset < end; i++) {
         if (offset + 8 > end) {
             std::cerr << "HTFTokenizer: Added token " << i << " exceeds bounds at offset " << offset << std::endl;
@@ -386,6 +403,7 @@ bool HTFTokenizer::parse_text_domain_v13(const uint8_t* data, const HTFDomain& d
         }
         uint32_t token_id = *reinterpret_cast<const uint32_t*>(data + offset);
         uint16_t content_len = *reinterpret_cast<const uint16_t*>(data + offset + 4);
+        uint8_t token_flags = *(data + offset + 6);
         
         // Extract token content string
         std::string token_content;
@@ -402,7 +420,7 @@ bool HTFTokenizer::parse_text_domain_v13(const uint8_t* data, const HTFDomain& d
         
         // Collect for registration after vocab parse
         if (!token_content.empty()) {
-            pending_added.push_back({token_content, (int32_t)token_id});
+            pending_added.push_back({token_content, static_cast<int32_t>(token_id), token_flags});
         }
         
         offset += 8 + content_len;
@@ -438,9 +456,10 @@ bool HTFTokenizer::parse_text_domain_v13(const uint8_t* data, const HTFDomain& d
     }
     
     // NOW register added tokens (after vocab parse, which calls vocab_.clear())
-    for (auto& [content, id] : pending_added) {
-        vocab_[content] = id;
-        vocab_inv_[id] = content;
+    added_tokens_ = std::move(pending_added);
+    for (const auto& token : added_tokens_) {
+        vocab_[token.content] = token.id;
+        vocab_inv_[token.id] = token.content;
     }
     
     // Skip to after vocab
@@ -546,15 +565,16 @@ bool HTFTokenizer::parse_code_domain(const uint8_t* data, const HTFDomain& domai
     }
     
     // 4. Collect added tokens (register after parse_vocab which clears vocab_)
-    std::vector<std::pair<std::string, int32_t>> pending_added;
+    std::vector<AddedToken> pending_added;
     for (uint32_t i = 0; i < added_count && offset < end; i++) {
         if (offset + 8 > end) break;
         uint32_t token_id = *reinterpret_cast<const uint32_t*>(data + offset);
         uint16_t content_len = *reinterpret_cast<const uint16_t*>(data + offset + 4);
+        uint8_t token_flags = *(data + offset + 6);
         
         if (content_len > 0 && offset + 8 + content_len <= end) {
             std::string token_content(reinterpret_cast<const char*>(data + offset + 8), content_len);
-            pending_added.push_back({token_content, (int32_t)token_id});
+            pending_added.push_back({token_content, static_cast<int32_t>(token_id), token_flags});
         }
         
         offset += 8 + content_len;
@@ -586,9 +606,10 @@ bool HTFTokenizer::parse_code_domain(const uint8_t* data, const HTFDomain& domai
     }
     
     // 7b. NOW register added tokens
-    for (auto& [content, id] : pending_added) {
-        vocab_[content] = id;
-        vocab_inv_[id] = content;
+    added_tokens_ = std::move(pending_added);
+    for (const auto& token : added_tokens_) {
+        vocab_[token.content] = token.id;
+        vocab_inv_[token.id] = token.content;
     }
     
     // 8. Skip to merges
@@ -639,6 +660,21 @@ bool HTFTokenizer::parse_config_v13(const uint8_t* data, size_t offset) {
     
     // Flags
     byte_level_ = (cfg->flags & 0x01) != 0;
+    add_prefix_space_ = (cfg->flags & 0x02) != 0;
+    pre_tokenizer_type_ = cfg->pre_tokenizer_type;
+    decoder_type_ = cfg->decoder_type;
+    add_bos_token_ = (cfg->behaviour_flags & 0x01) != 0;
+    normalizer_type_ = cfg->normalizer_type;
+    byte_fallback_ = (cfg->model_flags & 0x01) != 0;
+
+    // Compatibility with Gemma 4 HNFs emitted before normalizer_type and
+    // model_flags became explicit.  Their 24/25 signature is unambiguous and
+    // also lets us neutralize the old vocab-based ByteLevel false positive.
+    if (pre_tokenizer_type_ == 1 && decoder_type_ == 1) {
+        byte_level_ = false;
+        if (normalizer_type_ == 0) normalizer_type_ = 1;
+        byte_fallback_ = true;
+    }
     
 //    std::cerr << "HTFTokenizer: v1.3 config loaded - vocab=" << vocab_size_ 
 //              << ", bos=" << (bos_id_.has_value() ? std::to_string(*bos_id_) : "none")
@@ -706,6 +742,9 @@ bool HTFTokenizer::parse_config(const uint8_t* data, size_t offset, size_t size)
     
     // Byte-level
     byte_level_ = get_bool(j, "byte_level", false);
+    add_prefix_space_ = get_bool(j, "add_prefix_space", false);
+    byte_fallback_ = get_bool(j, "byte_fallback", false);
+    add_bos_token_ = get_bool(j, "add_bos_token", false);
     
     // Special tokens
     int64_t bos = get_int(j, "bos_token_id", -1);
@@ -871,9 +910,57 @@ std::vector<int32_t> HTFTokenizer::encode(const std::string& text,
 
 std::vector<int32_t> HTFTokenizer::encode_bpe(const std::string& text) const {
     std::vector<int32_t> ids;
-    
-    // Convert to byte-level if needed
-    std::string processed = byte_level_ ? bytes_to_unicode(text) : text;
+
+    // Added tokens are isolated before normalization/BPE.  This is essential
+    // for Gemma 4 control markers such as <|turn> and <channel|>.
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t next_pos = std::string::npos;
+        const AddedToken* next_token = nullptr;
+        for (const auto& token : added_tokens_) {
+            if (token.content.empty()) continue;
+            const size_t found = text.find(token.content, pos);
+            if (found == std::string::npos) continue;
+            if (next_token == nullptr || found < next_pos ||
+                (found == next_pos && token.content.size() > next_token->content.size())) {
+                next_pos = found;
+                next_token = &token;
+            }
+        }
+
+        if (next_token == nullptr) {
+            auto tail = encode_bpe_segment(text.substr(pos));
+            ids.insert(ids.end(), tail.begin(), tail.end());
+            break;
+        }
+        if (next_pos > pos) {
+            auto prefix = encode_bpe_segment(text.substr(pos, next_pos - pos));
+            ids.insert(ids.end(), prefix.begin(), prefix.end());
+        }
+        ids.push_back(next_token->id);
+        pos = next_pos + next_token->content.size();
+    }
+
+    return ids;
+}
+
+std::vector<int32_t> HTFTokenizer::encode_bpe_segment(const std::string& text) const {
+    std::vector<int32_t> ids;
+    if (text.empty()) return ids;
+
+    std::string processed = text;
+    if (normalizer_type_ == 1) {
+        const std::string metaspace = "\xE2\x96\x81";
+        size_t pos = 0;
+        while ((pos = processed.find(' ', pos)) != std::string::npos) {
+            processed.replace(pos, 1, metaspace);
+            pos += metaspace.size();
+        }
+    }
+    if (add_prefix_space_ && !processed.empty() && processed.front() != ' ') {
+        processed.insert(processed.begin(), ' ');
+    }
+    if (byte_level_) processed = bytes_to_unicode(processed);
     
     // Tokenize each character initially
     std::vector<std::string> tokens;
@@ -889,11 +976,21 @@ std::vector<int32_t> HTFTokenizer::encode_bpe(const std::string& text) const {
         i += char_len;
     }
     
-    // Convert to IDs
+    // Convert initial symbols to IDs, using the model's <0xNN> vocabulary for
+    // Unicode symbols absent from the direct vocabulary.
     for (const auto& t : tokens) {
         auto it = vocab_.find(t);
         if (it != vocab_.end()) {
             ids.push_back(it->second);
+        } else if (byte_fallback_) {
+            for (unsigned char byte : t) {
+                char fallback[7];
+                std::snprintf(fallback, sizeof(fallback), "<0x%02X>", byte);
+                auto byte_it = vocab_.find(fallback);
+                ids.push_back(byte_it != vocab_.end()
+                    ? byte_it->second
+                    : unk_id_.value_or(0));
+            }
         } else if (unk_id_) {
             ids.push_back(*unk_id_);
         }
@@ -922,12 +1019,25 @@ std::vector<int32_t> HTFTokenizer::encode_bpe(const std::string& text) const {
         
         if (!found) break;
         
-        // Merge
-        std::string merged = vocab_inv_.at(ids[best_idx]) + vocab_inv_.at(ids[best_idx + 1]);
+        // Hugging Face BPE replaces every non-overlapping occurrence of the
+        // selected pair before choosing the next-ranked pair.
+        const int32_t left = ids[best_idx];
+        const int32_t right = ids[best_idx + 1];
+        std::string merged = vocab_inv_.at(left) + vocab_inv_.at(right);
         auto it = vocab_.find(merged);
         if (it != vocab_.end()) {
-            ids[best_idx] = it->second;
-            ids.erase(ids.begin() + best_idx + 1);
+            std::vector<int32_t> next;
+            next.reserve(ids.size());
+            for (size_t i = 0; i < ids.size();) {
+                if (i + 1 < ids.size() && ids[i] == left && ids[i + 1] == right) {
+                    next.push_back(it->second);
+                    i += 2;
+                } else {
+                    next.push_back(ids[i]);
+                    ++i;
+                }
+            }
+            ids = std::move(next);
         } else {
             break;
         }
@@ -1071,7 +1181,23 @@ std::string HTFTokenizer::decode(const std::vector<int32_t>& ids) const {
     for (int32_t id : ids) {
         auto it = vocab_inv_.find(id);
         if (it != vocab_inv_.end()) {
-            text += it->second;
+            const std::string& token = it->second;
+            if (byte_fallback_ && token.size() == 6 &&
+                token.compare(0, 3, "<0x") == 0 && token[5] == '>') {
+                const auto hex_value = [](char c) -> int {
+                    if (c >= '0' && c <= '9') return c - '0';
+                    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                    return -1;
+                };
+                const int high = hex_value(token[3]);
+                const int low = hex_value(token[4]);
+                if (high >= 0 && low >= 0) {
+                    text.push_back(static_cast<char>((high << 4) | low));
+                    continue;
+                }
+            }
+            text += token;
         }
     }
     
@@ -1080,12 +1206,14 @@ std::string HTFTokenizer::decode(const std::vector<int32_t>& ids) const {
         text = unicode_to_bytes(text);
     }
     
-    // SentencePiece: replace ▁ with space
-    size_t pos = 0;
-    const std::string sp_space = "\xE2\x96\x81";  // ▁ (U+2581)
-    while ((pos = text.find(sp_space, pos)) != std::string::npos) {
-        text.replace(pos, 3, " ");
-        pos++;
+    if (decoder_type_ == 1 || encoding_type_ == EncodingType::SENTENCEPIECE ||
+        encoding_type_ == EncodingType::UNIGRAM) {
+        size_t pos = 0;
+        const std::string sp_space = "\xE2\x96\x81";  // ▁ (U+2581)
+        while ((pos = text.find(sp_space, pos)) != std::string::npos) {
+            text.replace(pos, 3, " ");
+            pos++;
+        }
     }
     
     return text;

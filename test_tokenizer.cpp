@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
     }
     
     std::cout << "  Vocab size: " << tokenizer->vocab_size() << std::endl;
+    std::cout << "  Merges: " << tokenizer->merge_count() << std::endl;
+    std::cout << "  Added tokens: " << tokenizer->added_token_count() << std::endl;
     std::cout << "  Encoding: ";
     switch (tokenizer->encoding_type()) {
         case helios::EncodingType::BPE: std::cout << "BPE"; break;
@@ -82,6 +84,7 @@ int main(int argc, char** argv) {
         default: std::cout << "Unknown";
     }
     if (tokenizer->byte_level()) std::cout << " (byte-level)";
+    if (tokenizer->byte_fallback()) std::cout << " (byte-fallback)";
     std::cout << std::endl;
     
     // Special tokens

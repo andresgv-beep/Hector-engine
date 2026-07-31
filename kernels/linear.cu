@@ -170,15 +170,20 @@ __global__ void embedding_fp16_kernel(
     
     int idx = indices[token_idx];
     
+    // size_t obligatorio: la tabla PLE de Gemma 4 son 262144x8960 = 2.35e9
+    // elementos, por encima de INT32_MAX. Con int, idx*dim desbordaba a
+    // negativo para cualquier token por encima de ~239.600 — y 245237, el
+    // marcador de espacio, sale en la segunda posicion de cualquier frase.
+    // El resultado era un puntero salvaje y un acceso ilegal a memoria.
     if (idx < 0 || idx >= vocab_size) {
         for (int d = dim_offset; d < dim; d += blockDim.x) {
-            output[token_idx * dim + d] = __float2half(0.0f);
+            output[size_t(token_idx) * dim + d] = __float2half(0.0f);
         }
         return;
     }
     
-    const half* src = table + idx * dim;
-    half* dst = output + token_idx * dim;
+    const half* src = table + size_t(idx) * dim;
+    half* dst = output + size_t(token_idx) * dim;
     
     for (int d = dim_offset; d < dim; d += blockDim.x) {
         dst[d] = src[d];
