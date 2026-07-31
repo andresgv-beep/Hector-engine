@@ -91,23 +91,32 @@ static void register_kv_cache(Engine& engine, KVCache& cache, const std::string&
 
 // El dueño vive en ~/.helios/owner (una línea), NUNCA en el código fuente:
 // el código es publicable; la identidad de quién lo usa es capa personal.
+static std::string helios_dir();   // definida abajo (respeta HELIOS_HOME)
+
 static std::string owner_name() {
-    const char* home = getenv("HOME");
-    std::ifstream f(std::string(home ? home : ".") + "/.helios/owner");
+    std::ifstream f(helios_dir() + "/owner");
     std::string name;
     if (f && std::getline(f, name) && !name.empty()) return name;
     return "su dueño";
 }
 
 // DOS NIVELES (la jerarquía de HERA, nivel 1):
-//   facts.md    — hechos duraderos sobre Andrés y el proyecto. Se cargan
+//   facts.md    — hechos duraderos sobre el dueño y su proyecto. Se cargan
 //                 SIEMPRE y enteros: son quién es él.
 //   episodic.md — resúmenes de sesión. Solo las últimas: son qué pasó.
 // Sin esta separación, el chismorreo episódico ("me pidió que le explique
 // un compilador") saturaba el prefijo y secuestraba las respuestas.
+// HELIOS_HOME permite perfiles aislados (calibración reproducible, varios
+// usuarios en la misma máquina). Sin él: ~/.helios como siempre.
 static std::string helios_dir() {
-    const char* home = getenv("HOME");
-    std::string dir = std::string(home ? home : ".") + "/.helios";
+    const char* custom = getenv("HELIOS_HOME");
+    std::string dir;
+    if (custom && *custom) {
+        dir = custom;
+    } else {
+        const char* home = getenv("HOME");
+        dir = std::string(home ? home : ".") + "/.helios";
+    }
     mkdir(dir.c_str(), 0755);
     return dir;
 }
@@ -198,7 +207,7 @@ static void append_memory(const std::string& summary) {
     f << "\n## Sesión " << datebuf << "\n" << summary << "\n";
 }
 
-// Hecho duradero → facts.md (lo que define a Andrés, no lo que pasó un día)
+// Hecho duradero → facts.md (lo que define al dueño, no lo que pasó un día)
 static void append_fact(const std::string& fact) {
     if (memory_is_duplicate(fact, facts_path())) return;
     std::ofstream f(facts_path(), std::ios::app);
@@ -506,7 +515,7 @@ int main(int argc, char** argv) {
             // BREVE A PROPÓSITO. Cada corrección de comportamiento que se
             // añadía como texto ("prohibido X", "recuerda Y") empeoraba las
             // cosas: un 4B con 400 palabras de meta-instrucciones se ahoga,
-            // las recita y confunde los papeles ("Soy Andrés..."). La
+            // las recita y confunde los papeles (dice ser el dueño). La
             // disciplina la ponen los mecanismos deterministas (presupuestos,
             // rienda de thinking, detector de bucles), no el sermón.
             std::string sys_text =
@@ -1118,7 +1127,10 @@ int main(int argc, char** argv) {
 
         // --- DESPEDIDA: consolidar la sesión en memoria episódica ---
         // (mismo mecanismo que la compactación en caliente)
-        if (user_turns > 0) {
+        // HELIOS_NO_DISTILL=1: saltar la consolidación (calibración por lotes,
+        // donde cada tirada arranca de un perfil limpio y destilar solo cuesta)
+        const char* nod = getenv("HELIOS_NO_DISTILL");
+        if (user_turns > 0 && !(nod && *nod == '1')) {
             std::cout << "\n\033[90m(consolidando memoria...\033[0m" << std::flush;
             std::string summary = distill_session();
             if (!summary.empty()) {
