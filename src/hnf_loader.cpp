@@ -395,7 +395,10 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
         state.vram_bytes += entry.size;
         state.tensor_count++;
     }
-    if (getenv("HELIOS_FUSE_QKV") && getenv("HELIOS_FUSE_QKV")[0] == '1') {
+    const char* fuse_qkv = getenv("HELIOS_FUSE_QKV");
+    const char* fuse_gate_up = getenv("HELIOS_FUSE_GATE_UP");
+    if ((fuse_qkv && fuse_qkv[0] == '1') ||
+        (fuse_gate_up && fuse_gate_up[0] == '1')) {
         fuse_qkv_weights(engine, state);
     }
     state.loaded = true;
@@ -498,23 +501,40 @@ void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
     // ruta soporte los tensores fusionados.
     if (has_gemma4_config()) return;
 
-    uint32_t fusionadas = 0;
+    const char* qkv_env = getenv("HELIOS_FUSE_QKV");
+    const char* gate_up_env = getenv("HELIOS_FUSE_GATE_UP");
+    const bool fuse_qkv = qkv_env && qkv_env[0] == '1';
+    // Compatibilidad: antes HELIOS_FUSE_QKV fusionaba tambien gate/up. Un
+    // HELIOS_FUSE_GATE_UP explicito permite medir y controlar ambas rutas por
+    // separado sin cambiar los comandos de benchmark ya documentados.
+    const bool fuse_gate_up = gate_up_env
+        ? gate_up_env[0] == '1'
+        : fuse_qkv;
+
+    uint32_t qkv_fusionadas = 0;
+    uint32_t gate_up_fusionadas = 0;
     for (uint32_t layer = 0;; ++layer) {
         const std::string b = "text.layer" + std::to_string(layer) + ".";
         if (!engine.tensors().exists(b + "attn.q_proj.weight") &&
             !engine.tensors().exists(b + "mlp.gate.weight")) break;
 
         // El orden importa: SPLIT_QKV espera q|k|v y add_split_half gate|up.
-        concat_tensors(engine, state,
-                       {b + "attn.q_proj.weight", b + "attn.k_proj.weight",
-                        b + "attn.v_proj.weight"}, b + "attn.qkv_proj.weight");
-        concat_tensors(engine, state,
-                       {b + "mlp.gate.weight", b + "mlp.up.weight"},
-                       b + "mlp.gate_up.weight");
-        fusionadas++;
+        if (fuse_qkv &&
+            concat_tensors(engine, state,
+                           {b + "attn.q_proj.weight", b + "attn.k_proj.weight",
+                            b + "attn.v_proj.weight"}, b + "attn.qkv_proj.weight")) {
+            qkv_fusionadas++;
+        }
+        if (fuse_gate_up &&
+            concat_tensors(engine, state,
+                           {b + "mlp.gate.weight", b + "mlp.up.weight"},
+                           b + "mlp.gate_up.weight")) {
+            gate_up_fusionadas++;
+        }
     }
-    if (fusionadas) {
-        std::cout << "  [FUSE] q/k/v y gate/up fusionados en " << fusionadas
+    if (qkv_fusionadas || gate_up_fusionadas) {
+        std::cout << "  [FUSE] q/k/v=" << qkv_fusionadas
+                  << " capas, gate/up=" << gate_up_fusionadas
                   << " capas" << std::endl;
     }
 }

@@ -608,7 +608,8 @@ private:
     
     // Load tensors to GPU
     bool load_tensors(std::ifstream& f, Engine& engine);
-    // Fusion opcional de q/k/v en un solo tensor (HELIOS_FUSE_QKV=1)
+    // Fusiones opcionales de q/k/v y gate/up. HELIOS_FUSE_QKV conserva la
+    // compatibilidad historica; HELIOS_FUSE_GATE_UP permite separarlas.
     void fuse_qkv_weights(Engine& engine, BlockState& state);
     bool concat_tensors(Engine& engine, BlockState& state,
                         const std::vector<std::string>& partes,

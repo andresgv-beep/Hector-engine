@@ -386,3 +386,67 @@ en la batería conversacional.
 
 **Estado de la campaña:** cerrada. El baseline de texto queda listo para iniciar
 la integración visual sin mover simultáneamente calidad o rendimiento.
+
+## Reapertura de decode — fusiones y normas (2026-08-01)
+
+La campaña se reabrió sobre el HNF determinista de Qwen3-4B
+(`5aec0ebaae2dd3e8d37ed586f35c9e0832914ed1e0bb8cb4314d82cdf9269105`),
+sin cambiar cuantización. El perfil actual refuta el supuesto de 1,67 ms/token
+en operaciones pequeñas: con las fusiones activas y la GPU en régimen alto el
+trabajo GPU suma 9,347 ms/token, repartido así:
+
+| Categoría | ms/token |
+|---|---:|
+| HQ4.1K | 7,370 |
+| HQ5.1K (`lm_head`) | 1,058 |
+| RMSNorm + ADD_RMSNORM | 0,488 |
+| atención | 0,250 |
+| QK norm + RoPE | 0,068 |
+| ADD + SiLU/mul | 0,074 |
+| argmax + embedding | 0,041 |
+
+### Fusiones de pesos y KV
+
+`HELIOS_FUSE_QKV=1` fusionaba en realidad dos familias: Q/K/V y gate/up.
+Junto con `HELIOS_FUSE_KV_ROPE=1`, el grafo baja de 507 a 435 comandos. En
+régimen alto repetido, Qwen3-4B pasa de 104,235-104,277 a
+108,705-108,844 tok/s: aproximadamente **+4,3 %**. El perfil emparejado en el
+régimen bajo reconcilia el ahorro: 14,220 a 13,567 ms GPU/token, de los que
+0,545 ms vienen de los GEMV fusionados y 0,126 ms de eliminar el update KV.
+
+No se promueve. A 256 tokens greedy, Qwen3-4B y Qwen3-8B terminan por una ruta
+distinta. La causa está aislada en el autoajuste del GEMV: Q usa geometría A
+(`K=2560,N=4096`) y K/V geometría B (`K=2560,N=1024`) por separado; el tensor
+QKV unido (`N=6144`) ejecuta todas las filas con A. Los pesos son correctos,
+pero el distinto orden FP cruza un argmax lejano.
+
+El loader permite desde esta campaña separar las dos fusiones sin romper los
+comandos históricos:
+
+- `HELIOS_FUSE_QKV=1` conserva gate/up si no se especifica otro selector;
+- `HELIOS_FUSE_QKV=1 HELIOS_FUSE_GATE_UP=0` aísla Q/K/V;
+- `HELIOS_FUSE_QKV=0 HELIOS_FUSE_GATE_UP=1` aísla gate/up;
+- `HELIOS_FUSE_KV_ROPE` continúa siendo independiente.
+
+Gate/up solo conserva byte a byte los 256 tokens de Qwen3-4B y Qwen3-8B,
+porque separado y unido usa la geometría A. Su A/B alto, sin embargo, fue
+103,77 a 105,39 tok/s (**+1,56 %**) y en el régimen bajo no ganó. Queda
+disponible para diagnóstico, no activado por defecto.
+
+### RMSNorm half2
+
+Se probaron y retiraron dos variantes, ambas detrás de un selector temporal:
+
+1. `half2` completo más reducción warp/bloque redujo las normas de unos 0,48
+   a 0,25 ms/token y dio +2,6-2,7 % en Qwen3-4B. Qwen3-8B divergió a 256
+   tokens por el nuevo orden de suma; rechazado por corrección.
+2. La variante conservadora mantuvo exactamente la asignación y el árbol de
+   suma, vectorizando solo la salida. Qwen3-4B, Qwen3-8B y Gemma 4 conservaron
+   la salida exacta. En el perfil bajo las normas bajaron de 0,743 a
+   0,493 ms/token, pero el A/B alto quedó en 104,49 a 106,36 tok/s
+   (**+1,79 %**), por debajo de la barrera del 2 %.
+
+El código experimental de normalización se retiró. El motor conserva el kernel
+de producción y las fusiones siguen opt-in. Resultado: no aparece otra mejora
+de decode que cumpla simultáneamente salida exacta y ganancia mínima; el
+baseline de texto permanece congelado para continuar con visión.
