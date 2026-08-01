@@ -94,6 +94,18 @@ void DTypeRegistry::register_builtins() {
     };
     register_dtype(info);
     
+    // HQ3.1K - HELIOS Quant 3-bit compact header
+    info = DTypeInfo{};
+    info.name = "hq31k";
+    info.block_elements = 256;
+    info.block_bytes = 136;
+    info.is_quantized = true;
+    info.calc_size = [](size_t n) -> size_t {
+        size_t num_blocks = (n + 255) / 256;
+        return num_blocks * 136;
+    };
+    register_dtype(info);
+
     // HQ4.1K - HELIOS Quant 4-bit compact header
     info = DTypeInfo{};
     info.name = "hq41k";

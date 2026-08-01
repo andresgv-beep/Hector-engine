@@ -32,9 +32,8 @@ constexpr int CCC_WPR = 4, CCC_RPB = 1, CCC_BLOCK = CCC_WPR * CCC_RPB * 32;
 // GEMV HQ4.1K KERNEL
 // ============================================================================
 
-// v2: bloque entero (header 40B + payload 128B = 42 words) staged en shared
-// con carga cooperativa coalescada; decode del header desde shared; camino
-// rápido sin bounds-check y lecturas half2 del input.
+// Lecturas globales directas y coalescibles; camino rápido sin bounds-check y
+// lecturas half2 del input.
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK>
 __global__ void gemv_hq41k_kernel(
     const half* __restrict__ input,
@@ -43,7 +42,6 @@ __global__ void gemv_hq41k_kernel(
     int K, int N
 ) {
     using namespace hqs;
-    constexpr int BLK_WORDS = HQ41K_BLOCK_SIZE / 4;  // 42
     extern __shared__ half s_input[];
     {
         const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
@@ -64,10 +62,6 @@ __global__ void gemv_hq41k_kernel(
     if (row >= N) return;
 
     float* s_partial = reinterpret_cast<float*>(s_input + K);
-    const int warp_in_block = threadIdx.x / 32;
-    uint32_t* s_blk = reinterpret_cast<uint32_t*>(
-        s_partial + ROWS_PER_BLOCK * WARPS_PER_ROW) + warp_in_block * BLK_WORDS;
-
     const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
     const uint8_t* row_weights = weights + (size_t)row * total_sb * HQ41K_BLOCK_SIZE;
     float acc = 0.0f;
@@ -138,9 +132,9 @@ __global__ void gemv_hq41k_kernel(
 // GEMV HQ5.1K KERNEL
 // ============================================================================
 
-// v2: bloque entero (header 40B + payload 160B = 50 words) staged en shared;
-// decode con __funnelshift_r (los shifts de 64 bits son multi-instrucción);
-// camino rápido sin bounds-check.
+// Lecturas directas y coalescibles desde global. El staging completo del bloque
+// añadía sincronizaciones y en lm_head quedaba por debajo del ancho de banda que
+// alcanza esta ruta. El decode usa __funnelshift_r para evitar shifts de 64 bit.
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK>
 __global__ void gemv_hq51k_kernel(
     const half* __restrict__ input,
@@ -149,7 +143,6 @@ __global__ void gemv_hq51k_kernel(
     int K, int N
 ) {
     using namespace hqs;
-    constexpr int BLK_WORDS = HQ51K_BLOCK_SIZE / 4;  // 50
     extern __shared__ half s_input[];
     {
         const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
@@ -170,10 +163,6 @@ __global__ void gemv_hq51k_kernel(
     if (row >= N) return;
 
     float* s_partial = reinterpret_cast<float*>(s_input + K);
-    const int warp_in_block = threadIdx.x / 32;
-    uint32_t* s_blk = reinterpret_cast<uint32_t*>(
-        s_partial + ROWS_PER_BLOCK * WARPS_PER_ROW) + warp_in_block * BLK_WORDS;
-
     const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
     const uint8_t* row_weights = weights + (size_t)row * total_sb * HQ51K_BLOCK_SIZE;
     float acc = 0.0f;
@@ -183,19 +172,13 @@ __global__ void gemv_hq51k_kernel(
         const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
             row_weights + (size_t)sb * HQ51K_BLOCK_SIZE);
 
-        // Staging cooperativo del bloque completo (coalescado)
-        s_blk[lane_id] = blk32[lane_id];
-        if (lane_id < BLK_WORDS - 32) s_blk[32 + lane_id] = blk32[32 + lane_id];
-        __syncwarp();
-
-        // Header compacto desde shared
-        uint32_t h0 = s_blk[0];
-        uint32_t h1 = s_blk[1];
+        uint32_t h0 = blk32[0];
+        uint32_t h1 = blk32[1];
         float d_scale  = __half2float(__ushort_as_half(h0 & 0xFFFF));
         float d_min    = __half2float(__ushort_as_half(h0 >> 16));
         float min_base = __half2float(__ushort_as_half(h1 & 0xFFFF));
 
-        const uint8_t* sb8 = reinterpret_cast<const uint8_t*>(s_blk);
+        const uint8_t* sb8 = reinterpret_cast<const uint8_t*>(blk32);
         uint8_t s_packed = sb8[8 + (lane_id >> 1)];
         uint8_t q_s = (lane_id & 1) ? (s_packed & 0x0F) : (s_packed >> 4);
         uint8_t m_packed = sb8[24 + (lane_id >> 1)];
@@ -208,8 +191,8 @@ __global__ void gemv_hq51k_kernel(
         const int byte_off = COMPACT_HEADER_SIZE + lane_id * 5;
         const int w0 = byte_off >> 2;
         const int sh = (byte_off & 3) * 8;
-        uint32_t pw0 = s_blk[w0];
-        uint32_t pw1 = s_blk[w0 + 1];
+        uint32_t pw0 = blk32[w0];
+        uint32_t pw1 = blk32[w0 + 1];
         uint32_t lo = __funnelshift_r(pw0, pw1, sh);  // bits 0..31 del paquete
         uint32_t hi = pw1 >> sh;                      // bits 32..39
 
@@ -236,7 +219,6 @@ __global__ void gemv_hq51k_kernel(
                 }
             }
         }
-        __syncwarp();  // no pisar s_blk antes de que todos lean
     }
 
     #pragma unroll
@@ -257,42 +239,35 @@ __global__ void gemv_hq51k_kernel(
 // LAUNCHERS
 // ============================================================================
 
-// smem: input + parciales + staging del bloque completo por warp
+// smem: input y parciales de la reducción entre warps.
 static void launch_hq41k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCA_RPB - 1) / CCA_RPB;
-    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float)
-                + (size_t)(CCA_WPR * CCA_RPB) * hqs::HQ41K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
     gemv_hq41k_kernel<CCA_WPR, CCA_RPB><<<nb, CCA_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq41k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCB_RPB - 1) / CCB_RPB;
-    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float)
-                + (size_t)(CCB_WPR * CCB_RPB) * hqs::HQ41K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
     gemv_hq41k_kernel<CCB_WPR, CCB_RPB><<<nb, CCB_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq41k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCC_RPB - 1) / CCC_RPB;
-    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float)
-                + (size_t)(CCC_WPR * CCC_RPB) * hqs::HQ41K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
     gemv_hq41k_kernel<CCC_WPR, CCC_RPB><<<nb, CCC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
-
 static void launch_hq51k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCA_RPB - 1) / CCA_RPB;
-    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float)
-                + (size_t)(CCA_WPR * CCA_RPB) * hqs::HQ51K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
     gemv_hq51k_kernel<CCA_WPR, CCA_RPB><<<nb, CCA_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq51k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCB_RPB - 1) / CCB_RPB;
-    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float)
-                + (size_t)(CCB_WPR * CCB_RPB) * hqs::HQ51K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
     gemv_hq51k_kernel<CCB_WPR, CCB_RPB><<<nb, CCB_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq51k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCC_RPB - 1) / CCC_RPB;
-    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float)
-                + (size_t)(CCC_WPR * CCC_RPB) * hqs::HQ51K_BLOCK_SIZE;
+    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
     gemv_hq51k_kernel<CCC_WPR, CCC_RPB><<<nb, CCC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 

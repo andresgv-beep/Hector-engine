@@ -78,6 +78,7 @@ set(KERNEL_SOURCES
     kernels/normalization.cu
     kernels/linear.cu
     kernels/matmul_hqs.cu
+    kernels/matmul_hq31k.cu
     kernels/matmul_hqs_compact.cu
     kernels/matmul_cublas.cu
     kernels/attention.cu
@@ -144,6 +145,10 @@ target_link_libraries(test_engine PRIVATE helios-engine)
 add_executable(test_kernels tests/test_kernels.cu)
 target_link_libraries(test_kernels PRIVATE helios-engine)
 
+# HQ3.1K additive dtype/layout and CUDA GEMV
+add_executable(test_hq31k tests/test_hq31k.cu)
+target_link_libraries(test_hq31k PRIVATE helios-engine)
+
 # HNF Loader test
 add_executable(test_hnf_loader tests/test_hnf_loader.cpp)
 target_link_libraries(test_hnf_loader PRIVATE helios-engine)
@@ -187,6 +192,7 @@ add_test(NAME MemoryPoolTest COMMAND test_memory)
 add_test(NAME CommandBufferTest COMMAND test_command)
 add_test(NAME EngineTest COMMAND test_engine)
 add_test(NAME KernelTest COMMAND test_kernels)
+add_test(NAME HQ31KTest COMMAND test_hq31k)
 add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)

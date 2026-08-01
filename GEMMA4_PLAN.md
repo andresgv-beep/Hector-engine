@@ -275,10 +275,11 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 - **Fase activa:** Fase 8 — rendimiento y robustez.
 - **Última fase completada:** Fase 7 — generación y tokenizer.
-- **Siguiente acción exacta:** aislar sobre el checkpoint IT cuánto aportan al
-  afilado `lm_head`, MLP y PLE/atención, y decidir el perfil de producción con
-  evidencia; después ejecutar las regresiones restantes y perfilar el contexto
-  largo.
+- **Siguiente acción exacta:** ejecutar las fases 0-1 de
+  `tools/DECODE_FUSION_PLAN.md`: congelar la línea base Qwen3-4B y reconciliar
+  por nodo el coste de kernels pequeños antes de tocar el grafo. La calibración
+  de calidad Gemma 4 continúa abierta y se valida como regresión de cada
+  ganador; no se mezcla con el perfil Qwen.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
@@ -319,3 +320,8 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-07-31 | Fase 8 (regresión) | Qwen3-4B y Qwen3-8B reales siguen operativos | Ambos cargan 399 tensores y generan París: 4B a 99,17 tok/s, 8B a 40,40 tok/s. `tests/qwen3_hq4k_v3.hnf` se excluye: está truncado (3.337.977.856 bytes reales frente a 4.533.663.705 declarados) y el validador encuentra 5 errores fatales |
 | 2026-07-31 | Fase 8 (producto) | `helios_chat` ejecuta Gemma 4 con su contrato nativo | Selección por arquitectura: plantilla canónica, KV heterogéneo/compartido, forward Gemma y sampling oficial. Smoke greedy responde París; sesión de dos turnos a 0,7 recuerda el número 17; CUDA Graph replay activo. Regresión `helios_chat` Qwen3-4B correcta a 101 tok/s |
 | 2026-07-31 | Fase 8 (calibración) | 1.158 posiciones IT separan motor, ventana y cuantización | FP16 coincide 98,27 % con FP32; compacto/FP16 79,53 %, estable antes/después de 512. En 293 posiciones con top-1 FP16 < 0,80, HQS sube la masa 0,4641→0,5525 y baja entropía 3,0674→2,6868. `gemma4_calibrate` deja NLL/entropía por posición; falta aislar familias de tensores |
+| 2026-07-31 | Fase 8 (rendimiento) | Campaña HQS antes/después cerrada | Qwen3-4B queda limitado por memoria: HQ4.1K ocupa 74,9 % del tiempo GPU y las matrices grandes ya alcanzan 329-365 GB/s. HQ4 `1x16` solo aporta +0,65-0,85 % combinado y se descarta; HQ5 directo mejora `lm_head` 4B un 3,4 %, simplifica el kernel y conserva salidas Qwen/Gemma idénticas. Suite 13/13. Evidencia: `tools/HQS_DECODE_OPTIMIZATION_PLAN.md` |
+| 2026-08-01 | Fase 8 (HQ3.1K) | Dtype compacto de 136 bytes integrado sin sustituir formatos existentes | Segundo corpus supera barrera estadística; HNF real Qwen3-4B ahorra 320,6 MiB (9,69%), queda a 0,271 puntos del simulador, mantiene el HNF anterior operativo y pasa convertidor 37/37 + Héctor 14/14. En régimen alto mide 107,61 frente a 100,99 tok/s. Evidencia: `tools/HQ31K_IMPLEMENTACION.md` |
+| 2026-08-01 | Fase 8 (HQ3.1K producto) | Formato correcto, perfiles Qwen3-4B rechazados por conversación | MLP completo corrompe idioma/memoria; `gate_proj` completo deja 1/50 intrusión china; capas 0-17 pasan 50 turnos núcleo pero empeoran bucles largos 2/4 frente a 1/4. HQ3.1K queda experimental; siguiente palanca separada: embedding HQ4.1K. Evidencia: `tools/HQ31K_IMPLEMENTACION.md` |
+| 2026-08-01 | Fase 8 (plan decode) | Prioridad corregida: fusiones antes de HQ3.1K | Se abre `tools/DECODE_FUSION_PLAN.md`: perfil por nodo, residual MLP + RMSNorm siguiente como primer candidato, embedding compartido HQ5.1K después y perfil mixto HQ3.1K al final. El dato de 1,67 ms se considera hipótesis hasta reproducirlo |
+| 2026-08-01 | Fase 8 (perfil decode) | La bolsa pequeña existe, pero las fusiones probadas no llegan al corte | Qwen3-4B: 15,013 ms/token a 55 W; 1,434 ms de kernels no-HQS y 0,379 ms de huecos. RMSNorm optimizado aporta ~0,8%, una warp empeora y ADD+RMS siguiente tiene techo <0,08 ms. Perfil mixto real gate/up3+down5 ahorra 106,87 MiB pero da 15,364 ms/token; no es vía de +5 tok/s. Evidencia: `tools/DECODE_FUSION_PLAN.md` |

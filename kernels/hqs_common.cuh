@@ -3,7 +3,7 @@
 // HQS COMMON - Constantes y tipos para kernels CUDA
 // ============================================================================
 // Matching HQS v6 NUCLEAR format from Rust converter
-// + HQ4.1K/HQ5.1K compact header formats
+// + HQ3.1K/HQ4.1K/HQ5.1K compact header formats
 //
 
 #pragma once
@@ -33,6 +33,7 @@ constexpr int HQ5K_BLOCK_SIZE = 288;
 
 constexpr float HQ4K_Q_MAX = 15.0f;
 constexpr float HQ5K_Q_MAX = 31.0f;
+constexpr float HQ3K_Q_MAX = 7.0f;
 
 constexpr float EPS = 1e-7f;
 
@@ -49,6 +50,8 @@ constexpr float EPS = 1e-7f;
 
 constexpr int COMPACT_HEADER_SIZE = 40;
 
+constexpr int HQ31K_PAYLOAD = 96;
+constexpr int HQ31K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ31K_PAYLOAD;  // 136
 constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ4K_PAYLOAD;  // 168
 constexpr int HQ51K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ5K_PAYLOAD;  // 200
 

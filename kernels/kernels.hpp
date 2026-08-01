@@ -50,6 +50,14 @@ void launch_matmul_hq5k(
     cudaStream_t stream = nullptr
 );
 
+void launch_matmul_hq31k(
+    const half* input,
+    const uint8_t* weights,
+    half* output,
+    int M, int K, int N,
+    cudaStream_t stream = nullptr
+);
+
 void launch_matmul_hq41k(
     const half* input,
     const uint8_t* weights,

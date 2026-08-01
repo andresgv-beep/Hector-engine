@@ -100,7 +100,8 @@ def repeated_ngram(text, n=8):
     return False
 
 
-def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout):
+def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout,
+             fast=True):
     """Una tirada: N prompts en una sesión. Devuelve lista de turnos medidos."""
     make_profile(profile_dir)
     rep, win, freq = cfg
@@ -113,12 +114,16 @@ def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout):
         "HELIOS_WINDOW": str(win),
         "HELIOS_FREQ": str(freq),
     })
-    stdin_data = "".join(p + "\n" for p in prompts) + "/salir\n"
+    # El governor interactivo duerme hasta ajustar la salida a ritmo de lectura.
+    # En calibración sólo añade minutos: /fast elimina la espera, no cambia el
+    # muestreo, los tokens ni los presupuestos de respuesta.
+    prefix = "/fast\n" if fast else ""
+    stdin_data = prefix + "".join(p + "\n" for p in prompts) + "/salir\n"
     try:
         proc = subprocess.run(
             [binary, model, str(temp)],
             input=stdin_data, env=env, timeout=timeout,
-            capture_output=True, text=True)
+            capture_output=True, text=True, encoding="utf-8", errors="replace")
     except subprocess.TimeoutExpired:
         return None
 

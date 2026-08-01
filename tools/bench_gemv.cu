@@ -5,10 +5,10 @@
 // Micro-banco del GEMV cuantizado — aislado, reproducible, sin conversación
 // ============================================================================
 //
-// Motivación (medido con nsys el 2026-07-31): gemv_hq41k se lleva el 83% del
-// tiempo de decode y va a 212 GB/s sobre un techo real de 371 GB/s (57%).
-// Curiosamente el HQ5.1K va a 250 GB/s leyendo MÁS bytes por peso: el problema
-// no es el volumen, es cómo lee el kernel de 4 bits.
+// El banco nació para investigar un perfil antiguo de gemv_hq41k. El kernel
+// actual ya usa lecturas globales directas y autoajusta tres configuraciones:
+// 4x4, 2x8 y 4x1. Este archivo conserva también la variante antigua con staging
+// para poder comparar, pero no la etiqueta como producción.
 //
 // Este banco mide variantes con las dimensiones REALES de los modelos, sin
 // ruido de térmica ni de sesión. Regla: ninguna variante entra al motor sin
@@ -30,14 +30,13 @@
 // ---------------------------------------------------------------------------
 constexpr int SUPER_BLOCK_SIZE = 256;
 constexpr int GROUP_SIZE = 8;
-constexpr int NUM_GROUPS = 32;
 constexpr int COMPACT_HEADER_SIZE = 40;
 constexpr int HQ4K_PAYLOAD = 128;
 constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ4K_PAYLOAD;  // 168
 constexpr float HQ4K_Q_MAX = 15.0f;
 
 // ---------------------------------------------------------------------------
-// VARIANTE A — la de producción hoy (staging del bloque entero en shared)
+// VARIANTE A — implementación histórica (staging del bloque entero en shared)
 // ---------------------------------------------------------------------------
 template<int WPR, int RPB>
 __global__ void gemv_A(const half* __restrict__ input,
@@ -196,8 +195,11 @@ struct Shape { const char* name; int K, N; };
 // fríos de VRAM. Sin esto se mide la L2 (~32 MB) y salen cifras imposibles
 // (600 GB/s sobre un techo de 371) que no representan el decode real, donde
 // cada matriz se lee una sola vez por token.
-static double bench(void (*launch)(const half*, const uint8_t*, half*, int, int),
-                    const half* in, const uint8_t* w, half* out,
+struct Sample { double gbps, us; };
+
+using LaunchFn = void (*)(const half*, const uint8_t*, half*, int, int);
+
+static Sample bench(LaunchFn launch, const half* in, const uint8_t* w, half* out,
                     int K, int N, size_t bytes, int copies) {
     for (int i = 0; i < 3; i++) launch(in, w, out, K, N);
     cudaDeviceSynchronize();
@@ -209,7 +211,10 @@ static double bench(void (*launch)(const half*, const uint8_t*, half*, int, int)
     cudaEventRecord(b);
     cudaEventSynchronize(b);
     float ms = 0; cudaEventElapsedTime(&ms, a, b);
-    return (double)bytes * IT / (ms / 1000.0) / 1e9;   // GB/s
+    return {
+        (double)bytes * IT / (ms / 1000.0) / 1e9,
+        (double)ms * 1000.0 / IT
+    };
 }
 
 #define MK_LAUNCH(NAME, KERNEL, WPR, RPB)                                     \
@@ -220,12 +225,23 @@ static void NAME(const half* in, const uint8_t* w, half* out, int K, int N) { \
     KERNEL<WPR, RPB><<<nb, WPR * RPB * 32, smem, 0>>>(in, w, out, K, N);      \
 }
 
+// La ruta directa no usa staging por warp. Producción aún reserva ese espacio
+// heredado; estas variantes prueban aisladamente si liberarlo cambia occupancy.
+#define MK_LAUNCH_TIGHT(NAME, KERNEL, WPR, RPB)                               \
+static void NAME(const half* in, const uint8_t* w, half* out, int K, int N) { \
+    int nb = (N + RPB - 1) / RPB;                                             \
+    size_t smem = K * sizeof(half) + RPB * WPR * sizeof(float);                \
+    KERNEL<WPR, RPB><<<nb, WPR * RPB * 32, smem, 0>>>(in, w, out, K, N);      \
+}
+
 MK_LAUNCH(a_2x8, gemv_A, 2, 8)
-MK_LAUNCH(a_4x4, gemv_A, 4, 4)
 MK_LAUNCH(b_2x8, gemv_B, 2, 8)
 MK_LAUNCH(b_4x4, gemv_B, 4, 4)
+MK_LAUNCH(b_4x1, gemv_B, 4, 1)
 MK_LAUNCH(b_1x16, gemv_B, 1, 16)
 MK_LAUNCH(b_2x16, gemv_B, 2, 16)
+MK_LAUNCH_TIGHT(bt_2x8, gemv_B, 2, 8)
+MK_LAUNCH_TIGHT(bt_1x16, gemv_B, 1, 16)
 
 int main() {
     // Dimensiones reales: (K=hidden, N=salida) de las matmuls que dominan
@@ -240,10 +256,16 @@ int main() {
         {"4B attn o      (4096->2560)", 4096, 2560},
     };
 
-    printf("Micro-banco GEMV HQ4.1K — GB/s (mayor es mejor)\n");
-    printf("%-30s %8s %8s %8s %8s %8s %8s\n", "forma",
-           "A 2x8*", "A 4x4", "B 2x8", "B 4x4", "B 1x16", "B 2x16");
-    printf("%s\n", std::string(90, '-').c_str());
+    const char* variant_names[] = {
+        "staged 2x8", "direct 2x8*", "direct 4x4*", "direct 4x1*",
+        "direct 1x16", "direct 2x16", "tight 2x8", "tight 1x16"
+    };
+    LaunchFn variants[] = {
+        a_2x8, b_2x8, b_4x4, b_4x1, b_1x16, b_2x16, bt_2x8, bt_1x16
+    };
+
+    printf("Micro-banco GEMV HQ4.1K — GB/s y us/llamada\n");
+    printf("* = configuración candidata del autoajuste de producción\n");
 
     for (auto& s : shapes) {
         int sb = (s.K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
@@ -257,14 +279,16 @@ int main() {
         cudaMemset(in, 0x3c, s.K * sizeof(half));
         cudaMemset(w, 0x11, wbytes * copies);
 
-        printf("%-30s", s.name);
-        for (auto fn : {a_2x8, a_4x4, b_2x8, b_4x4, b_1x16, b_2x16})
-            printf(" %8.0f", bench(fn, in, w, out, s.K, s.N, wbytes, copies));
-        printf("\n");
+        printf("\n%s — %.2f MiB por matriz\n", s.name, wbytes / 1048576.0);
+        for (size_t i = 0; i < sizeof(variants) / sizeof(variants[0]); i++) {
+            Sample sample = bench(variants[i], in, w, out, s.K, s.N, wbytes, copies);
+            printf("  %-14s %7.0f GB/s  %8.2f us\n",
+                   variant_names[i], sample.gbps, sample.us);
+        }
 
         cudaFree(in); cudaFree(out); cudaFree(w);
     }
-    printf("\n* A 2x8 = variante actual en producción. Techo medido: 371 GB/s\n");
+    printf("\nTecho práctico medido anteriormente: 371 GB/s\n");
 
     // -----------------------------------------------------------------------
     // PRUEBA DECISIVA: ¿cuánto cuesta que los kernels sean DEPENDIENTES?
@@ -272,7 +296,7 @@ int main() {
     // el drenaje de una con el arranque de la siguiente. En el decode real hay
     // ~250 kernels ENCADENADOS por token: cada uno espera al anterior.
     // -----------------------------------------------------------------------
-    printf("\n--- Independiente vs encadenado (variante de producción A 2x8) ---\n");
+    printf("\n--- Independiente vs encadenado (staging histórico 2x8) ---\n");
     for (auto& s2 : shapes) {
         int sb = (s2.K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
         size_t wb = (size_t)s2.N * sb * HQ41K_BLOCK_SIZE;
@@ -284,7 +308,7 @@ int main() {
         cudaMemset(in, 0x3c, s2.K * sizeof(half));
         cudaMemset(w, 0x11, wb * copies);
 
-        double indep = bench(a_2x8, in, w, out, s2.K, s2.N, wb, copies);
+        Sample indep = bench(a_2x8, in, w, out, s2.K, s2.N, wb, copies);
 
         // Encadenado: sincronizar entre lanzamientos simula la dependencia
         for (int i = 0; i < 3; i++) a_2x8(in, w, out, s2.K, s2.N);
@@ -302,7 +326,8 @@ int main() {
         double chained = (double)wb * IT / (ms / 1000.0) / 1e9;
 
         printf("%-30s indep %5.0f GB/s | encadenado %5.0f GB/s  (%.0f%% de perdida)\n",
-               s2.name, indep, chained, 100.0 * (indep - chained) / indep);
+               s2.name, indep.gbps, chained,
+               100.0 * (indep.gbps - chained) / indep.gbps);
         cudaFree(in); cudaFree(out); cudaFree(w);
     }
     return 0;

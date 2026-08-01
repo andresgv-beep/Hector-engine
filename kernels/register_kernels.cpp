@@ -426,6 +426,12 @@ void register_linear_kernels(Engine& engine) {
                 M, K, N,
                 ctx.stream
             );
+        } else if (weight->dtype == dtype::HQ31K()) {
+            launch_matmul_hq31k(
+                in_ptr, as_u8_const(weight), as_fp16(output),
+                M, K, N,
+                ctx.stream
+            );
         } else if (weight->dtype == dtype::HQ41K()) {
             launch_matmul_hq41k(
                 in_ptr, as_u8_const(weight), as_fp16(output),
