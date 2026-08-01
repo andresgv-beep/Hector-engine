@@ -13,6 +13,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
+#include <cstring>
+#include <string>
+#include <sys/stat.h>
 
 namespace helios {
 namespace kernels {
@@ -328,12 +331,97 @@ static float benchmark_compact_kernel(
 static std::unordered_map<uint64_t, int> s_tune_cache_hq41k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq51k;
 
+// ----------------------------------------------------------------------------
+// Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
+// ----------------------------------------------------------------------------
+// El benchmark del primer uso decide A/B/C por forma, y entre candidatas
+// empatadas el ganador depende del ruido del cronómetro: el mismo binario
+// podía elegir distinto en cada arranque. B y C comparten WARPS_PER_ROW=2
+// (mismo árbol de reducción, bits idénticos), pero A parte la suma distinto:
+// un cruce A<->B/C cambia la trayectoria greedy certificada. El sidecar
+// persiste la primera decisión por forma y por GPU; borrar el fichero fuerza
+// re-tune. HELIOS_TUNE_NOCACHE=1 desactiva lectura y escritura.
+
+static bool s_tune_sidecar_loaded = false;
+static bool s_tune_sidecar_has_header = false;
+static std::string s_tune_sidecar_path;
+
+static std::string tune_device_name() {
+    int dev = 0;
+    cudaDeviceProp prop{};
+    if (cudaGetDevice(&dev) != cudaSuccess ||
+        cudaGetDeviceProperties(&prop, dev) != cudaSuccess) return "unknown";
+    return prop.name;
+}
+
+static void tune_sidecar_load_once() {
+    if (s_tune_sidecar_loaded) return;
+    s_tune_sidecar_loaded = true;
+    if (getenv("HELIOS_TUNE_NOCACHE")) return;
+    // Misma semántica que helios_chat: HELIOS_HOME es el directorio de perfil
+    // completo; sin él, ~/.helios.
+    const char* custom = getenv("HELIOS_HOME");
+    std::string dir;
+    if (custom && *custom) {
+        dir = custom;
+    } else {
+        const char* home = getenv("HOME");
+        if (!home) return;
+        dir = std::string(home) + "/.helios";
+    }
+    mkdir(dir.c_str(), 0700);  // EEXIST es lo normal
+    s_tune_sidecar_path = dir + "/tune.cache";
+    FILE* f = fopen(s_tune_sidecar_path.c_str(), "r");
+    if (!f) return;
+    const std::string device = tune_device_name();
+    bool device_ok = false;
+    int loaded = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') {
+            // Cabecera "# helios tune.cache v1 <GPU>": otra GPU invalida el
+            // contenido (las decisiones se recronometran y el fichero se
+            // reescribe en el primer append).
+            device_ok = strstr(line, device.c_str()) != nullptr;
+            continue;
+        }
+        if (!device_ok) continue;
+        char fmt[16]; int K, N; char choice;
+        if (sscanf(line, "%15s %d %d %c", fmt, &K, &N, &choice) != 4) continue;
+        int best = choice - 'A';
+        if (best < 0 || best > 2) continue;
+        uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        if      (strcmp(fmt, "hq41k") == 0) s_tune_cache_hq41k[key] = best;
+        else if (strcmp(fmt, "hq51k") == 0) s_tune_cache_hq51k[key] = best;
+        loaded++;
+    }
+    fclose(f);
+    s_tune_sidecar_has_header = device_ok;
+    if (getenv("HELIOS_TUNE_DEBUG"))
+        fprintf(stderr, "[tune] sidecar: %d decisiones cargadas de %s\n",
+                loaded, s_tune_sidecar_path.c_str());
+}
+
+static void tune_sidecar_append(const char* fmt, int K, int N, int best) {
+    if (s_tune_sidecar_path.empty() || getenv("HELIOS_TUNE_NOCACHE")) return;
+    // Sin cabecera válida (fichero nuevo o de otra GPU) se reescribe entero.
+    FILE* f = fopen(s_tune_sidecar_path.c_str(), s_tune_sidecar_has_header ? "a" : "w");
+    if (!f) return;
+    if (!s_tune_sidecar_has_header) {
+        fprintf(f, "# helios tune.cache v1 %s\n", tune_device_name().c_str());
+        s_tune_sidecar_has_header = true;
+    }
+    fprintf(f, "%s %d %d %c\n", fmt, K, N, (char)('A' + best));
+    fclose(f);
+}
+
 void launch_matmul_hq41k(
     const half* input, const uint8_t* weights, half* output,
     int M, int K, int N, cudaStream_t stream
 ) {
     if (M == 1 && K <= COMPACT_MAX_K_SHARED) {
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        tune_sidecar_load_once();
         auto it = s_tune_cache_hq41k.find(key);
         if (it == s_tune_cache_hq41k.end()) {
             float ms_a = benchmark_compact_kernel(launch_hq41k_A, input, weights, output, K, N, stream);
@@ -344,6 +432,7 @@ void launch_matmul_hq41k(
             if (ms_b < best_ms) { best = 1; best_ms = ms_b; }
             if (ms_c < best_ms) { best = 2; best_ms = ms_c; }
             s_tune_cache_hq41k[key] = best;
+            tune_sidecar_append("hq41k", K, N, best);
             if (getenv("HELIOS_TUNE_DEBUG")) {
                 // ¿Gana algo el autoajuste? Si A/B/C quedan a menos de un 2%,
                 // no compensa el coste del primer run.
@@ -376,6 +465,7 @@ void launch_matmul_hq51k(
 ) {
     if (M == 1 && K <= COMPACT_MAX_K_SHARED) {
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        tune_sidecar_load_once();
         auto it = s_tune_cache_hq51k.find(key);
         if (it == s_tune_cache_hq51k.end()) {
             float ms_a = benchmark_compact_kernel(launch_hq51k_A, input, weights, output, K, N, stream);
@@ -386,6 +476,7 @@ void launch_matmul_hq51k(
             if (ms_b < best_ms) { best = 1; best_ms = ms_b; }
             if (ms_c < best_ms) { best = 2; best_ms = ms_c; }
             s_tune_cache_hq51k[key] = best;
+            tune_sidecar_append("hq51k", K, N, best);
             it = s_tune_cache_hq51k.find(key);
         }
         switch (it->second) {
