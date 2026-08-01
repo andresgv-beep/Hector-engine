@@ -132,9 +132,16 @@ __global__ void gemv_hq41k_kernel(
     __syncthreads();
     if (warp_in_group == 0 && lane_id < WARPS_PER_ROW) {
         float val = s_partial[row_group * WARPS_PER_ROW + lane_id];
+        // La mascara debe nombrar SOLO los lanes que entran en la rama. Con
+        // 0xFFFFFFFF el shfl espera a 32 lanes de los que solo llegan
+        // WARPS_PER_ROW: es UB en Volta+ y hoy funciona de milagro, porque
+        // justo despues el kernel termina y el warp se retira. Con cualquier
+        // __syncthreads() detras se cuelga en seco (comprobado).
+        constexpr unsigned RED_MASK =
+            (WARPS_PER_ROW >= 32) ? 0xFFFFFFFFu : ((1u << WARPS_PER_ROW) - 1u);
         #pragma unroll
         for (int offset = WARPS_PER_ROW / 2; offset > 0; offset >>= 1)
-            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+            val += __shfl_down_sync(RED_MASK, val, offset);
         if (lane_id == 0) output[row] = __float2half(val);
     }
 }
@@ -239,9 +246,16 @@ __global__ void gemv_hq51k_kernel(
     __syncthreads();
     if (warp_in_group == 0 && lane_id < WARPS_PER_ROW) {
         float val = s_partial[row_group * WARPS_PER_ROW + lane_id];
+        // La mascara debe nombrar SOLO los lanes que entran en la rama. Con
+        // 0xFFFFFFFF el shfl espera a 32 lanes de los que solo llegan
+        // WARPS_PER_ROW: es UB en Volta+ y hoy funciona de milagro, porque
+        // justo despues el kernel termina y el warp se retira. Con cualquier
+        // __syncthreads() detras se cuelga en seco (comprobado).
+        constexpr unsigned RED_MASK =
+            (WARPS_PER_ROW >= 32) ? 0xFFFFFFFFu : ((1u << WARPS_PER_ROW) - 1u);
         #pragma unroll
         for (int offset = WARPS_PER_ROW / 2; offset > 0; offset >>= 1)
-            val += __shfl_down_sync(0xFFFFFFFF, val, offset);
+            val += __shfl_down_sync(RED_MASK, val, offset);
         if (lane_id == 0) output[row] = __float2half(val);
     }
 }
