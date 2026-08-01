@@ -30,6 +30,23 @@ de imagen dentro del motor.
 5. Un campo o una operación no soportados deben producir error explícito.
 6. Los artefactos grandes y los volcados de activaciones no se versionan.
 7. Los experimentos HQS de texto quedan fuera de los archivos de esta campaña.
+8. El oráculo queda fijado a una revisión concreta de la implementación oficial;
+   no se compara contra `main` móvil durante la campaña.
+
+## Referencia fijada
+
+- Checkpoint local: `google/gemma-4-E2B-it`, el mismo certificado para texto.
+- Implementación de referencia: Hugging Face Transformers commit
+  `b3a36037d3feb22e3f0174b3dd4248fcc0f0f722`.
+- Fuentes autoritativas: `modeling_gemma4.py`, `image_processing_gemma4.py` y
+  `processing_gemma4.py` de esa revisión.
+- El oráculo cargará solo `model.vision_tower.*` y
+  `model.embed_vision.embedding_projection.weight`; nunca instanciará los
+  aproximadamente 10 GB del modelo completo para obtener una referencia de
+  321,47 MiB.
+- El Python del sistema es 3.14 y no tiene PyTorch/Transformers. V0 usará un
+  entorno aislado reproducible fuera del repositorio, con versiones registradas
+  en el informe del oráculo; no se instalarán dependencias en HEXOS ni Héctor.
 
 ## Contrato confirmado del checkpoint local
 
@@ -93,8 +110,11 @@ por `sqrt(768)`, se aplica RMSNorm sin peso y se proyecta de 768 a 1536.
 ### Preprocesado y puente con texto
 
 - La imagen se convierte a RGB, se redimensiona conservando relación de aspecto
-  y cada lado queda alineado a `3 × 16 = 48` píxeles.
+  mediante bicúbico con antialias y cada lado queda alineado a
+  `3 × 16 = 48` píxeles.
 - El presupuesto por defecto es 2520 patches (`280 × 3²`).
+- Los soft tokens reales son dinámicos y pueden ser menos de 280 según la
+  relación de aspecto; el prompt debe usar exactamente el número producido.
 - Los píxeles se reescalan a `[0,1]` y el modelo aplica `2*x-1`.
 - Cada patch se aplana en orden HWC y recibe coordenadas `(x,y)`; el padding usa
   `(-1,-1)`.
@@ -118,6 +138,11 @@ por `sqrt(768)`, se aplica RMSNorm sin peso y se proyecta de 768 a 1536.
   no conoce clamps, GeGLU, RoPE 2D ni pooling Gemma 4.
 - `VisionModelConfigBin` solo describe CLIP/SigLIP/ViT/EVA y carece de campos
   esenciales de Gemma 4.
+- `build_execution_hints_binary()` declara siempre un modelo de texto y escribe
+  `TextModelConfigBin`, incluso en una conversión solo visual. V1 debe corregir
+  el contrato por modalidades, no limitarse a añadir expresiones regulares.
+- El diccionario canónico de visión actual solo acepta nombres CLIP (`ln1`,
+  `fc1/fc2`, posición 1D); también debe ampliarse y validarse para Gemma 4.
 
 ### Héctor
 
@@ -149,13 +174,20 @@ Huecos concretos:
 ### V0 — Oráculo y contrato reproducible
 
 Crear una herramienta de referencia que cargue únicamente torre visual y
-proyector desde el checkpoint. Con una imagen sintética fija debe volcar:
+proyector desde el checkpoint. La fixture principal será un RGB sintético
+determinista de 960 × 672: ya está alineado a 48, ocupa los 2520 patches y
+produce exactamente 280 soft tokens. Debe volcar:
 
 - patches y coordenadas;
 - salida del patch embedder;
 - salida de las capas 0 y 15;
 - salida del pooler;
 - 280 embeddings proyectados a 1536.
+
+El informe guardará revisión upstream, versiones Python/PyTorch/Transformers,
+formas, dtype, mínimos/máximos, media, RMS, SHA256 de cada volcado y tolerancias.
+Los binarios de activaciones vivirán fuera de Git; solo se versionan fixture,
+script e informe pequeño.
 
 **Salida:** artefacto reproducible con formas, hashes y tolerancias fijadas antes
 de implementar CUDA.
@@ -169,8 +201,27 @@ de implementar CUDA.
   CLIP existentes.
 - Hacer que `--text DIR --vision DIR` produzca bloques disjuntos.
 
-**Pruebas:** 600 tensores de texto y 659 de visión, cero nombres duplicados,
-cero cruces entre bloques y rechazo del contrato incompleto.
+Contrato mínimo de nombres:
+
+- `vision.patch_embed.{input_proj,position_embedding}.weight`;
+- `vision.layerN.{ln_attn_in,ln_attn_post,ln_mlp_in,ln_mlp_post}.weight`;
+- `vision.layerN.attn.{q,k,v,o}_proj.{weight,input_min,input_max,output_min,output_max}`;
+- `vision.layerN.attn.{q,k}_norm.weight`;
+- `vision.layerN.mlp.{gate,up,down}.{weight,input_min,input_max,output_min,output_max}`;
+- `vision.projector.weight`.
+
+El binario conserva `VisionModelConfigBin` de 64 bytes y sus valores legacy.
+Gemma 4 recibe un nuevo `encoder_type` sin renumerar CLIP/SigLIP/ViT/EVA y una
+extensión `GM4V` apuntada desde los ocho bytes aún libres de
+`ExecutionHintsBin.reserved`. La extensión debe transportar al menos head/KV
+dim, posición 2D, RoPE, pooling, salida dinámica, activación, RMS epsilon,
+clipping, estandarización, proyección y contrato de preprocesado. Un lector
+antiguo podrá ignorarla; un lector Gemma 4 deberá exigirla.
+
+**Pruebas:** mapper de texto 600/600 y 0 visuales; mapper visual 659/659 y 0
+textuales/audio; nombres únicos y aceptados por el diccionario; hints binarios
+correctos tanto para texto+visión como para visión sola; rechazo del contrato
+incompleto. Ejecutar además las 39 pruebas actuales del conversor sin cambios.
 
 **Salida:** HNF texto+visión inspeccionable, todavía sin ejecutar visión.
 
@@ -189,6 +240,8 @@ el forward.
 - Implementar primero sobre un buffer RGB ya decodificado.
 - Resize bicúbico con relación de aspecto y alineación a 48 píxeles.
 - Rescale, patchify HWC, padding y coordenadas `(x,y)`.
+- Devolver también el número real de soft tokens para construir el prompt; no
+  rellenar siempre 280 placeholders.
 - Dejar la decodificación PNG/JPEG detrás de una interfaz; no bloquear la
   correctitud del motor eligiendo todavía una librería de imagen.
 
@@ -204,7 +257,7 @@ Implementar una ruta `Gemma4VisionRunner` separada del `GraphBuilder` de texto:
 - cuatro normas, Q/K norm, V norm sin peso;
 - RoPE 2D y atención no causal con escala 1,0;
 - GeGLU y residuales;
-- pooling 3 × 3, escala y proyector 768→1536.
+- pooling 3 × 3, escala en FP32, RMSNorm sin peso y proyector 768→1536.
 
 **Pruebas:** comparar cada frontera de V0. La salida final debe conservar
 argmax/correlación y cumplir tolerancias FP16 acordadas, sin NaN.
@@ -213,7 +266,9 @@ argmax/correlación y cumplir tolerancias FP16 acordadas, sin NaN.
 
 - Expandir `<image_soft_token>` al número real de salidas visuales.
 - Sustituir embeddings principales en las posiciones de imagen.
-- Alimentar PLE con una copia de IDs donde imagen se reemplaza por PAD=0.
+- Calcular la parte de identidad de PLE con una copia de IDs donde imagen se
+  reemplaza por PAD=0, pero calcular la proyección contextual de PLE desde los
+  embeddings ya sustituidos por visión; son dos entradas distintas en upstream.
 - Hacer prefill con el KV actual y continuar decode textual sin volver a
   ejecutar la torre visual.
 
@@ -240,11 +295,12 @@ Solo después de V6:
 
 ## Primera acción segura
 
-La primera edición de código será V1: hacer que el conversor distinga modalidad
-y añadir un mapper visual que solo inventaría nombres canónicos y hints. No se
-tocarán kernels ni el forward de texto. Antes de convertir pesos se exigirá una
-prueba de inventario 659/659; así el fallo actual de `--vision` queda bloqueado
-sin arriesgar el HNF de producción.
+La primera edición será el oráculo V0, aislado de los dos productos. La primera
+edición de producto será V1: hacer que el conversor distinga modalidad y añadir
+un mapper visual que solo define nombres canónicos y hints. No se tocarán
+kernels ni el forward de texto. Antes de convertir pesos se exigirá una prueba
+de inventario 659/659; así el fallo actual de `--vision` queda bloqueado sin
+arriesgar el HNF de producción.
 
 ## Estado actual
 
@@ -252,11 +308,14 @@ sin arriesgar el HNF de producción.
   código de visión.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
-  `HELIOS_EMBED_IN_RAM=1`. La campaña de decode cerró el perfil ponderado por
+  `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
+  histórica de comparación. La campaña de decode cerró el perfil ponderado por
   perder 1,148 % en potencia alta y 6,770 % en potencia baja. Los dos HNF se
   recertificaron con el conversor determinista `37610b3`: Qwen SHA256
   `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
 - **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
-  MiB BF16; todos los límites de clipping son finitos.
+  MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
+  Transformers `b3a36037`. Baseline ejecutado tras esta auditoría: Héctor
+  14/14 y conversor 39/39; el único cambio de producto pendiente es este plan.
 - **Siguiente acción exacta:** crear el oráculo mínimo y fijar las salidas de
   una imagen sintética antes de implementar `Gemma4VisionMapper`.
