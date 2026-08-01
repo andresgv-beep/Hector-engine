@@ -402,7 +402,66 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
     return true;
 }
 
-// Concatena q_proj+k_proj+v_proj de cada capa en un solo attn.qkv_proj.weight.
+// Concatena varios tensores por la dimension de salida en uno solo.
+//
+// Funciona a nivel de bytes porque los formatos compactos son row-major con los
+// bloques a lo largo de K: cada fila de salida ocupa K/256 bloques
+// consecutivos, asi que pegar las filas de unos detras de otros da exactamente
+// el tensor [sum(N), K] que espera el kernel. Devuelve false sin tocar nada si
+// las formas no encajan.
+bool HnfLoader::concat_tensors(Engine& engine, BlockState& state,
+                               const std::vector<std::string>& partes,
+                               const std::string& destino) {
+    auto& reg = engine.tensors();
+    std::vector<const TensorInfo*> t;
+    size_t bytes = 0;
+    uint32_t filas = 0;
+    for (const auto& n : partes) {
+        const TensorInfo* p = reg.get(n);
+        if (!p || p->shape.size() != 2 || p->host_mapped) return false;
+        if (!t.empty() && (p->dtype != t[0]->dtype || p->shape[1] != t[0]->shape[1])) return false;
+        t.push_back(p);
+        bytes += p->size_bytes;
+        filas += p->shape[0];
+    }
+    if (t.empty()) return false;
+
+    void* fused = nullptr;
+    if (cudaMalloc(&fused, bytes) != cudaSuccess) {
+        std::cerr << "HnfLoader: sin VRAM para fusionar " << destino
+                  << "; se sigue sin fusionar" << std::endl;
+        return false;
+    }
+    uint8_t* dst = static_cast<uint8_t*>(fused);
+    for (const auto* p : t) {
+        if (cudaMemcpy(dst, p->ptr, p->size_bytes, cudaMemcpyDeviceToDevice) != cudaSuccess) {
+            cudaFree(fused);
+            return false;
+        }
+        dst += p->size_bytes;
+    }
+
+    TensorInfo info;
+    info.ptr = fused;
+    info.shape = {filas, t[0]->shape[1]};
+    info.dtype = t[0]->dtype;
+    info.size_bytes = bytes;
+    info.owns_memory = true;
+    info.allocation_ptr = fused;
+    reg.register_tensor(destino, info);
+    state.tensor_names.push_back(destino);
+
+    // Los originales ya no los mira nadie: el grafo elige la ruta fusionada en
+    // cuanto existe el tensor destino.
+    for (const auto& n : partes) {
+        reg.remove(n);
+        auto& v = state.tensor_names;
+        v.erase(std::remove(v.begin(), v.end(), n), v.end());
+    }
+    return true;
+}
+
+// Concatena q/k/v y gate/up de cada capa en tensores fusionados.
 //
 // El grafo YA sabe usarlo (arch.has_fused_qkv -> un matmul + SPLIT_QKV, que en
 // decode es zero-copy). Lo unico que faltaba era producir el tensor.
@@ -415,61 +474,6 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
 // Motivo: k y v son matrices pequenas (N=1024) que no llegan a llenar la GPU y
 // se quedan limitadas por ocupacion. Medido en aislamiento sobre HQ4.1K:
 // 3 matmuls 38,63 us frente a 33,04 us fusionados, un -14,5%.
-void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
-    // Gemma 4 construye su grafo con una ruta explicita que pide q/k/v por
-    // nombre (build_gemma4_layer_cached) y no mira has_fused_qkv, asi que
-    // fusionar le quitaria tensores que necesita. Se deja fuera hasta que esa
-    // ruta soporte el tensor fusionado.
-    if (has_gemma4_config()) return;
-
-    auto& reg = engine.tensors();
-    for (uint32_t layer = 0;; ++layer) {
-        const std::string base = "text.layer" + std::to_string(layer) + ".attn.";
-        const TensorInfo* q = reg.get(base + "q_proj.weight");
-        const TensorInfo* k = reg.get(base + "k_proj.weight");
-        const TensorInfo* v = reg.get(base + "v_proj.weight");
-        if (!q || !k || !v) break;                       // fin de las capas
-        if (q->dtype != k->dtype || q->dtype != v->dtype) break;
-        if (q->shape.size() != 2 || q->shape[1] != k->shape[1] ||
-            q->shape[1] != v->shape[1]) break;           // K debe coincidir
-        if (q->host_mapped || k->host_mapped || v->host_mapped) break;
-
-        const size_t bytes = q->size_bytes + k->size_bytes + v->size_bytes;
-        void* fused = nullptr;
-        if (cudaMalloc(&fused, bytes) != cudaSuccess) {
-            std::cerr << "HnfLoader: sin VRAM para fusionar QKV de la capa "
-                      << layer << "; se sigue sin fusionar" << std::endl;
-            return;
-        }
-        uint8_t* dst = static_cast<uint8_t*>(fused);
-        bool ok = cudaMemcpy(dst, q->ptr, q->size_bytes, cudaMemcpyDeviceToDevice) == cudaSuccess;
-        dst += q->size_bytes;
-        ok = ok && cudaMemcpy(dst, k->ptr, k->size_bytes, cudaMemcpyDeviceToDevice) == cudaSuccess;
-        dst += k->size_bytes;
-        ok = ok && cudaMemcpy(dst, v->ptr, v->size_bytes, cudaMemcpyDeviceToDevice) == cudaSuccess;
-        if (!ok) { cudaFree(fused); return; }
-
-        TensorInfo info;
-        info.ptr = fused;
-        info.shape = {q->shape[0] + k->shape[0] + v->shape[0], q->shape[1]};
-        info.dtype = q->dtype;
-        info.size_bytes = bytes;
-        info.owns_memory = true;
-        info.allocation_ptr = fused;
-        const std::string name = base + "qkv_proj.weight";
-        reg.register_tensor(name, info);
-        state.tensor_names.push_back(name);
-
-        // Los tres originales ya no los mira nadie: el grafo elige la ruta
-        // fusionada en cuanto existe qkv_proj.weight.
-        for (const char* n : {"q_proj.weight", "k_proj.weight", "v_proj.weight"}) {
-            reg.remove(base + n);
-            auto& v2 = state.tensor_names;
-            v2.erase(std::remove(v2.begin(), v2.end(), base + n), v2.end());
-        }
-    }
-}
-
 // ============================================================================
 // LOADING (legacy all-at-once)
 // ============================================================================
@@ -486,6 +490,35 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
     if (!read_execution_hints(f)) return false;
     return load_tensors(f, engine);
 }
+
+void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
+    // Gemma 4 construye su grafo con una ruta explicita que pide q/k/v y
+    // gate/up por nombre y no mira has_fused_qkv / has_fused_gate_up, asi que
+    // fusionar le quitaria tensores que necesita. Se deja fuera hasta que esa
+    // ruta soporte los tensores fusionados.
+    if (has_gemma4_config()) return;
+
+    uint32_t fusionadas = 0;
+    for (uint32_t layer = 0;; ++layer) {
+        const std::string b = "text.layer" + std::to_string(layer) + ".";
+        if (!engine.tensors().exists(b + "attn.q_proj.weight") &&
+            !engine.tensors().exists(b + "mlp.gate.weight")) break;
+
+        // El orden importa: SPLIT_QKV espera q|k|v y add_split_half gate|up.
+        concat_tensors(engine, state,
+                       {b + "attn.q_proj.weight", b + "attn.k_proj.weight",
+                        b + "attn.v_proj.weight"}, b + "attn.qkv_proj.weight");
+        concat_tensors(engine, state,
+                       {b + "mlp.gate.weight", b + "mlp.up.weight"},
+                       b + "mlp.gate_up.weight");
+        fusionadas++;
+    }
+    if (fusionadas) {
+        std::cout << "  [FUSE] q/k/v y gate/up fusionados en " << fusionadas
+                  << " capas" << std::endl;
+    }
+}
+
 
 bool HnfLoader::load_metadata(const std::string& path) {
     config_.params.clear();

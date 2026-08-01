@@ -610,6 +610,9 @@ private:
     bool load_tensors(std::ifstream& f, Engine& engine);
     // Fusion opcional de q/k/v en un solo tensor (HELIOS_FUSE_QKV=1)
     void fuse_qkv_weights(Engine& engine, BlockState& state);
+    bool concat_tensors(Engine& engine, BlockState& state,
+                        const std::vector<std::string>& partes,
+                        const std::string& destino);
 
     bool load_tensor(std::ifstream& f, const TensorEntry& entry, 
                      TensorRegistry& registry);
