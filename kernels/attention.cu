@@ -972,31 +972,6 @@ void launch_qk_norm_rope_kv_fp16(
     }
 }
 
-void launch_rope_fp16(
-    half* q, half* k,
-    int batch_size, int seq_len, int num_heads, int num_kv_heads,
-    int head_dim, int rotary_dim, int position_offset,
-    float theta, float scaling_factor, cudaStream_t stream
-) {
-    if (rotary_dim <= 0) rotary_dim = head_dim;
-    if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
-    int half_rotary = rotary_dim / 2;
-    int block_size = 256;
-    
-    int total_q = batch_size * seq_len * num_heads * half_rotary;
-    int num_blocks_q = (total_q + block_size - 1) / block_size;
-    rope_kernel<<<num_blocks_q, block_size, 0, stream>>>(
-        q, batch_size, seq_len, num_heads, head_dim, rotary_dim,
-        position_offset, theta, scaling_factor
-    );
-    
-    int total_k = batch_size * seq_len * num_kv_heads * half_rotary;
-    int num_blocks_k = (total_k + block_size - 1) / block_size;
-    rope_kernel<<<num_blocks_k, block_size, 0, stream>>>(
-        k, batch_size, seq_len, num_kv_heads, head_dim, rotary_dim,
-        position_offset, theta, scaling_factor
-    );
-}
 
 void launch_rope_inplace_fp16(
     half* qk,

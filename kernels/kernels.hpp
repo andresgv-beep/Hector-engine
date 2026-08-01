@@ -234,20 +234,6 @@ void launch_layernorm_fp16(
 // ROPE KERNEL
 // ============================================================================
 
-void launch_rope_fp16(
-    half* q,                // [batch, seq, heads, head_dim] - modified in place
-    half* k,                // [batch, seq, kv_heads, head_dim] - modified in place
-    int batch_size,
-    int seq_len,
-    int num_heads,
-    int num_kv_heads,
-    int head_dim,
-    int rotary_dim,         // Dims to rotate (<= head_dim). 0 = full head_dim.
-    int position_offset,
-    float theta,
-    float scaling_factor = 1.0f,  // Linear position scaling. 1.0 = none.
-    cudaStream_t stream = nullptr
-);
 
 // Single tensor RoPE
 void launch_rope_inplace_fp16(
