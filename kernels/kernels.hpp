@@ -425,6 +425,17 @@ void launch_embedding_fp16(
     cudaStream_t stream = nullptr
 );
 
+void launch_embedding_hq5k(
+    const int32_t* indices,
+    const uint8_t* table,
+    half* output,
+    int batch_size,
+    int seq_len,
+    int vocab_size,
+    int dim,
+    cudaStream_t stream = nullptr
+);
+
 void launch_embedding_hq51k(
     const int32_t* indices,
     const uint8_t* table,

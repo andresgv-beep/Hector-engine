@@ -73,6 +73,17 @@ def quant_dequant(w, q_max, group_size=8, scale_bits=4, super_size=SUPER):
         gmin = f16(g.min(axis=2))
         gscale = np.maximum(f16(np.maximum(g.max(axis=2) - g.min(axis=2), EPS)), EPS)
 
+    if os.environ.get('HQS_EXACT_SCALES') == '1':
+        # Formatos NO compactos (HQ4K/HQ5K): la escala y el minimo de cada
+        # grupo se guardan en fp16 exactos, sin cuantizar. Cabecera de 128 B
+        # por superbloque en vez de 40 -> 8,0 y 9,0 bpw en vez de 5,25 y 6,25.
+        es = gscale[:, :, None]
+        em = gmin[:, :, None]
+        q = np.where(es > EPS, np.clip(np.round((g - em) / np.maximum(es, EPS) * q_max), 0, q_max), 0)
+        out = em + (q / q_max) * es
+        out = out.reshape(-1)[:w.size] if pad else out.reshape(-1)
+        return out.reshape(shape).astype(np.float32)
+
     # 2) parametros del superbloque, tambien en fp16 antes de derivar nada
     #
     # d_scale sale del MAXIMO de los 32 grupos. Con solo 16 escalas posibles,

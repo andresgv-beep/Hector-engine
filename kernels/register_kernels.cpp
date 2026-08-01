@@ -485,6 +485,11 @@ void register_memory_kernels(Engine& engine) {
                 as_i32(indices), as_fp16_const(table), as_fp16(output),
                 batch, seq, vocab, dim, ctx.stream
             );
+        } else if (table->dtype == dtype::HQ5K()) {
+            launch_embedding_hq5k(
+                as_i32(indices), as_u8_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
         } else if (table->dtype == dtype::HQ51K()) {
             launch_embedding_hq51k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),
