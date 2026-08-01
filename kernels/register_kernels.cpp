@@ -516,6 +516,20 @@ void register_memory_kernels(Engine& engine) {
             ctx.stream);
     });
     
+    // Devuelve un tensor a su reserva original.
+    //
+    // El camino zero-copy de los SPLIT redirige el puntero del destino DENTRO
+    // del buffer fusionado, y esa redireccion es permanente. Si despues llega
+    // un prefill (seq>1), el split real leeria del fusionado y escribiria en
+    // punteros que ya apuntan a ese mismo fusionado: se pisa a si mismo. Pasa
+    // en cualquier chat multi-turno, donde cada turno prefillea despues de
+    // haber decodificado. Restaurar antes de decidir el camino lo evita.
+    static const auto restaurar = [](TensorInfo* t) {
+        if (t && t->allocation_ptr && t->ptr != t->allocation_ptr) {
+            t->ptr = t->allocation_ptr;
+        }
+    };
+
     // SPLIT_QKV - Zero-copy for decode (batch_seq=1), kernel for prefill
     engine.register_kernel(op::SPLIT_QKV(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* qkv_fused = ctx.in(0);
@@ -538,6 +552,8 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("SPLIT_QKV: missing output tensors k=" + k_name + " v=" + v_name);
         }
         
+        restaurar(q_out); restaurar(k_out); restaurar(v_out);
+
         size_t fused_dim = q_size + k_size + v_size;
         uint32_t sl = cmd.get<uint32_t>("seq_len", 0);
         int batch_seq = (sl > 0) ? static_cast<int>(sl) : static_cast<int>(qkv_fused->numel() / fused_dim);
@@ -577,6 +593,8 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("SPLIT_HALF: missing second output tensor: " + second_name);
         }
         
+        restaurar(first); restaurar(second);
+
         size_t fused_dim = 2 * split_size;
         uint32_t sl = cmd.get<uint32_t>("seq_len", 0);
         int batch_seq = (sl > 0) ? static_cast<int>(sl) : static_cast<int>(fused->numel() / fused_dim);
