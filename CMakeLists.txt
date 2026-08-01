@@ -64,6 +64,7 @@ set(ENGINE_SOURCES
     src/hnf_loader.cpp
     src/gemma4_ple.cpp
     src/gemma4_validator.cpp
+    src/gemma4_vision_validator.cpp
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
@@ -156,6 +157,10 @@ target_link_libraries(test_hnf_loader PRIVATE helios-engine)
 add_executable(test_gemma4_metadata tests/test_gemma4_metadata.cpp)
 target_link_libraries(test_gemma4_metadata PRIVATE helios-engine)
 
+# Gemma 4 GM4V, visual inventory and optional real block load/unload
+add_executable(test_gemma4_vision_metadata tests/test_gemma4_vision_metadata.cpp)
+target_link_libraries(test_gemma4_vision_metadata PRIVATE helios-engine)
+
 # Gemma 4 numerical primitives, isolated from graph construction
 add_executable(test_gemma4_primitives tests/test_gemma4_primitives.cu)
 target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
@@ -194,6 +199,7 @@ add_test(NAME KernelTest COMMAND test_kernels)
 add_test(NAME HQ31KTest COMMAND test_hq31k)
 add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
+add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)

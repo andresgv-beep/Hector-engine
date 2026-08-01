@@ -252,6 +252,47 @@ struct VisionModelConfigBin {
 };
 static_assert(sizeof(VisionModelConfigBin) == 64, "VisionModelConfigBin must be 64 bytes");
 
+enum VisionEncoderType : uint32_t {
+    VISION_ENCODER_CLIP = 0,
+    VISION_ENCODER_SIGLIP = 1,
+    VISION_ENCODER_VIT = 2,
+    VISION_ENCODER_EVA = 3,
+    VISION_ENCODER_GEMMA4 = 4,
+};
+
+// Fixed Gemma 4 vision extension. ExecutionHintsBin.reserved[12..16] stores
+// its offset and reserved[16..20] its size. It intentionally does not reuse
+// the GM4X text-extension pointer.
+struct Gemma4VisionExtensionBin {
+    char     magic[4];
+    uint16_t version;
+    uint16_t record_size;
+    uint32_t flags;
+    uint32_t num_key_value_heads;
+    uint32_t head_dim;
+    uint32_t position_embedding_size;
+    uint32_t pooling_kernel_size;
+    uint32_t max_soft_tokens;
+    uint32_t projection_dim;
+    uint32_t patch_size;
+    int32_t  image_token_id;
+    int32_t  boi_token_id;
+    int32_t  eoi_token_id;
+    int32_t  pad_token_id;
+    float    rope_theta;
+    float    attention_scale;
+    float    rms_norm_eps;
+    float    rescale_factor;
+    uint32_t resize_multiple;
+    uint32_t resample;
+    uint32_t activation;
+    uint32_t patch_order;
+    uint32_t position_order;
+    uint32_t reserved;
+};
+static_assert(sizeof(Gemma4VisionExtensionBin) == 96,
+              "Gemma4VisionExtensionBin must be 96 bytes");
+
 // Gemma 4 extension stored inside block 0xB. The parent hint header points to
 // this structure through reserved[0..8] and carries a second "GM4X" marker in
 // reserved[8..12]. All fields are little-endian on disk.
@@ -293,6 +334,23 @@ constexpr uint32_t GEMMA4_EXT_FLAG_SHARED_KV        = (1u << 3);
 constexpr uint32_t GEMMA4_EXT_FLAG_DOUBLE_WIDE_MLP  = (1u << 4);
 constexpr uint32_t GEMMA4_EXT_FLAG_FOUR_NORM_BLOCK  = (1u << 5);
 
+constexpr uint32_t GEMMA4_VISION_FLAG_CLIPPED_LINEARS  = (1u << 0);
+constexpr uint32_t GEMMA4_VISION_FLAG_STANDARDIZE      = (1u << 1);
+constexpr uint32_t GEMMA4_VISION_FLAG_DYNAMIC_TOKENS   = (1u << 2);
+constexpr uint32_t GEMMA4_VISION_FLAG_LEARNED_XY_POS   = (1u << 3);
+constexpr uint32_t GEMMA4_VISION_FLAG_ROPE_2D          = (1u << 4);
+constexpr uint32_t GEMMA4_VISION_FLAG_NONCAUSAL        = (1u << 5);
+constexpr uint32_t GEMMA4_VISION_FLAG_CONVERT_RGB      = (1u << 6);
+constexpr uint32_t GEMMA4_VISION_FLAG_RESCALE          = (1u << 7);
+constexpr uint32_t GEMMA4_VISION_FLAG_RESIZE           = (1u << 8);
+constexpr uint32_t GEMMA4_VISION_FLAG_NORMALIZE        = (1u << 9);
+constexpr uint32_t GEMMA4_VISION_FLAG_ANTIALIAS        = (1u << 10);
+constexpr uint32_t GEMMA4_VISION_FLAG_QK_NORM_WEIGHTED = (1u << 11);
+constexpr uint32_t GEMMA4_VISION_FLAG_V_NORM_WEIGHTLESS = (1u << 12);
+constexpr uint32_t GEMMA4_VISION_FLAG_POOL_NORM_WEIGHTLESS = (1u << 13);
+constexpr uint32_t GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN = (1u << 14);
+constexpr uint32_t GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE = (1u << 15);
+
 struct Gemma4LayerConfig {
     uint32_t attention_kind = 0;
     uint32_t sliding_window = 0;
@@ -316,6 +374,36 @@ struct Gemma4Config {
     std::vector<Gemma4LayerConfig> layers;
 
     bool has_flag(uint32_t flag) const { return (flags & flag) != 0; }
+};
+
+struct Gemma4VisionConfig {
+    uint16_t version = 0;
+    uint32_t flags = 0;
+    uint32_t num_key_value_heads = 0;
+    uint32_t head_dim = 0;
+    uint32_t position_embedding_size = 0;
+    uint32_t pooling_kernel_size = 0;
+    uint32_t max_soft_tokens = 0;
+    uint32_t projection_dim = 0;
+    uint32_t patch_size = 0;
+    int32_t image_token_id = -1;
+    int32_t boi_token_id = -1;
+    int32_t eoi_token_id = -1;
+    int32_t pad_token_id = -1;
+    float rope_theta = 0.0f;
+    float attention_scale = 0.0f;
+    float rms_norm_eps = 0.0f;
+    float rescale_factor = 0.0f;
+    uint32_t resize_multiple = 0;
+    uint32_t resample = 0;
+    uint32_t activation = 0;
+    uint32_t patch_order = 0;
+    uint32_t position_order = 0;
+
+    bool has_flag(uint32_t flag) const { return (flags & flag) != 0; }
+    uint32_t max_patches() const {
+        return max_soft_tokens * pooling_kernel_size * pooling_kernel_size;
+    }
 };
 
 // ============================================================================
@@ -439,6 +527,7 @@ struct BlockState {
     bool loaded = false;
     size_t vram_bytes = 0;
     size_t tensor_count = 0;
+    size_t scratch_budget_bytes = 0;
     std::vector<std::string> tensor_names;  // For unloading
 };
 
@@ -511,6 +600,10 @@ public:
     // Gemma 4 keeps authoritative per-layer geometry in the GM4X extension.
     bool has_gemma4_config() const { return has_gemma4_config_; }
     const Gemma4Config& gemma4_config() const { return gemma4_config_; }
+    bool has_gemma4_vision_config() const { return has_gemma4_vision_config_; }
+    const Gemma4VisionConfig& gemma4_vision_config() const {
+        return gemma4_vision_config_;
+    }
     const std::string& last_error() const { return last_error_; }
     
     // Config por bloque específico (para multimodal)
@@ -539,6 +632,10 @@ public:
     // Get tensors for a specific block
     std::vector<const TensorEntry*> tensors_for_block(BlockID block_id) const;
     std::vector<const TensorEntry*> tensors_for_block(const std::string& block_name) const;
+
+    // Read a tensor payload without loading it into VRAM. Validators use this
+    // for scalar contracts such as Gemma 4's learned clipping bounds.
+    bool read_tensor_data(const TensorEntry& entry, void* output, size_t bytes) const;
     
     // ========================================
     // TOKENIZER (multi-domain)
@@ -573,6 +670,8 @@ private:
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs
     Gemma4Config gemma4_config_;
     bool has_gemma4_config_ = false;
+    Gemma4VisionConfig gemma4_vision_config_;
+    bool has_gemma4_vision_config_ = false;
     std::string last_error_;
     std::vector<TensorEntry> tensors_;
     std::string manifest_json_;
@@ -599,6 +698,9 @@ private:
     bool parse_gemma4_extension(const uint8_t* data, size_t size,
                                 const ExecutionHintsBin& hints,
                                 const TextModelConfigBin& text_config);
+    bool parse_gemma4_vision_extension(const uint8_t* data, size_t size,
+                                       const ExecutionHintsBin& hints,
+                                       const VisionModelConfigBin& vision_config);
     // Single generic version — no duplicated apply per block
     void apply_text_config_bin(const TextModelConfigBin& cfg, ModelConfig& target);
     void apply_vision_config_bin(const VisionModelConfigBin& cfg);

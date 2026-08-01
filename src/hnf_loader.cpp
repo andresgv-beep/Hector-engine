@@ -9,6 +9,7 @@
 //   - Removed apply_cortex_config_bin/apply_code_config_bin wrappers
 
 #include "hnf_loader.hpp"
+#include "gemma4_vision_validator.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cstring>
@@ -208,7 +209,6 @@ bool embedding_is_lookup_only(
 HnfLoader::HnfLoader() {
     memset(&header_, 0, sizeof(header_));
     memset(blocks_, 0, sizeof(blocks_));
-    memset(block_states_, 0, sizeof(block_states_));
 }
 
 HnfLoader::~HnfLoader() { close(); }
@@ -223,6 +223,8 @@ bool HnfLoader::open(const std::string& path) {
     block_configs_.clear();
     gemma4_config_ = Gemma4Config{};
     has_gemma4_config_ = false;
+    gemma4_vision_config_ = Gemma4VisionConfig{};
+    has_gemma4_vision_config_ = false;
     last_error_.clear();
     file_.open(path, std::ios::binary);
     if (!file_.is_open()) { std::cerr << "HnfLoader: Cannot open: " << path << std::endl; return false; }
@@ -338,7 +340,33 @@ bool HnfLoader::load_block(BlockID id, Engine& engine) {
     if (!file_.is_open()) return false;
     if (id >= HNF_BLOCK_COUNT || blocks_[id].size == 0) return false;
     if (block_states_[id].loaded) return true;
-    return load_block_tensors(id, engine);
+
+    size_t scratch_budget = 0;
+    if (id == BLOCK_VISION && has_gemma4_vision_config_) {
+        const Gemma4VisionValidationReport report =
+            validate_gemma4_vision_tensors(*this);
+        if (!report.ok()) {
+            last_error_ = "invalid Gemma 4 vision block: " + report.errors.front();
+            std::cerr << "HnfLoader: " << last_error_ << std::endl;
+            return false;
+        }
+        scratch_budget = static_cast<size_t>(report.scratch_upper_bound_bytes);
+
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+        if (status != cudaSuccess || report.weight_bytes > free_bytes) {
+            last_error_ = "insufficient VRAM for Gemma 4 vision weights (need " +
+                          std::to_string(report.weight_bytes) + ", free " +
+                          std::to_string(free_bytes) + ")";
+            std::cerr << "HnfLoader: " << last_error_ << std::endl;
+            return false;
+        }
+    }
+
+    if (!load_block_tensors(id, engine)) return false;
+    block_states_[id].scratch_budget_bytes = scratch_budget;
+    return true;
 }
 
 bool HnfLoader::load_block(const std::string& name, Engine& engine) {
@@ -349,7 +377,11 @@ bool HnfLoader::unload_block(BlockID id, Engine& engine) {
     if (id >= HNF_BLOCK_COUNT) return false;
     auto& s = block_states_[id];
     if (!s.loaded) return true;
-    for (const auto& n : s.tensor_names) engine.tensors().remove(n);
+    // Contiguous blocks place ownership on their first registered tensor, so
+    // remove in reverse order and release the backing allocation last.
+    for (auto it = s.tensor_names.rbegin(); it != s.tensor_names.rend(); ++it) {
+        engine.tensors().remove(*it);
+    }
     s = BlockState{};
     return true;
 }
@@ -383,10 +415,104 @@ std::vector<const TensorEntry*> HnfLoader::tensors_for_block(const std::string& 
     return tensors_for_block(block_id_from_name(name));
 }
 
+bool HnfLoader::read_tensor_data(const TensorEntry& entry, void* output,
+                                 size_t bytes) const {
+    if (!output || bytes != entry.size || file_path_.empty()) return false;
+    std::ifstream input(file_path_, std::ios::binary);
+    if (!input.is_open()) return false;
+    input.seekg(static_cast<std::streamoff>(entry.offset));
+    input.read(static_cast<char*>(output), static_cast<std::streamsize>(bytes));
+    return input.good();
+}
+
 bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
     std::string target = block_name(id);
     auto& state = block_states_[id];
     state = BlockState{};
+
+    // Gemma 4 vision contains 448 learned scalar clamps. One cudaMalloc per
+    // tensor inflated a 321 MiB block to roughly 452 MiB on the test GPU.
+    // Preserve all 659 registry entries as views into one owned allocation.
+    if (id == BLOCK_VISION && has_gemma4_vision_config_) {
+        const BlockEntry& block = blocks_[id];
+        void* allocation = nullptr;
+        const cudaError_t allocation_status =
+            cudaMalloc(&allocation, static_cast<size_t>(block.size));
+        if (allocation_status != cudaSuccess) {
+            last_error_ = "cudaMalloc failed for contiguous Gemma 4 vision block: " +
+                          std::string(cudaGetErrorString(allocation_status));
+            return false;
+        }
+
+        bool owner_registered = false;
+        auto rollback = [&]() {
+            for (auto it = state.tensor_names.rbegin();
+                 it != state.tensor_names.rend(); ++it) {
+                engine.tensors().remove(*it);
+            }
+            if (!owner_registered) cudaFree(allocation);
+            state = BlockState{};
+        };
+
+        for (const auto& entry : tensors_) {
+            if (entry.block != target) continue;
+            const DTypeID dtype = dtype_from_string(entry.dtype);
+            size_t numel = 1;
+            bool valid_shape = true;
+            for (uint32_t dimension : entry.shape) {
+                if (dimension == 0 ||
+                    numel > std::numeric_limits<size_t>::max() / dimension) {
+                    valid_shape = false;
+                    break;
+                }
+                numel *= dimension;
+            }
+            const size_t expected_size = dtype == DTYPE_INVALID
+                ? 0 : dtype_size(dtype, numel);
+            const uint64_t relative = entry.offset - block.offset;
+            if (!valid_shape || expected_size == 0 ||
+                entry.size != expected_size || entry.offset < block.offset ||
+                relative > block.size || entry.size > block.size - relative ||
+                engine.tensors().exists(entry.name)) {
+                last_error_ = "invalid tensor in contiguous Gemma 4 vision block: " +
+                              entry.name;
+                rollback();
+                return false;
+            }
+
+            std::vector<uint8_t> host(static_cast<size_t>(entry.size));
+            file_.clear();
+            file_.seekg(static_cast<std::streamoff>(entry.offset));
+            file_.read(reinterpret_cast<char*>(host.data()),
+                       static_cast<std::streamsize>(host.size()));
+            void* destination = static_cast<uint8_t*>(allocation) + relative;
+            if (!file_.good() ||
+                cudaMemcpy(destination, host.data(), host.size(),
+                           cudaMemcpyHostToDevice) != cudaSuccess) {
+                last_error_ = "failed to copy contiguous Gemma 4 vision tensor: " +
+                              entry.name;
+                rollback();
+                return false;
+            }
+
+            TensorInfo info;
+            info.ptr = destination;
+            info.shape = entry.shape;
+            info.dtype = dtype;
+            info.size_bytes = static_cast<size_t>(entry.size);
+            info.owns_memory = !owner_registered;
+            info.allocation_ptr = info.owns_memory ? allocation : nullptr;
+            info.allocation_size = info.owns_memory
+                ? static_cast<size_t>(block.size) : 0;
+            engine.tensors().register_tensor(entry.name, std::move(info));
+            owner_registered = true;
+            state.tensor_names.push_back(entry.name);
+            state.vram_bytes += entry.size;
+            ++state.tensor_count;
+        }
+        state.loaded = true;
+        return true;
+    }
     
     for (const auto& entry : tensors_) {
         if (entry.block != target) continue;
@@ -492,6 +618,8 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
     block_configs_.clear();
     gemma4_config_ = Gemma4Config{};
     has_gemma4_config_ = false;
+    gemma4_vision_config_ = Gemma4VisionConfig{};
+    has_gemma4_vision_config_ = false;
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
@@ -500,6 +628,15 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
         return false;
     }
     if (!read_execution_hints(f)) { file_path_.clear(); return false; }
+    if (has_gemma4_vision_config_) {
+        const Gemma4VisionValidationReport report =
+            validate_gemma4_vision_tensors(*this);
+        if (!report.ok()) {
+            last_error_ = "invalid Gemma 4 vision block: " + report.errors.front();
+            file_path_.clear();
+            return false;
+        }
+    }
     return load_tensors(f, engine);
 }
 
@@ -550,15 +687,26 @@ void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
 
 
 bool HnfLoader::load_metadata(const std::string& path) {
+    close();
+    file_path_ = path;
     config_.params.clear();
     block_configs_.clear();
     gemma4_config_ = Gemma4Config{};
     has_gemma4_config_ = false;
+    gemma4_vision_config_ = Gemma4VisionConfig{};
+    has_gemma4_vision_config_ = false;
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) return false;
-    return read_execution_hints(f);
+    if (!f.is_open()) { file_path_.clear(); return false; }
+    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+        file_path_.clear();
+        return false;
+    }
+    if (!read_execution_hints(f)) {
+        file_path_.clear();
+        return false;
+    }
+    return true;
 }
 
 // ============================================================================
@@ -610,6 +758,11 @@ bool HnfLoader::parse_manifest() {
         entry.name = get_string(obj.c_str(), "name");
         entry.dtype = get_string(obj.c_str(), "dtype");
         entry.block = get_string(obj.c_str(), "block");
+        const char* shape = find_key(obj.c_str(), "shape");
+        if (!shape || *shape != '[') {
+            last_error_ = "manifest tensor is missing its shape array";
+            return false;
+        }
         entry.shape = get_int_array(obj.c_str(), "shape");
         entry.offset = static_cast<uint64_t>(get_int(obj.c_str(), "offset"));
         entry.size = static_cast<uint64_t>(get_int(obj.c_str(), "size"));
@@ -711,13 +864,51 @@ bool HnfLoader::parse_execution_hints_binary(const uint8_t* data, size_t size) {
     }
     // Vision
     if (hints.vision_offset > 0) {
+        if (hints.num_vision_models != 1) {
+            last_error_ = "binary vision config requires exactly one vision model";
+            return false;
+        }
         if (!range_fits(hints.vision_offset, sizeof(VisionModelConfigBin))) {
             last_error_ = "binary vision config is outside the hints block";
             return false;
         }
         VisionModelConfigBin vision_config{};
         std::memcpy(&vision_config, data + hints.vision_offset, sizeof(vision_config));
+        if (vision_config.encoder_type > VISION_ENCODER_GEMMA4) {
+            last_error_ = "binary vision config has an unknown encoder type";
+            return false;
+        }
+        if (vision_config.encoder_type == VISION_ENCODER_GEMMA4 &&
+            !parse_gemma4_vision_extension(data, size, hints, vision_config)) {
+            return false;
+        }
+        if (vision_config.encoder_type != VISION_ENCODER_GEMMA4) {
+            uint32_t unexpected_offset = 0;
+            uint32_t unexpected_size = 0;
+            std::memcpy(&unexpected_offset, hints.reserved + 12,
+                        sizeof(unexpected_offset));
+            std::memcpy(&unexpected_size, hints.reserved + 16,
+                        sizeof(unexpected_size));
+            if (unexpected_offset != 0 || unexpected_size != 0) {
+                last_error_ = "non-Gemma vision config carries an unexpected GM4V pointer";
+                return false;
+            }
+        }
         apply_vision_config_bin(vision_config);
+    } else if (hints.num_vision_models != 0) {
+        last_error_ = "binary hints declare a vision model without a vision config";
+        return false;
+    } else {
+        uint32_t unexpected_offset = 0;
+        uint32_t unexpected_size = 0;
+        std::memcpy(&unexpected_offset, hints.reserved + 12,
+                    sizeof(unexpected_offset));
+        std::memcpy(&unexpected_size, hints.reserved + 16,
+                    sizeof(unexpected_size));
+        if (unexpected_offset != 0 || unexpected_size != 0) {
+            last_error_ = "binary hints carry GM4V without a vision config";
+            return false;
+        }
     }
     // Cortex → block_configs_[CORTEX] (single call, no wrapper)
     if (hints.cortex_offset > 0) {
@@ -838,6 +1029,145 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
     return true;
 }
 
+bool HnfLoader::parse_gemma4_vision_extension(
+    const uint8_t* data, size_t size, const ExecutionHintsBin& hints,
+    const VisionModelConfigBin& vision_config) {
+    uint32_t extension_offset = 0;
+    uint32_t extension_size = 0;
+    std::memcpy(&extension_offset, hints.reserved + 12, sizeof(extension_offset));
+    std::memcpy(&extension_size, hints.reserved + 16, sizeof(extension_size));
+
+    const size_t start = static_cast<size_t>(extension_offset);
+    const size_t bytes = static_cast<size_t>(extension_size);
+    if (start > size || bytes > size - start ||
+        bytes != sizeof(Gemma4VisionExtensionBin)) {
+        last_error_ = "GM4V extension is missing, truncated, or has the wrong size";
+        return false;
+    }
+
+    const auto overlaps = [](size_t a_start, size_t a_size,
+                             size_t b_start, size_t b_size) {
+        return a_start < b_start + b_size && b_start < a_start + a_size;
+    };
+    if (overlaps(start, bytes, 0, sizeof(ExecutionHintsBin)) ||
+        overlaps(start, bytes, hints.vision_offset,
+                 sizeof(VisionModelConfigBin)) ||
+        (hints.text_offset > 0 &&
+         overlaps(start, bytes, hints.text_offset, sizeof(TextModelConfigBin)))) {
+        last_error_ = "GM4V extension overlaps a binary hints record";
+        return false;
+    }
+    if (std::memcmp(hints.reserved + 8, "GM4X", 4) == 0) {
+        uint32_t text_extension_offset = 0;
+        uint32_t text_extension_size = 0;
+        std::memcpy(&text_extension_offset, hints.reserved,
+                    sizeof(text_extension_offset));
+        std::memcpy(&text_extension_size, hints.reserved + 4,
+                    sizeof(text_extension_size));
+        if (overlaps(start, bytes, text_extension_offset,
+                     text_extension_size)) {
+            last_error_ = "GM4V extension overlaps the GM4X extension";
+            return false;
+        }
+    }
+
+    Gemma4VisionExtensionBin extension{};
+    std::memcpy(&extension, data + start, sizeof(extension));
+    if (std::memcmp(extension.magic, "GM4V", 4) != 0) {
+        last_error_ = "GM4V extension has invalid magic";
+        return false;
+    }
+    if (extension.version != 1 ||
+        extension.record_size != sizeof(Gemma4VisionExtensionBin)) {
+        last_error_ = "unsupported GM4V version or record size";
+        return false;
+    }
+
+    constexpr uint32_t required_flags =
+        GEMMA4_VISION_FLAG_CLIPPED_LINEARS |
+        GEMMA4_VISION_FLAG_DYNAMIC_TOKENS |
+        GEMMA4_VISION_FLAG_LEARNED_XY_POS |
+        GEMMA4_VISION_FLAG_ROPE_2D |
+        GEMMA4_VISION_FLAG_NONCAUSAL |
+        GEMMA4_VISION_FLAG_CONVERT_RGB |
+        GEMMA4_VISION_FLAG_RESCALE |
+        GEMMA4_VISION_FLAG_RESIZE |
+        GEMMA4_VISION_FLAG_ANTIALIAS |
+        GEMMA4_VISION_FLAG_QK_NORM_WEIGHTED |
+        GEMMA4_VISION_FLAG_V_NORM_WEIGHTLESS |
+        GEMMA4_VISION_FLAG_POOL_NORM_WEIGHTLESS |
+        GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN |
+        GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE;
+    constexpr uint32_t supported_flags = required_flags |
+        GEMMA4_VISION_FLAG_STANDARDIZE | GEMMA4_VISION_FLAG_NORMALIZE;
+    if ((extension.flags & required_flags) != required_flags ||
+        (extension.flags & ~supported_flags) != 0 ||
+        (extension.flags & GEMMA4_VISION_FLAG_STANDARDIZE) != 0 ||
+        (extension.flags & GEMMA4_VISION_FLAG_NORMALIZE) != 0) {
+        last_error_ = "GM4V flags request an unsupported vision contract";
+        return false;
+    }
+
+    const auto finite_positive = [](float value) {
+        return std::isfinite(value) && value > 0.0f;
+    };
+    const uint64_t attention_width =
+        static_cast<uint64_t>(vision_config.num_attention_heads) * extension.head_dim;
+    if (vision_config.hidden_size == 0 || vision_config.num_hidden_layers == 0 ||
+        vision_config.num_attention_heads == 0 || vision_config.intermediate_size == 0 ||
+        vision_config.num_channels != 3 || vision_config.projector_type != 0 ||
+        extension.num_key_value_heads != vision_config.num_attention_heads ||
+        attention_width != vision_config.hidden_size ||
+        extension.position_embedding_size == 0 || extension.pooling_kernel_size == 0 ||
+        extension.max_soft_tokens == 0 || extension.projection_dim == 0 ||
+        extension.patch_size == 0 || extension.patch_size != vision_config.patch_size ||
+        extension.projection_dim != vision_config.projection_dim ||
+        extension.max_soft_tokens != vision_config.num_image_tokens ||
+        extension.image_token_id != vision_config.image_token_id ||
+        extension.image_token_id < 0 || extension.boi_token_id < 0 ||
+        extension.eoi_token_id < 0 || extension.pad_token_id < 0 ||
+        !finite_positive(extension.rope_theta) ||
+        !finite_positive(extension.attention_scale) ||
+        !finite_positive(extension.rms_norm_eps) ||
+        !finite_positive(extension.rescale_factor) ||
+        std::fabs(extension.rms_norm_eps - vision_config.layer_norm_eps) > 1.0e-12f ||
+        std::fabs(extension.attention_scale - 1.0f) > 1.0e-6f ||
+        extension.resize_multiple != extension.patch_size * extension.pooling_kernel_size ||
+        extension.resample != 3 || extension.activation != 1 ||
+        extension.patch_order != 1 ||
+        extension.position_order != 1 || extension.reserved != 0) {
+        last_error_ = "GM4V fields are inconsistent or unsupported";
+        return false;
+    }
+
+    Gemma4VisionConfig parsed{};
+    parsed.version = extension.version;
+    parsed.flags = extension.flags;
+    parsed.num_key_value_heads = extension.num_key_value_heads;
+    parsed.head_dim = extension.head_dim;
+    parsed.position_embedding_size = extension.position_embedding_size;
+    parsed.pooling_kernel_size = extension.pooling_kernel_size;
+    parsed.max_soft_tokens = extension.max_soft_tokens;
+    parsed.projection_dim = extension.projection_dim;
+    parsed.patch_size = extension.patch_size;
+    parsed.image_token_id = extension.image_token_id;
+    parsed.boi_token_id = extension.boi_token_id;
+    parsed.eoi_token_id = extension.eoi_token_id;
+    parsed.pad_token_id = extension.pad_token_id;
+    parsed.rope_theta = extension.rope_theta;
+    parsed.attention_scale = extension.attention_scale;
+    parsed.rms_norm_eps = extension.rms_norm_eps;
+    parsed.rescale_factor = extension.rescale_factor;
+    parsed.resize_multiple = extension.resize_multiple;
+    parsed.resample = extension.resample;
+    parsed.activation = extension.activation;
+    parsed.patch_order = extension.patch_order;
+    parsed.position_order = extension.position_order;
+    gemma4_vision_config_ = parsed;
+    has_gemma4_vision_config_ = true;
+    return true;
+}
+
 // ============================================================================
 // APPLY CONFIG — SINGLE GENERIC VERSION
 // ============================================================================
@@ -894,8 +1224,10 @@ void HnfLoader::apply_text_config_bin(const TextModelConfigBin& cfg, ModelConfig
 
 void HnfLoader::apply_vision_config_bin(const VisionModelConfigBin& cfg) {
     ModelConfig& vc = block_configs_[BLOCK_VISION];
-    static const char* enc_types[] = {"clip","siglip","vit","eva"};
-    vc.set("encoder_type", std::string(enc_types[std::min(cfg.encoder_type, 3u)]));
+    static const char* enc_types[] = {"clip","siglip","vit","eva","gemma4"};
+    const uint32_t encoder = cfg.encoder_type <= VISION_ENCODER_GEMMA4
+        ? cfg.encoder_type : VISION_ENCODER_CLIP;
+    vc.set("encoder_type", std::string(enc_types[encoder]));
     vc.set("image_size", (int64_t)cfg.image_size);
     vc.set("patch_size", (int64_t)cfg.patch_size);
     vc.set("hidden_size", (int64_t)cfg.hidden_size);
@@ -907,6 +1239,18 @@ void HnfLoader::apply_vision_config_bin(const VisionModelConfigBin& cfg) {
     vc.set("projection_dim", (int64_t)cfg.projection_dim);
     vc.set("num_image_tokens", (int64_t)cfg.num_image_tokens);
     vc.set("image_token_id", (int64_t)cfg.image_token_id);
+    if (has_gemma4_vision_config_) {
+        const Gemma4VisionConfig& gemma = gemma4_vision_config_;
+        vc.set("num_key_value_heads", (int64_t)gemma.num_key_value_heads);
+        vc.set("head_dim", (int64_t)gemma.head_dim);
+        vc.set("position_embedding_size", (int64_t)gemma.position_embedding_size);
+        vc.set("pooling_kernel_size", (int64_t)gemma.pooling_kernel_size);
+        vc.set("max_soft_tokens", (int64_t)gemma.max_soft_tokens);
+        vc.set("rope_theta", (double)gemma.rope_theta);
+        vc.set("attention_scale", (double)gemma.attention_scale);
+        vc.set("rms_norm_eps", (double)gemma.rms_norm_eps);
+        vc.set("resize_multiple", (int64_t)gemma.resize_multiple);
+    }
 }
 
 // ============================================================================
@@ -996,11 +1340,6 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
                   << " (" << entry.name << ")" << std::endl;
         return false;
     }
-    if (entry.shape.empty()) {
-        std::cerr << "HnfLoader: Empty shape: " << entry.name << std::endl;
-        return false;
-    }
-
     size_t numel = 1;
     for (uint32_t dim : entry.shape) {
         if (dim == 0 || numel > std::numeric_limits<size_t>::max() / dim) {

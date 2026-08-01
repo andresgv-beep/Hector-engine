@@ -53,7 +53,8 @@ void TensorRegistry::register_tensor(const std::string& name, TensorInfo info) {
     // Update stats
     total_bytes_ += info.size_bytes;
     if (info.owns_memory) {
-        owned_bytes_ += info.size_bytes;
+        owned_bytes_ += info.allocation_size
+            ? info.allocation_size : info.size_bytes;
     }
     
     // Store
@@ -189,7 +190,8 @@ void TensorRegistry::remove(const std::string& name) {
     // Update stats
     total_bytes_ -= info.size_bytes;
     if (info.owns_memory) {
-        owned_bytes_ -= info.size_bytes;
+        owned_bytes_ -= info.allocation_size
+            ? info.allocation_size : info.size_bytes;
         // Free GPU memory
         release_tensor_memory(info);
     }

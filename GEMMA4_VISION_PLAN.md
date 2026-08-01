@@ -236,7 +236,7 @@ incompleto. Ejecutar además las 39 pruebas actuales del conversor sin cambios.
 Resultado: mapper 659/659, HNF visual FP16 reproducible y HNF combinado
 texto+visión válidos. Evidencia en `../helios_convert_v9.1/GEMMA4_VISION_V1.md`.
 
-### V2 — Loader y validador de visión
+### V2 — Loader y validador de visión — CERRADA
 
 - Leer la extensión visual Gemma 4.
 - Validar arquitectura, formas, dtype y los 448 clamps.
@@ -245,6 +245,13 @@ texto+visión válidos. Evidencia en `../helios_convert_v9.1/GEMMA4_VISION_V1.md
 
 **Salida:** 659/659 tensores validados y bloque visual cargable sin construir
 el forward.
+
+Resultado: `GM4V` se valida de forma estricta, los 448 clamps escalares son
+finitos, los 337.089.408 bytes de pesos cargan y se liberan tanto en el HNF
+visual como en el combinado. La cota previa de scratch es 368.040.960 bytes.
+Una sola reserva contigua deja el consumo medido en 337.641.472 bytes y evita
+136.314.880 bytes de overhead frente a reservar los 659 tensores por separado.
+Evidencia en `tools/GEMMA4_VISION_V2.md`.
 
 ### V3 — Preprocesado exacto sin dependencia de UI
 
@@ -324,8 +331,11 @@ arriesgar el HNF de producción.
   (`5dde9dbc…4edb057`); el combinado texto+visión contiene 1260 tensores y
   pasa el validador estricto. Evidencia en
   `../helios_convert_v9.1/GEMMA4_VISION_V1.md`.
-- **Fase activa:** V2 — loader y validador visual de Héctor. No se ha iniciado
-  aún el forward ni ningún kernel visual.
+- **Fase cerrada:** V2 — loader estricto `GM4V`, inventario 659/659, clamps
+  448/448 y carga/descarga independiente verificados sobre los HNF visual y
+  combinado. Evidencia en `tools/GEMMA4_VISION_V2.md`.
+- **Fase activa:** V3 — preprocesado exacto desde buffer RGB, todavía sin
+  forward ni kernels visuales.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -337,5 +347,6 @@ arriesgar el HNF de producción.
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
   Transformers `b3a36037`. Baseline ejecutado tras esta auditoría: Héctor
   14/14 y conversor 39/39; el único cambio de producto pendiente es este plan.
-- **Siguiente acción exacta:** hacer que Héctor reconozca `encoder_type=4`,
-  valide `GM4V` y cargue/descargue los 659 tensores FP16 sin ejecutar la torre.
+- **Siguiente acción exacta:** implementar resize/patchify/coordenadas sobre un
+  buffer RGB y compararlos contra las fixtures V0 en varias relaciones de
+  aspecto, sin elegir aún una librería PNG/JPEG.

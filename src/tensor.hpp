@@ -34,7 +34,7 @@ struct TensorInfo {
     bool host_mapped = false;   // Owned allocation came from cudaHostAlloc
     bool file_mapped = false;   // Owned allocation came from mmap(MAP_PRIVATE)
     void* allocation_ptr = nullptr; // Original host/device allocation handle
-    size_t allocation_size = 0; // Mapping length when file_mapped=true
+    size_t allocation_size = 0; // Full owned allocation/mapping when it differs
     
     // Computed properties
     size_t numel() const {
