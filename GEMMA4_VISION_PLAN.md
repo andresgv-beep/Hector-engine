@@ -253,7 +253,9 @@ sin arriesgar el HNF de producción.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_IN_RAM=1`. La campaña de decode cerró el perfil ponderado por
-  perder 1,148 % en potencia alta y 6,770 % en potencia baja.
+  perder 1,148 % en potencia alta y 6,770 % en potencia baja. Los dos HNF se
+  recertificaron con el conversor determinista `37610b3`: Qwen SHA256
+  `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
 - **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
   MiB BF16; todos los límites de clipping son finitos.
 - **Siguiente acción exacta:** crear el oráculo mínimo y fijar las salidas de

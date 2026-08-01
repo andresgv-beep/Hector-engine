@@ -7,8 +7,13 @@ medir HQ4.1K y el `lm_head` HQ5.1K como un mismo recorrido.
 ## Alcance y reglas
 
 - Motor base: commit `600f4200e3f353d59eb1d694f7eb0eaac436cdcc`.
-- Modelo principal: `qwen3_4b_final.hnf`, 3.470.618.923 bytes, SHA256
+- Modelo principal usado en la medición: `qwen3_4b_final-legacy-layout.hnf`,
+  3.470.618.923 bytes, SHA256
   `c82c9fb86f4513a07f6f567181cff1579019be95bc93b2fc2c83deb4123f8969`.
+  Tras el commit determinista `37610b3`, el canónico
+  `qwen3_4b_final.hnf` ocupa 3.470.620.004 bytes y tiene SHA256
+  `5aec0ebaae2dd3e8d37ed586f35c9e0832914ed1e0bb8cb4314d82cdf9269105`;
+  dos conversiones locales resultaron idénticas byte a byte.
 - GPU: NVIDIA GeForce RTX 5070 Laptop, 8.151 MiB.
 - Compilador CUDA: `/usr/local/cuda/bin/nvcc`.
 - Durante esta campaña no se introducen HQ3.1K, embeddings HQ4, cambios de

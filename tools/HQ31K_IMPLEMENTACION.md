@@ -170,7 +170,10 @@ HNF real generado:
 - 72 HQ3.1K, 37 HQ5.1K, 144 HQ4.1K y 146 FP16;
 - 3.358.553.312 bytes: ahorro de 112.065.611 bytes (106,87 MiB; 3,23%);
 - validador estricto: 0 errores y 0 avisos;
-- SHA256: `b2f8bd1614670500ba6ae84658295628cc63f909df244d49f32d7d95000dd17d`.
+- SHA256 histórico: `b2f8bd1614670500ba6ae84658295628cc63f909df244d49f32d7d95000dd17d`.
+  Este artefacto experimental usa el layout anterior a `37610b3`; el hash
+  identifica el fichero existente, pero no es una certificación reproducible
+  con el conversor actual.
 
 La asignación reproduce el perfil que obtuvo 88,1% en los dos corpus, pero no
 superó la barrera de rendimiento. En un perfil bajo comparable, producción dio

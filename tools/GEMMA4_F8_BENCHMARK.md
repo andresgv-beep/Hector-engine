@@ -5,12 +5,29 @@ Mediciones realizadas el 2026-07-31 con `google/gemma-4-E2B-it`, cuyo
 `2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550`.
 Los dos HNF pasaron el validador estricto con 601 tensores y 0 errores/avisos.
 
-## Artefactos
+## Artefactos usados en la medición histórica
 
 | Perfil | Archivo | Tamaño | SHA256 | Reparto |
 |---|---|---:|---|---|
-| Compacto | `gemma4-e2b-it-text-compact.hnf` | 4.250.889.374 bytes | `c1e9a31fc1eb59ac5794a69f38f63f046ad2eb0015b55d423ea7d5eb193dca5e` | 283 FP16, 213 HQ51K, 105 HQ41K |
-| Referencia | `gemma4-e2b-it-text-fp16.hnf` | 10.109.254.667 bytes | `f60d335c75ff35775f267f673e4f1afe18dbd6f3e7371108ccac4481d9a70295` | 601 FP16 |
+| Compacto (layout legacy) | `gemma4-e2b-it-text-compact-legacy-layout.hnf` | 4.250.889.374 bytes | `c1e9a31fc1eb59ac5794a69f38f63f046ad2eb0015b55d423ea7d5eb193dca5e` | 283 FP16, 213 HQ51K, 105 HQ41K |
+| Referencia (layout legacy) | `gemma4-e2b-it-text-fp16.hnf` | 10.109.254.667 bytes | `f60d335c75ff35775f267f673e4f1afe18dbd6f3e7371108ccac4481d9a70295` | 601 FP16 |
+
+Esos SHA siguen identificando exactamente los ficheros usados en las medidas,
+pero su layout nació antes del commit determinista `37610b3` y no se reproduce
+con el conversor actual. Los pesos y resultados numéricos no estaban afectados.
+
+## Artefacto compacto recertificado
+
+Dos conversiones independientes con `37610b3` y el mismo checkpoint resultan
+idénticas byte a byte:
+
+| Archivo canónico | Tamaño | SHA256 | Validación |
+|---|---:|---|---|
+| `gemma4-e2b-it-text-compact.hnf` | 4.250.889.522 bytes | `b67df38138b3aac46c7fef0a1fce5b9b74b96ce95aff2bf1c2b6839920b79660` | 601 tensores; 0 errores; 0 avisos |
+
+Héctor lo carga con `HELIOS_EMBED_IN_RAM=1` y el smoke greedy responde
+`La capital de Francia es París.`. La referencia FP16 conserva por ahora su
+SHA histórico; no se usa como baseline de la fase visual.
 
 Ambos se ejecutaron con `HELIOS_EMBED_IN_RAM=1`. El compacto mantiene fuera de
 VRAM 768 MiB del embedding principal y 1.750 MiB del PLE; el FP16 mantiene

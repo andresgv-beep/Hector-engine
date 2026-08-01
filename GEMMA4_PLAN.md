@@ -12,7 +12,10 @@ v9 propio de HELIOS. El artefacto de chat certificado es el checkpoint instruct:
 - Checkpoint: `google/gemma-4-E2B-it`, SHA256
   `2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550`
 - HNF: `gemma4-e2b-it-text-compact.hnf`
-- Tamaño: 4.250.889.374 bytes (3,959 GiB)
+- Tamaño: 4.250.889.522 bytes (3,959 GiB)
+- SHA256 HNF determinista:
+  `b67df38138b3aac46c7fef0a1fce5b9b74b96ce95aff2bf1c2b6839920b79660`
+- Conversor certificado: `37610b3` (orden alfabético estable de tensores)
 - Tensores: 601
 - Cuantización: 283 FP16, 213 HQ51K y 105 HQ41K
 - Validador estricto del convertidor: 0 errores, 0 avisos
@@ -369,3 +372,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-08-01 | Fase 8 (embedding compartido) | Contrato y ahorro correctos; candidato HQ5.1K rechazado por producto | HNF 741,87 MiB menor, VRAM sin offload 4.368→3.626 MiB, carga 1,62→1,11 s y decode ~103,5 tok/s sin cambio; 1.755 posiciones no muestran regresión significativa (`p=0,246`), pero el A/B de 12 turnos introduce escritura china, olvida parte del perfil y entra en un bucle. Se conserva opt-in, no se promueve. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
 | 2026-08-01 | Fase 8 (decisión de producción) | Offload actual conservado; siguiente palanca es cuantización ponderada | `HELIOS_EMBED_IN_RAM=1` mantiene calidad/velocidad y saca 741,87 MiB de VRAM; el duplicado sigue en archivo/RAM. Se descarta por ahora HQ5K compartido y se fija barrera conjunta: cero fallos conversacionales, dos corpus sin regresión, velocidad dentro del 1 % y ahorro de memoria/tamaño medido |
 | 2026-08-01 | Fase 8 (cierre) | Perfil ponderado rechazado por velocidad; baseline congelado | Tras retirar HQS legacy: conversor 39/39 y Héctor 14/14. A/B de 256 tokens: producción 104,3195 frente a 103,122 tok/s en régimen alto (−1,148 %) y 71,9505 frente a 67,0791 en bajo (−6,770 %). Se conserva `qwen3_4b_final.hnf` + offload y se abre V0 de visión |
+| 2026-08-01 | Recertificación HNF | Layout determinista y SHA reproducible | La iteración previa del `HashMap` aleatorizaba offsets sin alterar pesos. Dos conversiones independientes de Gemma son idénticas byte a byte: 4.250.889.522 bytes, SHA256 `b67df381…b79660`; validador 0/0 y generación greedy correcta. El SHA `c1e9a31f…` queda como layout legacy |

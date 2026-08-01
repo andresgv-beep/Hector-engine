@@ -351,6 +351,13 @@ Los commits `81bb2a2` del conversor y `fc7e97f` de Héctor retiraron HQ4K/HQ5K
 sin alterar los HNF compactos ni sus comandos. Antes de decidir se verificaron
 de nuevo 39/39 pruebas del conversor y 14/14 de Héctor.
 
+Después, `37610b3` corrigió el orden físico no determinista. El baseline
+canónico recertificado `qwen3_4b_final.hnf` ocupa 3.470.620.004 bytes y dos
+conversiones independientes producen SHA256
+`5aec0ebaae2dd3e8d37ed586f35c9e0832914ed1e0bb8cb4314d82cdf9269105`.
+Las medidas siguientes se hicieron con el layout legacy semánticamente
+idéntico; el cambio solo afecta offsets/manifiesto y SHA del contenedor.
+
 Se alternaron los HNF de producción y ponderado con el prompt greedy de 256
 tokens, `HELIOS_EMBED_IN_RAM=1` y el mismo binario. Las pasadas se separaron
 por régimen de potencia; el calentamiento no entra en las medianas:
