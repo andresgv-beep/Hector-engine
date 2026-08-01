@@ -251,6 +251,40 @@ crecimiento inesperado de memoria.
 **Criterio de salida:** benchmark reproducible, sin regresiones conocidas en
 Qwen/Phi/DeepSeek y con objetivos de rendimiento anotados a partir de medidas.
 
+### Línea pendiente — ajuste ponderado del conversor
+
+La solución de producción para el embedding sigue siendo el HNF actual con
+`HELIOS_EMBED_IN_RAM=1`: conserva calidad y velocidad y desplaza 741,87 MiB de
+VRAM a RAM. Esos bytes continúan presentes en el archivo y en la memoria host;
+ese coste se acepta hasta encontrar un perfil que pase la barrera de producto.
+
+La tabla compartida HQ5.1K queda únicamente como experimento opt-in. Su ahorro
+de archivo y RAM es real, pero la batería conversacional encontró escritura
+china, pérdida parcial de recuerdos y un bucle. Tampoco queda programada una
+tabla compartida HQ5K no compacta: podría recuperar calidad, pero arriesga el
+coste del `lm_head` y volvería a intercambiar calidad, tamaño y velocidad sin
+haber aislado antes qué matrices toleran compresión.
+
+El siguiente trabajo de calidad pertenece al **conversor**, no a Héctor:
+
+1. Proteger embedding y tensores identificados como sensibles.
+2. Proteger `down_proj`, que escribe de vuelta al flujo residual.
+3. Comprimir solo matrices cuya tolerancia esté demostrada por familia.
+4. Conservar las fusiones ya verificadas en Héctor y medir alrededor de los
+   106,57 tok/s sin atribuir su ganancia al nuevo HNF.
+5. No combinar un cambio de cuantización con otro cambio de kernels en el mismo
+   artefacto o comparación.
+
+Todo candidato a producción debe superar simultáneamente:
+
+- **calidad conversacional:** cero fallos nuevos;
+- **dos corpus:** sin regresión estadísticamente demostrable;
+- **velocidad:** pérdida menor o igual al 1 %;
+- **VRAM/tamaño:** ahorro real medido por separado en archivo, RAM y VRAM.
+
+Si falla una sola barrera, el perfil permanece experimental aunque mejore las
+otras tres.
+
 ### Fase 9 — Multimodal, aplazada
 
 Vision y audio se planificarán en un documento separado cuando el texto haya
@@ -275,11 +309,12 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 - **Fase activa:** Fase 8 — rendimiento y robustez.
 - **Última fase completada:** Fase 7 — generación y tokenizer.
-- **Siguiente acción exacta:** no promover el embedding compartido HQ5.1K pese
-  a su ahorro correcto de 741,87 MiB: falló la barrera conversacional. Decidir
-  antes de otro cambio si se prueba una representación de embedding de mayor
-  precisión o se conserva la duplicación de producción. La calibración de
-  calidad Gemma 4 continúa abierta y se valida como regresión de cada ganador.
+- **Siguiente acción exacta:** conservar el HNF actual con
+  `HELIOS_EMBED_IN_RAM=1` como baseline de producción y diseñar en el conversor
+  un perfil ponderado por familia: embedding y `down_proj` protegidos; solo se
+  comprimen matrices tolerantes. La tabla compartida HQ5.1K y HQ3.1K continúan
+  experimentales. Cada HNF se valida sin cambios simultáneos de kernels. El
+  plan de visión queda pausado antes de V0 hasta congelar este baseline.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
@@ -326,3 +361,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-08-01 | Fase 8 (plan decode) | Prioridad corregida: fusiones antes de HQ3.1K | Se abre `tools/DECODE_FUSION_PLAN.md`: perfil por nodo, residual MLP + RMSNorm siguiente como primer candidato, embedding compartido HQ5.1K después y perfil mixto HQ3.1K al final. El dato de 1,67 ms se considera hipótesis hasta reproducirlo |
 | 2026-08-01 | Fase 8 (perfil decode) | La bolsa pequeña existe, pero las fusiones probadas no llegan al corte | Qwen3-4B: 15,013 ms/token a 55 W; 1,434 ms de kernels no-HQS y 0,379 ms de huecos. RMSNorm optimizado aporta ~0,8%, una warp empeora y ADD+RMS siguiente tiene techo <0,08 ms. Perfil mixto real gate/up3+down5 ahorra 106,87 MiB pero da 15,364 ms/token; no es vía de +5 tok/s. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
 | 2026-08-01 | Fase 8 (embedding compartido) | Contrato y ahorro correctos; candidato HQ5.1K rechazado por producto | HNF 741,87 MiB menor, VRAM sin offload 4.368→3.626 MiB, carga 1,62→1,11 s y decode ~103,5 tok/s sin cambio; 1.755 posiciones no muestran regresión significativa (`p=0,246`), pero el A/B de 12 turnos introduce escritura china, olvida parte del perfil y entra en un bucle. Se conserva opt-in, no se promueve. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
+| 2026-08-01 | Fase 8 (decisión de producción) | Offload actual conservado; siguiente palanca es cuantización ponderada | `HELIOS_EMBED_IN_RAM=1` mantiene calidad/velocidad y saca 741,87 MiB de VRAM; el duplicado sigue en archivo/RAM. Se descarta por ahora HQ5K compartido y se fija barrera conjunta: cero fallos conversacionales, dos corpus sin regresión, velocidad dentro del 1 % y ahorro de memoria/tamaño medido |

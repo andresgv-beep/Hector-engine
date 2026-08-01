@@ -34,21 +34,7 @@ void register_memory_kernels(Engine& engine);    // copy, embedding
 // MATMUL HQS LAUNCH FUNCTIONS
 // ============================================================================
 
-void launch_matmul_hq4k(
-    const half* input,      // [M, K] FP16
-    const uint8_t* weights, // [K, N] HQ4K
-    half* output,           // [M, N] FP16
-    int M, int K, int N,
-    cudaStream_t stream = nullptr
-);
 
-void launch_matmul_hq5k(
-    const half* input,
-    const uint8_t* weights,
-    half* output,
-    int M, int K, int N,
-    cudaStream_t stream = nullptr
-);
 
 void launch_matmul_hq31k(
     const half* input,
@@ -425,16 +411,6 @@ void launch_embedding_fp16(
     cudaStream_t stream = nullptr
 );
 
-void launch_embedding_hq5k(
-    const int32_t* indices,
-    const uint8_t* table,
-    half* output,
-    int batch_size,
-    int seq_len,
-    int vocab_size,
-    int dim,
-    cudaStream_t stream = nullptr
-);
 
 void launch_embedding_hq51k(
     const int32_t* indices,
@@ -451,15 +427,7 @@ void launch_embedding_hq51k(
 // MATMUL cuBLAS ACCELERATED (dequant + tensor cores)
 // ============================================================================
 
-void launch_matmul_hq4k_cublas(
-    const half* input, const uint8_t* weights, half* output,
-    int M, int K, int N, cudaStream_t stream = nullptr
-);
 
-void launch_matmul_hq5k_cublas(
-    const half* input, const uint8_t* weights, half* output,
-    int M, int K, int N, cudaStream_t stream = nullptr
-);
 
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,

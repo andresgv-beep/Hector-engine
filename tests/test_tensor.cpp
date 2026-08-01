@@ -15,13 +15,10 @@ void test_dtype_registry() {
     // Builtins should be registered
     assert(dtype::FP32() != DTYPE_INVALID);
     assert(dtype::FP16() != DTYPE_INVALID);
-    assert(dtype::HQ4K() != DTYPE_INVALID);
-    assert(dtype::HQ5K() != DTYPE_INVALID);
     
     // Lookup by name
     auto& reg = DTypeRegistry::instance();
     assert(reg.get_id("fp32") == dtype::FP32());
-    assert(reg.get_id("hq4k") == dtype::HQ4K());
     
     // Get info
     auto* fp32_info = reg.get(dtype::FP32());
@@ -29,11 +26,6 @@ void test_dtype_registry() {
     assert(fp32_info->element_bits == 32);
     assert(fp32_info->is_floating);
     
-    auto* hq4k_info = reg.get(dtype::HQ4K());
-    assert(hq4k_info != nullptr);
-    assert(hq4k_info->is_quantized);
-    assert(hq4k_info->block_elements == 256);
-    assert(hq4k_info->block_bytes == 256);
     
     std::cout << "PASSED" << std::endl;
 }
@@ -64,15 +56,7 @@ void test_dtype_extensibility() {
 void test_hq_sizes() {
     std::cout << "Test: HQ size calculations... ";
     
-    // HQ4K: 256 elements -> 256 bytes
-    assert(dtype_size(dtype::HQ4K(), 256) == 256);
-    assert(dtype_size(dtype::HQ4K(), 257) == 512);  // 2 blocks
-    assert(dtype_size(dtype::HQ4K(), 1024) == 1024);  // 4 blocks
     
-    // HQ5K: 256 elements -> 288 bytes
-    assert(dtype_size(dtype::HQ5K(), 256) == 288);
-    assert(dtype_size(dtype::HQ5K(), 257) == 576);  // 2 blocks
-    assert(dtype_size(dtype::HQ5K(), 1024) == 1152);  // 4 blocks
     
     // FP32: simple
     assert(dtype_size(dtype::FP32(), 100) == 400);
@@ -149,11 +133,10 @@ void test_quantized_tensor() {
     
     TensorRegistry registry;
     
-    // Allocate HQ4K tensor
     void* ptr = registry.allocate_and_register(
         "weights_q",
         {4096, 4096},
-        dtype::HQ4K()
+        dtype::HQ41K()
     );
     
     assert(ptr != nullptr);
@@ -161,10 +144,8 @@ void test_quantized_tensor() {
     TensorInfo* info = registry.get("weights_q");
     assert(info->is_quantized());
     
-    // Verify size: 4096*4096 = 16M elements
-    // 16M / 256 = 65536 blocks
-    // 65536 * 256 bytes = 16MB
-    size_t expected = dtype_size(dtype::HQ4K(), 4096 * 4096);
+    // 4096*4096 = 16M elementos -> 65536 superbloques de 168 B (HQ4.1K)
+    size_t expected = dtype_size(dtype::HQ41K(), 4096 * 4096);
     assert(info->size_bytes == expected);
     
     std::cout << "PASSED" << std::endl;
@@ -202,8 +183,8 @@ void test_print_summary() {
     TensorRegistry registry;
     
     registry.allocate_and_register("text.embedding", {32000, 2048}, dtype::FP16());
-    registry.allocate_and_register("text.layer0.attn.q", {2048, 2048}, dtype::HQ4K());
-    registry.allocate_and_register("text.layer0.attn.k", {2048, 256}, dtype::HQ4K());
+    registry.allocate_and_register("text.layer0.attn.q", {2048, 2048}, dtype::HQ41K());
+    registry.allocate_and_register("text.layer0.attn.k", {2048, 256}, dtype::HQ41K());
     registry.allocate_and_register("scratch_buffer", {1024, 1024}, dtype::FP32(), true);
     
     registry.print_summary();

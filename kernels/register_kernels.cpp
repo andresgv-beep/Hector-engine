@@ -414,19 +414,7 @@ void register_linear_kernels(Engine& engine) {
         if (row_offset > 0) in_ptr += (size_t)row_offset * K;
 
         // Select kernel based on weight dtype
-        if (weight->dtype == dtype::HQ4K()) {
-            launch_matmul_hq4k(
-                in_ptr, as_u8_const(weight), as_fp16(output),
-                M, K, N,
-                ctx.stream
-            );
-        } else if (weight->dtype == dtype::HQ5K()) {
-            launch_matmul_hq5k(
-                in_ptr, as_u8_const(weight), as_fp16(output),
-                M, K, N,
-                ctx.stream
-            );
-        } else if (weight->dtype == dtype::HQ31K()) {
+        if (weight->dtype == dtype::HQ31K()) {
             launch_matmul_hq31k(
                 in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N,
@@ -483,11 +471,6 @@ void register_memory_kernels(Engine& engine) {
         if (table->dtype == dtype::FP16()) {
             launch_embedding_fp16(
                 as_i32(indices), as_fp16_const(table), as_fp16(output),
-                batch, seq, vocab, dim, ctx.stream
-            );
-        } else if (table->dtype == dtype::HQ5K()) {
-            launch_embedding_hq5k(
-                as_i32(indices), as_u8_const(table), as_fp16(output),
                 batch, seq, vocab, dim, ctx.stream
             );
         } else if (table->dtype == dtype::HQ51K()) {

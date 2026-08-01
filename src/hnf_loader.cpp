@@ -933,8 +933,10 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     if (s == "fp32") return dtype::FP32();
     if (s == "fp16") return dtype::FP16();
     if (s == "bf16") return dtype::BF16();
-    if (s == "hq4k") return dtype::HQ4K();
-    if (s == "hq5k") return dtype::HQ5K();
+    // hq4k y hq5k (cabecera de 128 B, 8,0 y 9,0 bpw) se retiraron el
+    // 2026-08-01: ningun HNF los usaba y obligaban a duplicar cada mejora del
+    // cuantizador. Un fichero antiguo que los traiga da DTYPE_INVALID y el
+    // loader lo rechaza con mensaje claro, en vez de malinterpretar los bytes.
     if (s == "hq31k") return dtype::HQ31K();
     if (s == "hq41k") return dtype::HQ41K();
     if (s == "hq51k") return dtype::HQ51K();

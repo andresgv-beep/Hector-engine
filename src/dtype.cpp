@@ -70,30 +70,6 @@ void DTypeRegistry::register_builtins() {
     info.is_signed = true;
     register_dtype(info);
     
-    // HQ4K - HELIOS Quant 4-bit
-    info = DTypeInfo{};
-    info.name = "hq4k";
-    info.block_elements = 256;
-    info.block_bytes = 256;
-    info.is_quantized = true;
-    info.calc_size = [](size_t n) -> size_t {
-        size_t num_blocks = (n + 255) / 256;
-        return num_blocks * 256;
-    };
-    register_dtype(info);
-    
-    // HQ5K - HELIOS Quant 5-bit
-    info = DTypeInfo{};
-    info.name = "hq5k";
-    info.block_elements = 256;
-    info.block_bytes = 288;
-    info.is_quantized = true;
-    info.calc_size = [](size_t n) -> size_t {
-        size_t num_blocks = (n + 255) / 256;
-        return num_blocks * 288;
-    };
-    register_dtype(info);
-    
     // HQ3.1K - HELIOS Quant 3-bit compact header
     info = DTypeInfo{};
     info.name = "hq31k";

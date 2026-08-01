@@ -102,65 +102,8 @@ float decode_hq51k_element(const uint8_t* block, int in_block) {
     return minimum + float(q) * scale / 31.0f;
 }
 
-void encode_test_hq5k_block(std::vector<uint8_t>& block,
-                            float base_min, int seed) {
-    require(block.size() == 288, "HQ5K test block size");
-    for (int group = 0; group < 32; ++group) {
-        const half minimum = __float2half(base_min + 0.01f * group);
-        const half scale = __float2half(0.25f + 0.005f * group);
-        std::memcpy(block.data() + group * 4, &minimum, sizeof(minimum));
-        std::memcpy(block.data() + group * 4 + 2, &scale, sizeof(scale));
 
-        uint64_t packed = 0;
-        for (int i = 0; i < 8; ++i) {
-            const uint32_t q = uint32_t((seed + group + i) & 31);
-            packed |= uint64_t(q) << (i * 5);
-        }
-        uint8_t* payload = block.data() + 128 + group * 5;
-        for (int byte = 0; byte < 5; ++byte) {
-            payload[byte] = uint8_t((packed >> (byte * 8)) & 0xff);
-        }
-    }
-}
 
-float decode_hq5k_element(const uint8_t* block, int in_block) {
-    const int group = in_block / 8;
-    const int in_group = in_block % 8;
-    half minimum{}, scale{};
-    std::memcpy(&minimum, block + group * 4, sizeof(minimum));
-    std::memcpy(&scale, block + group * 4 + 2, sizeof(scale));
-    const uint8_t* payload = block + 128 + group * 5;
-    const uint64_t packed = uint64_t(payload[0]) | (uint64_t(payload[1]) << 8) |
-                            (uint64_t(payload[2]) << 16) |
-                            (uint64_t(payload[3]) << 24) |
-                            (uint64_t(payload[4]) << 32);
-    const uint32_t q = uint32_t((packed >> (in_group * 5)) & 31);
-    return __half2float(minimum) + float(q) * __half2float(scale) / 31.0f;
-}
-
-std::vector<float> run_hq5k_embedding(const std::vector<uint8_t>& table,
-                                      const std::vector<int32_t>& ids,
-                                      int vocab, int dim) {
-    uint8_t* device_table = nullptr;
-    int32_t* device_ids = nullptr;
-    half* device_output = nullptr;
-    cuda_require(cudaMalloc(&device_table, table.size()), "HQ5K table allocation");
-    cuda_require(cudaMalloc(&device_ids, ids.size() * sizeof(int32_t)), "HQ5K ids allocation");
-    cuda_require(cudaMalloc(&device_output, ids.size() * dim * sizeof(half)),
-                 "HQ5K output allocation");
-    cudaMemcpy(device_table, table.data(), table.size(), cudaMemcpyHostToDevice);
-    cudaMemcpy(device_ids, ids.data(), ids.size() * sizeof(int32_t), cudaMemcpyHostToDevice);
-    launch_embedding_hq5k(device_ids, device_table, device_output,
-                          1, ids.size(), vocab, dim);
-    cuda_require(cudaDeviceSynchronize(), "HQ5K embedding synchronize");
-    std::vector<half> output(ids.size() * dim);
-    cudaMemcpy(output.data(), device_output, output.size() * sizeof(half),
-               cudaMemcpyDeviceToHost);
-    cudaFree(device_table); cudaFree(device_ids); cudaFree(device_output);
-    std::vector<float> result(output.size());
-    for (size_t i = 0; i < output.size(); ++i) result[i] = __half2float(output[i]);
-    return result;
-}
 
 std::vector<float> run_hq51k_embedding(const std::vector<uint8_t>& table,
                                        const std::vector<int32_t>& ids,
@@ -337,24 +280,6 @@ void test_hq51k_embedding_lookup() {
     std::cout << "PASS: synthetic HQ51K embedding row lookup" << std::endl;
 }
 
-void test_hq5k_embedding_lookup() {
-    std::vector<uint8_t> table(576, 0);
-    std::vector<uint8_t> block0(288, 0), block1(288, 0);
-    encode_test_hq5k_block(block0, -2.0f, 0);
-    encode_test_hq5k_block(block1, 1.0f, 7);
-    std::memcpy(table.data(), block0.data(), block0.size());
-    std::memcpy(table.data() + block0.size(), block1.data(), block1.size());
-    const std::vector<int32_t> ids{1, 0, -1};
-    const std::vector<float> output = run_hq5k_embedding(table, ids, 2, 256);
-    for (int d = 0; d < 256; ++d) {
-        require(std::fabs(output[d] - decode_hq5k_element(block1.data(), d)) < 0.003f,
-                "HQ5K row 1 lookup mismatch");
-        require(std::fabs(output[256 + d] - decode_hq5k_element(block0.data(), d)) < 0.003f,
-                "HQ5K row 0 lookup mismatch");
-        require(output[512 + d] == 0.0f, "HQ5K invalid token must produce zeros");
-    }
-    std::cout << "PASS: synthetic HQ5K embedding row lookup" << std::endl;
-}
 
 void test_real_ple_row(const std::string& path) {
     helios::HnfLoader loader;
@@ -396,7 +321,6 @@ int main(int argc, char** argv) {
     test_embedding_scale_and_gelu();
     test_layer_scalar_and_softcap();
     test_proportional_rope();
-    test_hq5k_embedding_lookup();
     test_hq51k_embedding_lookup();
     if (argc == 2) test_real_ple_row(argv[1]);
     require(argc <= 2, "Usage: test_gemma4_primitives [compact-gemma4.hnf]");

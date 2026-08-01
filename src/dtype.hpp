@@ -149,8 +149,6 @@ namespace dtype {
     inline DTypeID FP8() { return DTypeRegistry::instance().get_id("fp8"); }
     inline DTypeID INT8() { return DTypeRegistry::instance().get_id("int8"); }
     inline DTypeID INT32() { return DTypeRegistry::instance().get_id("int32"); }
-    inline DTypeID HQ4K() { return DTypeRegistry::instance().get_id("hq4k"); }
-    inline DTypeID HQ5K() { return DTypeRegistry::instance().get_id("hq5k"); }
     inline DTypeID HQ31K() { return DTypeRegistry::instance().get_id("hq31k"); }
     inline DTypeID HQ41K() { return DTypeRegistry::instance().get_id("hq41k"); }
     inline DTypeID HQ51K() { return DTypeRegistry::instance().get_id("hq51k"); }

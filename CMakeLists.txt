@@ -77,7 +77,6 @@ set(KERNEL_SOURCES
     kernels/activations.cu
     kernels/normalization.cu
     kernels/linear.cu
-    kernels/matmul_hqs.cu
     kernels/matmul_hq31k.cu
     kernels/matmul_hqs_compact.cu
     kernels/matmul_cublas.cu

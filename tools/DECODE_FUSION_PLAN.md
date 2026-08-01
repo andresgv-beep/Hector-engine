@@ -217,8 +217,16 @@ La barrera de producto, sin embargo, **no pasa**. En el A/B de una semilla por
 memoria y termina una respuesta en bucle. El detector automático marca script
 inesperado 0,083 frente a 0 y acierto semántico 0,50 frente a 1,00. Por tanto,
 el mecanismo y el ahorro quedan disponibles para investigación, pero el modo
-no sustituye al perfil de producción. La siguiente variante, si se autoriza,
-debe proteger mejor el embedding de entrada; no se baja a HQ4.1K.
+no sustituye al perfil de producción. No se programa ahora una variante HQ5K
+no compacta: puede proteger mejor el embedding, pero también encarecer el
+`lm_head` y desplazar el problema a velocidad/tamaño. El baseline permanece en
+el HNF actual con `HELIOS_EMBED_IN_RAM=1`.
+
+La siguiente variante que merece un artefacto es un perfil ponderado del
+conversor: embedding y `down_proj` protegidos y compresión solo en familias que
+pasen aislamiento previo. Se compara sin cambios simultáneos de kernels y solo
+se promueve con cero fallos conversacionales, dos corpus sin regresión, pérdida
+de velocidad no superior al 1 % y ahorro real separado en archivo, RAM y VRAM.
 
 ## Fase 5 — HQ3.1K mixto, como última palanca
 
@@ -269,12 +277,19 @@ Regresión final mínima:
 
 ## Orden exacto para el siguiente turno
 
-1. Diseñar la tabla compartida HQ5.1K de la fase 4 como cambio aislado de
-   memoria, sin atribuirle velocidad.
-2. No implementar la fusión `ADD + RMSNorm siguiente`: el perfil ya demuestra
-   que no alcanza la barrera.
-3. No promover el perfil mixto HQ3.1K por rendimiento; su HNF queda disponible
-   únicamente para completar el A/B de calidad si interesa el ahorro de VRAM.
+1. Congelar como baseline el HNF actual con `HELIOS_EMBED_IN_RAM=1`, incluida
+   su salida conversacional y los 106,57 tok/s de referencia.
+2. Aislar en el conversor las familias de matrices con los dos corpus ya
+   definidos; embedding y `down_proj` permanecen protegidos.
+3. Emitir un único HNF ponderado, sin cambios simultáneos de kernels, y medir
+   calidad conversacional, corpus, velocidad, archivo, RAM y VRAM.
+4. Promoverlo solo si supera juntas las cuatro barreras. Si falla, conservar el
+   baseline actual y cerrar la campaña sin apilar otra variante.
+5. Reanudar visión únicamente cuando el baseline de texto quede congelado.
+
+No se reabre `ADD + RMSNorm siguiente`: el perfil demuestra que no alcanza la
+barrera. La tabla compartida HQ5.1K y el perfil mixto HQ3.1K permanecen
+experimentales y no son el siguiente candidato de producción.
 
 ## Resultado de la primera campaña — 2026-08-01
 
