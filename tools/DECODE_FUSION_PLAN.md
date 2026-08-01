@@ -184,6 +184,42 @@ del `lm_head`. No se mezclará con la primera prueba.
 - Dos corpus de logits y batería de chat sin regresión de producto.
 - Medidas separadas de archivo, RAM, VRAM, carga y tok/s.
 
+### Resultado 2026-08-01 — mecanismo válido, perfil no promovido
+
+Se añadió al conversor el selector opt-in `--shared-embedding-hq51`. Solo se
+acepta con `tie_word_embeddings=true`, rechaza checkpoints con un `lm_head`
+independiente, escribe `token_embedding.weight` en HQ5.1K y omite
+`lm_head.weight`. El grafo reutiliza la tabla automáticamente. El loader
+mantiene esa tabla en VRAM aunque se solicite `HELIOS_EMBED_IN_RAM=1`; PLE y
+los HNF antiguos con cabeza separada conservan el offload anterior.
+
+Qwen3-4B real, mismo perfil HQ5K compacto con atención HQ4.1K:
+
+| Medida | Producción | Compartido HQ5.1K |
+|---|---:|---:|
+| tensores | 399 | 398 |
+| tamaño HNF | 3.470.618.923 B | 2.692.707.354 B |
+| ahorro | — | 777.911.569 B / 741,87 MiB |
+| VRAM sin offload | 4.368 MiB | 3.626 MiB |
+| VRAM con offload | 3.626 MiB | 3.626 MiB |
+| pico RSS mediano | 1.890.044 KiB | 667.704 KiB |
+| carga mediana | 1,62 s | 1,11 s |
+| decode caliente | 103,52 / 103,35 tok/s | 103,56 / 103,43 tok/s |
+
+El HNF pasa el validador estricto con 0 errores y 0 avisos; Héctor pasa 14/14
+y el conversor 43/43. El banco contra FP32 no demuestra regresión: 1.755
+posiciones dan 88,09 % para producción y 87,35 % para el compartido; McNemar
+60 frente a 47, `p=0,246`. Los dos corpus por separado también quedan sin
+diferencia significativa (`p=0,556` y `p=0,311`).
+
+La barrera de producto, sin embargo, **no pasa**. En el A/B de una semilla por
+12 turnos, el candidato introduce una frase china, pierde parte del perfil de
+memoria y termina una respuesta en bucle. El detector automático marca script
+inesperado 0,083 frente a 0 y acierto semántico 0,50 frente a 1,00. Por tanto,
+el mecanismo y el ahorro quedan disponibles para investigación, pero el modo
+no sustituye al perfil de producción. La siguiente variante, si se autoriza,
+debe proteger mejor el embedding de entrada; no se baja a HQ4.1K.
+
 ## Fase 5 — HQ3.1K mixto, como última palanca
 
 Solo se construye tras confirmar el segundo corpus comunicado para:

@@ -420,6 +420,17 @@ struct TensorEntry {
     uint64_t size;                  // Size in bytes
 };
 
+namespace detail {
+
+// True only when an embedding tensor is used exclusively for row lookups and
+// is therefore safe to place in mapped host memory. A tied main embedding
+// without a separate lm_head is read in full during every decode step.
+bool embedding_is_lookup_only(
+    const TensorEntry& entry,
+    const std::vector<TensorEntry>& manifest);
+
+} // namespace detail
+
 // ============================================================================
 // BLOCK STATE (for tracking loaded blocks)
 // ============================================================================

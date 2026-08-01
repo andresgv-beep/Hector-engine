@@ -225,11 +225,18 @@ quantization of the output tensor"*.
 existe. `launch_embedding_hq51k` ya está en producción (Gemma 4 carga así su
 tabla PLE). No hace falta cuantizar nada nuevo ni escribir kernel.
 
-Que la tabla a 5 bits no cuesta calidad ya está medido: era el `embed5` del
-perfil de arriba, dentro del 88,1% indistinguible del actual.
+El banco teacher-forced indicaba que la tabla a 5 bits no tenía un coste
+medible: era el `embed5` del perfil de arriba. La implementación real confirma
+esa parte en 1.755 posiciones (88,09% actual frente a 87,35% compartido,
+McNemar `p=0,246`), pero **no supera el A/B conversacional**: en una semilla de
+12 turnos apareció texto chino, pérdida parcial de recuerdos y un bucle. Es
+otra demostración de que el banco permite decidir qué merece probarse, no qué
+entra en producción.
 
-Combinado con el reparto gate3/up3/down5: **3306 → ~2450 MB**, por debajo de los
-2560 MB del Q4_K_M de Ollama.
+El HNF real baja 741,87 MiB y el decode queda igual, pero
+`--shared-embedding-hq51` continúa experimental hasta encontrar una precisión
+de entrada que pase producto. No se combina con HQ3.1K mientras falle esa
+barrera.
 
 ### Ancho de banda: por qué llama.cpp va más rápido
 

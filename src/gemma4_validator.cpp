@@ -193,12 +193,19 @@ Gemma4ValidationReport validate_gemma4_tensors(
     }
     const uint32_t ple_width = static_cast<uint32_t>(ple_width64);
 
-    expect("text.token_embedding.weight", {vocab, hidden}, "fp16");
+    const bool shared_embedding =
+        model.get<bool>("tie_word_embeddings", false) &&
+        by_name.find("text.lm_head.weight") == by_name.end();
+
+    expect("text.token_embedding.weight", {vocab, hidden},
+           shared_embedding ? "hq51k" : "fp16");
     expect("text.ple.token_embedding.weight", {vocab, ple_width}, "hq51k");
     expect("text.ple.model_projection.weight", {ple_width, hidden}, "hq51k");
     expect("text.ple.projection_norm.weight", {ple_hidden}, "fp16");
     expect("text.final_norm.weight", {hidden}, "fp16");
-    expect("text.lm_head.weight", {vocab, hidden}, "hq51k");
+    if (!shared_embedding) {
+        expect("text.lm_head.weight", {vocab, hidden}, "hq51k");
+    }
 
     for (uint32_t layer_index = 0; layer_index < layers; ++layer_index) {
         const Gemma4LayerConfig& layer = gemma.layers[layer_index];
@@ -239,7 +246,8 @@ Gemma4ValidationReport validate_gemma4_tensors(
             add_error(report, "unexpected tensor: " + item.first);
         }
     }
-    const size_t expected_count = 6 + static_cast<size_t>(layers) * 17;
+    const size_t expected_count = (shared_embedding ? 5 : 6) +
+                                  static_cast<size_t>(layers) * 17;
     if (report.tensor_count != expected_count) {
         add_error(report, "tensor count mismatch: got " +
                           std::to_string(report.tensor_count) + ", expected " +

@@ -275,11 +275,11 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 - **Fase activa:** Fase 8 — rendimiento y robustez.
 - **Última fase completada:** Fase 7 — generación y tokenizer.
-- **Siguiente acción exacta:** ejecutar las fases 0-1 de
-  `tools/DECODE_FUSION_PLAN.md`: congelar la línea base Qwen3-4B y reconciliar
-  por nodo el coste de kernels pequeños antes de tocar el grafo. La calibración
-  de calidad Gemma 4 continúa abierta y se valida como regresión de cada
-  ganador; no se mezcla con el perfil Qwen.
+- **Siguiente acción exacta:** no promover el embedding compartido HQ5.1K pese
+  a su ahorro correcto de 741,87 MiB: falló la barrera conversacional. Decidir
+  antes de otro cambio si se prueba una representación de embedding de mayor
+  precisión o se conserva la duplicación de producción. La calibración de
+  calidad Gemma 4 continúa abierta y se valida como regresión de cada ganador.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
@@ -325,3 +325,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-08-01 | Fase 8 (HQ3.1K producto) | Formato correcto, perfiles Qwen3-4B rechazados por conversación | MLP completo corrompe idioma/memoria; `gate_proj` completo deja 1/50 intrusión china; capas 0-17 pasan 50 turnos núcleo pero empeoran bucles largos 2/4 frente a 1/4. HQ3.1K queda experimental; siguiente palanca separada: embedding HQ4.1K. Evidencia: `tools/HQ31K_IMPLEMENTACION.md` |
 | 2026-08-01 | Fase 8 (plan decode) | Prioridad corregida: fusiones antes de HQ3.1K | Se abre `tools/DECODE_FUSION_PLAN.md`: perfil por nodo, residual MLP + RMSNorm siguiente como primer candidato, embedding compartido HQ5.1K después y perfil mixto HQ3.1K al final. El dato de 1,67 ms se considera hipótesis hasta reproducirlo |
 | 2026-08-01 | Fase 8 (perfil decode) | La bolsa pequeña existe, pero las fusiones probadas no llegan al corte | Qwen3-4B: 15,013 ms/token a 55 W; 1,434 ms de kernels no-HQS y 0,379 ms de huecos. RMSNorm optimizado aporta ~0,8%, una warp empeora y ADD+RMS siguiente tiene techo <0,08 ms. Perfil mixto real gate/up3+down5 ahorra 106,87 MiB pero da 15,364 ms/token; no es vía de +5 tok/s. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
+| 2026-08-01 | Fase 8 (embedding compartido) | Contrato y ahorro correctos; candidato HQ5.1K rechazado por producto | HNF 741,87 MiB menor, VRAM sin offload 4.368→3.626 MiB, carga 1,62→1,11 s y decode ~103,5 tok/s sin cambio; 1.755 posiciones no muestran regresión significativa (`p=0,246`), pero el A/B de 12 turnos introduce escritura china, olvida parte del perfil y entra en un bucle. Se conserva opt-in, no se promueve. Evidencia: `tools/DECODE_FUSION_PLAN.md` |

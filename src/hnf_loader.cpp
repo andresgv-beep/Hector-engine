@@ -163,6 +163,40 @@ void parse_json_object_to_map(const char* json,
 
 namespace helios {
 
+namespace detail {
+
+namespace {
+
+bool ends_with(const std::string& value, const char* suffix) {
+    const size_t suffix_size = std::strlen(suffix);
+    return value.size() >= suffix_size &&
+           value.compare(value.size() - suffix_size, suffix_size, suffix) == 0;
+}
+
+} // namespace
+
+bool embedding_is_lookup_only(
+    const TensorEntry& entry,
+    const std::vector<TensorEntry>& manifest) {
+    if (!ends_with(entry.name, "token_embedding.weight")) {
+        return false;
+    }
+
+    // PLE is always a lookup table; it never participates in the output GEMV.
+    if (entry.name.find(".ple.") != std::string::npos) {
+        return true;
+    }
+
+    // The main table is lookup-only only while a distinct output projection
+    // exists in the same HNF block. Without it, GraphBuilder deliberately
+    // reuses the embedding as lm_head and the full tensor must stay in VRAM.
+    return std::any_of(manifest.begin(), manifest.end(), [&](const TensorEntry& tensor) {
+        return tensor.block == entry.block && ends_with(tensor.name, "lm_head.weight");
+    });
+}
+
+} // namespace detail
+
 // ============================================================================
 // CONSTRUCTOR / DESTRUCTOR
 // ============================================================================
@@ -883,8 +917,16 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     // Los pesos que SÍ se leen enteros cada token (capas, lm_head) jamás:
     // PCIe es 15× más lento que la VRAM.
     const char* off = getenv("HELIOS_EMBED_IN_RAM");
-    bool to_host = off && *off == '1' &&
-                   entry.name.find("token_embedding") != std::string::npos;
+    const bool embedding_candidate =
+        entry.name.find("token_embedding") != std::string::npos;
+    bool to_host = off && *off == '1' && embedding_candidate &&
+                   detail::embedding_is_lookup_only(entry, tensors_);
+    if (off && *off == '1' && embedding_candidate && !to_host &&
+        entry.name.find(".ple.") == std::string::npos) {
+        std::cout << "  [VRAM] " << entry.name
+                  << " compartido con lm_head; no se puede mapear a RAM"
+                  << std::endl;
+    }
 
     void* d_ptr = nullptr;
     void* allocation_ptr = nullptr;

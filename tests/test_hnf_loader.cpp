@@ -295,6 +295,31 @@ void test_manifest_parsing() {
     std::cout << "PASSED" << std::endl;
 }
 
+void test_embedding_offload_policy() {
+    std::cout << "Test: Shared embedding offload policy... ";
+
+    TensorEntry main_embedding{
+        "text.token_embedding.weight", "hq51k", "text_model", {100, 8}, 0, 400};
+    TensorEntry ple_embedding{
+        "text.ple.token_embedding.weight", "hq51k", "text_model", {100, 8}, 400, 400};
+    TensorEntry lm_head{
+        "text.lm_head.weight", "hq51k", "text_model", {100, 8}, 800, 400};
+
+    std::vector<TensorEntry> shared_manifest{main_embedding, ple_embedding};
+    assert(!detail::embedding_is_lookup_only(main_embedding, shared_manifest));
+    assert(detail::embedding_is_lookup_only(ple_embedding, shared_manifest));
+
+    std::vector<TensorEntry> legacy_manifest{main_embedding, ple_embedding, lm_head};
+    assert(detail::embedding_is_lookup_only(main_embedding, legacy_manifest));
+    assert(detail::embedding_is_lookup_only(ple_embedding, legacy_manifest));
+
+    TensorEntry unrelated{
+        "text.layer0.mlp.up.weight", "hq51k", "text_model", {8, 8}, 1200, 200};
+    assert(!detail::embedding_is_lookup_only(unrelated, legacy_manifest));
+
+    std::cout << "PASSED" << std::endl;
+}
+
 void test_execution_hints() {
     std::cout << "Test: Execution hints... ";
     
@@ -424,6 +449,7 @@ int main() {
     test_header_parsing();
     test_block_table();
     test_manifest_parsing();
+    test_embedding_offload_policy();
     test_execution_hints();
     test_tensor_size_validation();
     test_tensor_loading();

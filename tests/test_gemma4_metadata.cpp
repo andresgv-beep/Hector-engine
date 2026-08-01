@@ -4,6 +4,7 @@
 #include "hnf_loader.hpp"
 #include "gemma4_validator.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -246,7 +247,14 @@ void inspect_real_hnf(const std::string& path) {
             "real layer 4 partial rotary factor");
     require(config.layers[15].intermediate_size == 12288,
             "real layer 15 MLP width");
-    require(loader.tensors().size() == 601, "real HNF tensor count");
+    const bool shared_embedding =
+        loader.config().get<bool>("tie_word_embeddings", false) &&
+        std::none_of(loader.tensors().begin(), loader.tensors().end(),
+                     [](const TensorEntry& tensor) {
+                         return tensor.name == "text.lm_head.weight";
+                     });
+    require(loader.tensors().size() == (shared_embedding ? 600u : 601u),
+            "real HNF tensor count");
 
     const Gemma4ValidationReport validation =
         validate_gemma4_tensors(loader, 1, 512);
