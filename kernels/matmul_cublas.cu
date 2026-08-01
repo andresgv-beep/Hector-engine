@@ -14,6 +14,7 @@
 // The buffer is sized for the largest weight matrix encountered.
 
 #include "hqs_common.cuh"
+#include "cublas_context.hpp"
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
 #include <cstdio>
@@ -35,6 +36,15 @@ static void ensure_cublas() {
         // Enable tensor cores explicitly
         cublasSetMathMode(g_cublas_handle, CUBLAS_DEFAULT_MATH);
     }
+}
+
+cublasHandle_t cublas_handle_for_stream(cudaStream_t stream) {
+    ensure_cublas();
+    if (!g_cublas_handle ||
+        cublasSetStream(g_cublas_handle, stream) != CUBLAS_STATUS_SUCCESS) {
+        return nullptr;
+    }
+    return g_cublas_handle;
 }
 
 static void ensure_dequant_buffer(size_t num_elements, cudaStream_t stream) {

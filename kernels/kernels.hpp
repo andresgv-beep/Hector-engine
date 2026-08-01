@@ -69,6 +69,98 @@ void launch_matmul_fp16(
     cudaStream_t stream = nullptr
 );
 
+// Gemma 4 visual patch frontier. Pixel values are transformed from [0,1] to
+// [-1,1] before the FP16 cast; the second kernel adds learned X/Y positions
+// and leaves padding coordinates (-1,-1) unchanged.
+void launch_gemma4_patch_input_fp16(
+    const float* input,
+    half* output,
+    size_t elements,
+    cudaStream_t stream = nullptr
+);
+
+void launch_gemma4_add_xy_position_fp16(
+    half* hidden,
+    const half* table,
+    const int32_t* positions,
+    uint32_t patches,
+    uint32_t hidden_size,
+    uint32_t position_embedding_size,
+    cudaStream_t stream = nullptr
+);
+
+// Learned bounds used by every clippable visual linear. Bounds are FP16
+// scalar tensors from the HNF and may be applied in-place.
+void launch_clamp_tensor_bounds_fp16(
+    const half* input,
+    const half* minimum,
+    const half* maximum,
+    half* output,
+    size_t elements,
+    cudaStream_t stream = nullptr
+);
+
+// Per-head RMSNorm followed by optional Gemma 4 2-D RoPE and transpose from
+// token-major [patches, heads, head_dim] to head-major
+// [heads, patches, head_dim]. `weight == nullptr` selects the weightless V
+// norm; `apply_rope == false` skips RoPE.
+void launch_gemma4_vision_norm_rope_transpose_fp16(
+    const half* input,
+    const half* weight,
+    const int32_t* positions,
+    half* output_head_major,
+    uint32_t patches,
+    uint32_t heads,
+    uint32_t head_dim,
+    float eps,
+    float theta,
+    bool apply_rope,
+    cudaStream_t stream = nullptr
+);
+
+// Full bidirectional visual attention. Q/K/V and output are head-major.
+// Scores and probabilities are FP16, while softmax reductions are FP32.
+bool launch_gemma4_vision_attention_fp16(
+    const half* q_head_major,
+    const half* k_head_major,
+    const half* v_head_major,
+    const int32_t* positions,
+    half* scores,
+    half* output_head_major,
+    uint32_t patches,
+    uint32_t heads,
+    uint32_t head_dim,
+    float scale,
+    cudaStream_t stream = nullptr
+);
+
+void launch_gemma4_vision_head_to_token_fp16(
+    const half* input_head_major,
+    half* output_token_major,
+    uint32_t patches,
+    uint32_t heads,
+    uint32_t head_dim,
+    cudaStream_t stream = nullptr
+);
+
+// Spatial 3x3 average pooling. The FP32 result intentionally preserves the
+// post-FP16-pool sqrt(hidden) scale used by upstream before standardization.
+void launch_gemma4_vision_pool3x3_fp32(
+    const half* hidden,
+    float* pooled,
+    uint32_t patch_columns,
+    uint32_t patch_rows,
+    uint32_t hidden_size,
+    cudaStream_t stream = nullptr
+);
+
+void launch_fp32_to_fp16(
+    const float* input,
+    half* output,
+    size_t elements,
+    cudaStream_t stream = nullptr
+);
+
 // ============================================================================
 // ELEMENTWISE KERNELS
 // ============================================================================

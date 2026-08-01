@@ -272,7 +272,7 @@ alineado reproducen además los hashes raw de V0. La salida conserva 2.520 slots
 pero devuelve 280/256/252/266/280 soft tokens reales según la imagen. Evidencia
 en `tools/GEMMA4_VISION_V3.md`.
 
-### V4 — Encoder visual FP16
+### V4 — Encoder visual FP16 — CERRADA
 
 Implementar una ruta `Gemma4VisionRunner` separada del `GraphBuilder` de texto:
 
@@ -285,6 +285,12 @@ Implementar una ruta `Gemma4VisionRunner` separada del `GraphBuilder` de texto:
 
 **Pruebas:** comparar cada frontera de V0. La salida final debe conservar
 argmax/correlación y cumplir tolerancias FP16 acordadas, sin NaN.
+
+Resultado: `Gemma4VisionRunner` independiente ejecuta patch embedder, las 16
+capas, pooler y proyector. Las cinco fronteras cumplen las barreras de V0; la
+peor desviación es NRMSE 0,00807 en capa 15 frente al límite 0,030. Pesos y
+scratch/workspace medidos ocupan 337.641.472 y 318.767.104 bytes. Evidencia en
+`tools/GEMMA4_VISION_V4.md`.
 
 ### V5 — Puente multimodal al decoder
 
@@ -343,8 +349,11 @@ arriesgar el HNF de producción.
 - **Fase cerrada:** V3 — resize bicúbico AA RGB8, patchify HWC, posiciones XY,
   padding y soft tokens dinámicos verificados contra ATen 2.9.1 y V0. Evidencia
   en `tools/GEMMA4_VISION_V3.md`.
-- **Fase activa:** V4 — runner FP16 visual independiente y comparación por
-  fronteras contra el oráculo V0.
+- **Fase cerrada:** V4 — runner FP16 visual independiente verificado contra
+  las cinco fronteras del oráculo V0, tanto con HNF visual como combinado.
+  Evidencia en `tools/GEMMA4_VISION_V4.md`.
+- **Fase activa:** V5 — puente de soft tokens visuales al decoder y comparación
+  de logits/pasos greedy contra upstream.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -354,8 +363,8 @@ arriesgar el HNF de producción.
   `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
 - **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
-  Transformers `b3a36037`. Baseline ejecutado tras esta auditoría: Héctor
-  14/14 y conversor 39/39; el único cambio de producto pendiente es este plan.
-- **Siguiente acción exacta:** implementar primero patch projection + posición
-  aprendida del `Gemma4VisionRunner`, comparar esa frontera contra V0 y solo
-  entonces avanzar por las capas visuales.
+  Transformers `b3a36037`. Tras V4, Héctor pasa 17/17; el conversor permanece
+  sin cambios en esta fase.
+- **Siguiente acción exacta:** definir la secuencia canónica de IDs para una
+  imagen y separar las dos entradas de PLE antes de sustituir embeddings. El
+  primer test V5 será texto puro bit a bit, antes de medir logits multimodales.

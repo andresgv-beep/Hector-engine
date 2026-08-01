@@ -66,6 +66,7 @@ set(ENGINE_SOURCES
     src/gemma4_validator.cpp
     src/gemma4_vision_validator.cpp
     src/gemma4_vision_preprocess.cpp
+    src/gemma4_vision_runner.cpp
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
@@ -85,6 +86,7 @@ set(KERNEL_SOURCES
     kernels/attention.cu
     kernels/sampling.cu
     kernels/fused_add_rmsnorm.cu
+    kernels/gemma4_vision.cu
     kernels/register_kernels.cpp
 )
 
@@ -166,6 +168,10 @@ target_link_libraries(test_gemma4_vision_metadata PRIVATE helios-engine)
 add_executable(test_gemma4_vision_preprocess tests/test_gemma4_vision_preprocess.cpp)
 target_link_libraries(test_gemma4_vision_preprocess PRIVATE helios-engine)
 
+# Gemma 4 independent FP16 vision runner, verified one boundary at a time
+add_executable(test_gemma4_vision_runner tests/test_gemma4_vision_runner.cu)
+target_link_libraries(test_gemma4_vision_runner PRIVATE helios-engine)
+
 # Gemma 4 numerical primitives, isolated from graph construction
 add_executable(test_gemma4_primitives tests/test_gemma4_primitives.cu)
 target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
@@ -206,6 +212,7 @@ add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4VisionPreprocessTest COMMAND test_gemma4_vision_preprocess)
+add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
