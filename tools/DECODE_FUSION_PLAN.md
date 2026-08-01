@@ -344,3 +344,38 @@ En el régimen bajo comparable pasó de **15,013 a 15,364 ms/token**: −2,3 %.
 oscilaron alrededor del empate, nunca cerca de +5 tok/s. El perfil puede tener
 valor por memoria/calidad, pero **no es una optimización de velocidad** en el
 kernel actual.
+
+## Cierre reproducido tras retirar HQS legacy — 2026-08-01
+
+Los commits `81bb2a2` del conversor y `fc7e97f` de Héctor retiraron HQ4K/HQ5K
+sin alterar los HNF compactos ni sus comandos. Antes de decidir se verificaron
+de nuevo 39/39 pruebas del conversor y 14/14 de Héctor.
+
+Se alternaron los HNF de producción y ponderado con el prompt greedy de 256
+tokens, `HELIOS_EMBED_IN_RAM=1` y el mismo binario. Las pasadas se separaron
+por régimen de potencia; el calentamiento no entra en las medianas:
+
+| Régimen | Producción | Ponderado | Diferencia |
+|---|---:|---:|---:|
+| alto | 104,3195 tok/s (103,686–104,961; n=4) | 103,122 tok/s (102,935–103,770; n=6) | **−1,148 %** |
+| bajo | 71,9505 tok/s (71,9505–72,0113; n=3) | 67,0791 tok/s (66,7188–67,4394; n=2) | **−6,770 %** |
+
+El candidato ya implementa la asignación ponderada prevista: embedding FP16,
+`gate/up` HQ3.1K, `down` HQ5.1K y atención HQ4.1K. Ahorra 106,87 MiB, pero
+incumple el límite de pérdida de velocidad del 1 % en ambos regímenes. Según la
+regla de barrera conjunta, queda rechazado para producción sin gastar más GPU
+en la batería conversacional.
+
+### Decisión final
+
+- Producción queda congelada en `qwen3_4b_final.hnf` con
+  `HELIOS_EMBED_IN_RAM=1`.
+- Se conservan las fusiones de Héctor ya verificadas.
+- La tabla compartida HQ5.1K y HQ3.1K permanecen opt-in/experimentales.
+- No se apila otra variante: los perfiles menores ya fallaron conversación y
+  este perfil completo falla velocidad.
+- Los HNF experimentales se conservan como evidencia; no fue necesario limpiar
+  `output/`.
+
+**Estado de la campaña:** cerrada. El baseline de texto queda listo para iniciar
+la integración visual sin mover simultáneamente calidad o rendimiento.

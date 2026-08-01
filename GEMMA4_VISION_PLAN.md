@@ -248,14 +248,13 @@ sin arriesgar el HNF de producción.
 
 ## Estado actual
 
-- **Estado:** pausado antes de V0. No se ha iniciado código de visión.
-- **Motivo:** primero se cierra la línea de decode/calidad y se congela un HNF
-  de texto de producción. Así cualquier desviación multimodal se compara contra
-  un decoder estable y no contra una cuantización que todavía cambia.
+- **Fase activa:** V0 — oráculo y contrato reproducible. No se ha iniciado aún
+  código de visión.
+- **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
+  `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
+  `HELIOS_EMBED_IN_RAM=1`. La campaña de decode cerró el perfil ponderado por
+  perder 1,148 % en potencia alta y 6,770 % en potencia baja.
 - **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
   MiB BF16; todos los límites de clipping son finitos.
-- **Condición para reanudar:** perfil ponderado del conversor aceptado o
-  descartado mediante la barrera de producción; baseline, HNF y velocidad de
-  texto registrados.
-- **Primera acción al reanudar:** crear el oráculo mínimo y fijar las salidas de
+- **Siguiente acción exacta:** crear el oráculo mínimo y fijar las salidas de
   una imagen sintética antes de implementar `Gemma4VisionMapper`.

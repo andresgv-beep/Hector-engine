@@ -251,7 +251,7 @@ crecimiento inesperado de memoria.
 **Criterio de salida:** benchmark reproducible, sin regresiones conocidas en
 Qwen/Phi/DeepSeek y con objetivos de rendimiento anotados a partir de medidas.
 
-### Línea pendiente — ajuste ponderado del conversor
+### Línea cerrada — ajuste ponderado del conversor
 
 La solución de producción para el embedding sigue siendo el HNF actual con
 `HELIOS_EMBED_IN_RAM=1`: conserva calidad y velocidad y desplaza 741,87 MiB de
@@ -285,6 +285,13 @@ Todo candidato a producción debe superar simultáneamente:
 Si falla una sola barrera, el perfil permanece experimental aunque mejore las
 otras tres.
 
+El candidato que cumple ese reparto ya existía:
+`gate/up=HQ3.1K`, `down=HQ5.1K`, atención HQ4.1K y embedding FP16. Tras retirar
+los formatos legacy se repitió el A/B con el binario actual. Perdió 1,148 % en
+potencia alta y 6,770 % en potencia baja, por lo que incumple la barrera de
+velocidad y no se promueve. La línea queda cerrada con el HNF actual y
+`HELIOS_EMBED_IN_RAM=1` como producción.
+
 ### Fase 9 — Multimodal, aplazada
 
 Vision y audio se planificarán en un documento separado cuando el texto haya
@@ -307,14 +314,13 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 ## Estado actual
 
-- **Fase activa:** Fase 8 — rendimiento y robustez.
-- **Última fase completada:** Fase 7 — generación y tokenizer.
-- **Siguiente acción exacta:** conservar el HNF actual con
-  `HELIOS_EMBED_IN_RAM=1` como baseline de producción y diseñar en el conversor
-  un perfil ponderado por familia: embedding y `down_proj` protegidos; solo se
-  comprimen matrices tolerantes. La tabla compartida HQ5.1K y HQ3.1K continúan
-  experimentales. Cada HNF se valida sin cambios simultáneos de kernels. El
-  plan de visión queda pausado antes de V0 hasta congelar este baseline.
+- **Fase activa:** Fase 9 — multimodal, desarrollada por separado en
+  `GEMMA4_VISION_PLAN.md`.
+- **Última fase completada:** Fase 8 — rendimiento y robustez.
+- **Siguiente acción exacta:** iniciar V0 de visión con el HNF actual y
+  `HELIOS_EMBED_IN_RAM=1` congelados como baseline de texto. La tabla compartida
+  HQ5.1K, HQ3.1K y el perfil ponderado permanecen experimentales; no se cambia
+  cuantización ni kernels durante el oráculo visual.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
@@ -362,3 +368,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-08-01 | Fase 8 (perfil decode) | La bolsa pequeña existe, pero las fusiones probadas no llegan al corte | Qwen3-4B: 15,013 ms/token a 55 W; 1,434 ms de kernels no-HQS y 0,379 ms de huecos. RMSNorm optimizado aporta ~0,8%, una warp empeora y ADD+RMS siguiente tiene techo <0,08 ms. Perfil mixto real gate/up3+down5 ahorra 106,87 MiB pero da 15,364 ms/token; no es vía de +5 tok/s. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
 | 2026-08-01 | Fase 8 (embedding compartido) | Contrato y ahorro correctos; candidato HQ5.1K rechazado por producto | HNF 741,87 MiB menor, VRAM sin offload 4.368→3.626 MiB, carga 1,62→1,11 s y decode ~103,5 tok/s sin cambio; 1.755 posiciones no muestran regresión significativa (`p=0,246`), pero el A/B de 12 turnos introduce escritura china, olvida parte del perfil y entra en un bucle. Se conserva opt-in, no se promueve. Evidencia: `tools/DECODE_FUSION_PLAN.md` |
 | 2026-08-01 | Fase 8 (decisión de producción) | Offload actual conservado; siguiente palanca es cuantización ponderada | `HELIOS_EMBED_IN_RAM=1` mantiene calidad/velocidad y saca 741,87 MiB de VRAM; el duplicado sigue en archivo/RAM. Se descarta por ahora HQ5K compartido y se fija barrera conjunta: cero fallos conversacionales, dos corpus sin regresión, velocidad dentro del 1 % y ahorro de memoria/tamaño medido |
+| 2026-08-01 | Fase 8 (cierre) | Perfil ponderado rechazado por velocidad; baseline congelado | Tras retirar HQS legacy: conversor 39/39 y Héctor 14/14. A/B de 256 tokens: producción 104,3195 frente a 103,122 tok/s en régimen alto (−1,148 %) y 71,9505 frente a 67,0791 en bajo (−6,770 %). Se conserva `qwen3_4b_final.hnf` + offload y se abre V0 de visión |

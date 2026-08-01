@@ -22,7 +22,7 @@ constexpr int COMPACT_MAX_K_SHARED = 16384;
 
 // Batch (M>1): a partir de este M compensa dequant completo + cuBLAS GEMM
 // frente al bucle de M GEMVs (el dequant lee el peso UNA vez; el bucle M veces)
-constexpr int COMPACT_GEMM_THRESHOLD = 4;
+constexpr int COMPACT_GEMM_THRESHOLD = 9;  // medido: el dequant cuesta ~420us fijos, el GEMV 48,8us cada uno -> equilibrio en 9, no en 4
 
 void launch_matmul_hq41k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
 void launch_matmul_hq51k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
