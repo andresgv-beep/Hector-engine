@@ -208,6 +208,68 @@ una vez. La diferencia es que aquí el perfil es indistinguible de uno que *ya
 funciona en producción*, lo que da mucha mejor base de partida que el 83% del
 intento anterior. Pero decide `tools/hq31_ab.py`.
 
+### Embeddings duplicados en modelos con pesos atados (2026-08-01)
+
+Qwen3-4B y Gemma 4 tienen `tie_word_embeddings: True`: la tabla de embeddings y
+el `lm_head` **son el mismo tensor en origen**. El conversor lo guarda dos veces:
+
+    text.token_embedding.weight    742 MB   fp16    (solo lookup)
+    text.lm_head.weight            290 MB   hq51k   (solo matmul final)
+
+llama.cpp guarda uno y lo usa para ambas cosas — está comentado en
+`src/llama-quant.cpp`: *"for arches that share the same tensor between the token
+embeddings and the output, we quantize the token embeddings with the
+quantization of the output tensor"*.
+
+**Ahorro: los 742 MB enteros**, apuntando el lookup al tensor `hq51k` que ya
+existe. `launch_embedding_hq51k` ya está en producción (Gemma 4 carga así su
+tabla PLE). No hace falta cuantizar nada nuevo ni escribir kernel.
+
+Que la tabla a 5 bits no cuesta calidad ya está medido: era el `embed5` del
+perfil de arriba, dentro del 88,1% indistinguible del actual.
+
+Combinado con el reparto gate3/up3/down5: **3306 → ~2450 MB**, por debajo de los
+2560 MB del Q4_K_M de Ollama.
+
+### Ancho de banda: por qué llama.cpp va más rápido
+
+No es el kernel, son los bytes.
+
+| | bpw | metadatos por 256 pesos |
+|---|---:|---:|
+| Q4_K | 4,50 | 16 B (grupos de 32, escalas de 6 bits) |
+| HQ4.1K | 5,25 | 40 B (grupos de 8, escalas de 4 bits) |
+
+Medido en esta máquina: Ollama 116,8 tok/s leyendo ~2309 MB por token → **270
+GB/s**. HELIOS ~101 tok/s leyendo ~2564 MB → **259 GB/s**. Ambos rondan el
+**70% del techo de 371 GB/s**: la eficiencia de banda es prácticamente igual y
+la diferencia de velocidad es casi toda bytes leídos.
+
+Ese 14% extra de bytes es el precio de agrupar de 8 en 8 — exactamente lo que
+compra la ventaja de calidad. Es un intercambio deliberado, no un defecto.
+
+### Ajuste ponderado de llama.cpp: probado, no aporta
+
+`make_qkx2_quants` no coge los extremos: para cada asignación tentativa de
+índices resuelve por mínimos cuadrados **ponderados por magnitud** (`w = av_x +
+|x|`, ya sin matriz de importancia) la escala y el mínimo óptimos. Portado al
+simulador: MSE −0,6% en MLP y −3,3% en atención; end-to-end +1,0 punto con
+**p=0,36** en el corpus narrativo. No significativo.
+
+Explicación probable: ellos agrupan de 32 en 32, donde los extremos son mala
+referencia y ajustar compensa. Con grupos de 8, mínimo y máximo ya describen
+casi todo. **Nuestro grupo fino da estructuralmente lo que ellos consiguen
+algorítmicamente.**
+
+### Heurísticas suyas que no hemos probado
+
+- `use_more_bits(i_layer, n)`: más bits al primer octavo de capas, al último
+  octavo y a una de cada tres del medio.
+- `ffn_down` de las primeras capas con protección extra, con cicatriz incluida:
+  *"Guard against craziness in the first few ffn_down layers"*.
+
+Ambas son reparto, no formato — la misma familia que dio los 559 MB.
+
 ### Orden de trabajo
 
 Lo que queda, por orden de relación beneficio/riesgo:
