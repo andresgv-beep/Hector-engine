@@ -10,6 +10,8 @@
 #include <cmath>
 #include <vector>
 #include <random>
+#include <sys/mman.h>
+#include <unistd.h>
 
 using namespace helios;
 
@@ -170,6 +172,53 @@ void test_rmsnorm_kernel() {
         assert(std::abs(rms - 1.0f) < 0.2f);  // Allow some tolerance
     }
     
+    std::cout << "PASSED" << std::endl;
+}
+
+void test_embedding_pageable_mmap() {
+    std::cout << "Test: EMBEDDING from pageable mmap... ";
+
+    int device = 0;
+    int pageable = 0;
+    cudaGetDevice(&device);
+    cudaDeviceGetAttribute(&pageable, cudaDevAttrPageableMemoryAccess, device);
+    if (!pageable) {
+        std::cout << "SKIPPED (device has no pageableMemoryAccess)" << std::endl;
+        return;
+    }
+
+    constexpr int vocab = 4;
+    constexpr int dim = 8;
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0);
+    void* mapping = mmap(nullptr, size_t(page_size), PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mapping != MAP_FAILED);
+    half* table = static_cast<half*>(mapping);
+    for (int row = 0; row < vocab; ++row) {
+        for (int col = 0; col < dim; ++col) {
+            table[row * dim + col] = __float2half(float(row * 10 + col));
+        }
+    }
+
+    int32_t token = 2;
+    int32_t* d_token = nullptr;
+    half* d_output = nullptr;
+    cudaMalloc(&d_token, sizeof(token));
+    cudaMalloc(&d_output, dim * sizeof(half));
+    cudaMemcpy(d_token, &token, sizeof(token), cudaMemcpyHostToDevice);
+
+    kernels::launch_embedding_fp16(
+        d_token, table, d_output, 1, 1, vocab, dim, nullptr);
+    assert(cudaDeviceSynchronize() == cudaSuccess);
+    const auto output = to_host(d_output, dim);
+    for (int col = 0; col < dim; ++col) {
+        assert(output[col] == float(20 + col));
+    }
+
+    cudaFree(d_output);
+    cudaFree(d_token);
+    munmap(mapping, size_t(page_size));
     std::cout << "PASSED" << std::endl;
 }
 
@@ -348,6 +397,7 @@ int main() {
     test_add_kernel();
     test_silu_kernel();
     test_rmsnorm_kernel();
+    test_embedding_pageable_mmap();
     test_matmul_fp16_kernel();
     test_softmax_kernel();
     test_engine_forward_simulation();

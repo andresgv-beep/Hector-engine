@@ -15,6 +15,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // ============================================================================
 // MINIMAL JSON PARSER
@@ -421,7 +425,7 @@ bool HnfLoader::concat_tensors(Engine& engine, BlockState& state,
     uint32_t filas = 0;
     for (const auto& n : partes) {
         const TensorInfo* p = reg.get(n);
-        if (!p || p->shape.size() != 2 || p->host_mapped) return false;
+        if (!p || p->shape.size() != 2 || p->host_mapped || p->file_mapped) return false;
         if (!t.empty() && (p->dtype != t[0]->dtype || p->shape[1] != t[0]->shape[1])) return false;
         t.push_back(p);
         bytes += p->size_bytes;
@@ -482,15 +486,20 @@ bool HnfLoader::concat_tensors(Engine& engine, BlockState& state,
 // ============================================================================
 
 bool HnfLoader::load(const std::string& path, Engine& engine) {
+    close();
+    file_path_ = path;
     config_.params.clear();
     block_configs_.clear();
     gemma4_config_ = Gemma4Config{};
     has_gemma4_config_ = false;
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
-    if (!f.is_open()) return false;
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) return false;
-    if (!read_execution_hints(f)) return false;
+    if (!f.is_open()) { file_path_.clear(); return false; }
+    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+        file_path_.clear();
+        return false;
+    }
+    if (!read_execution_hints(f)) { file_path_.clear(); return false; }
     return load_tensors(f, engine);
 }
 
@@ -1021,21 +1030,6 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
         return false;
     }
     
-    uint64_t abs_offset = entry.offset;
-    f.clear();
-    f.seekg(static_cast<std::streamoff>(abs_offset), std::ios::beg);
-    if (!f.good()) {
-        std::cerr << "HnfLoader: Seek failed: " << entry.name << " (offset=" << abs_offset << ")" << std::endl;
-        return false;
-    }
-    
-    std::vector<uint8_t> host_data(entry.size);
-    f.read(reinterpret_cast<char*>(host_data.data()), entry.size);
-    if (!f) {
-        std::cerr << "HnfLoader: Read failed: " << entry.name << std::endl;
-        return false;
-    }
-    
     // ¿Este tensor vive en RAM? La tabla de embeddings ocupa 1.16 GB en un 8B
     // pero por token solo se lee UNA fila (8 KB). Tenerla en VRAM es malgastar
     // memoria carísima: en RAM anclada+mapeada la GPU lee esa fila por PCIe en
@@ -1043,11 +1037,14 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     // Los pesos que SÍ se leen enteros cada token (capas, lm_head) jamás:
     // PCIe es 15× más lento que la VRAM.
     const char* off = getenv("HELIOS_EMBED_IN_RAM");
+    const char* mmap_env = getenv("HELIOS_EMBED_MMAP");
+    const bool mmap_requested = mmap_env && *mmap_env == '1';
+    const bool offload_requested = (off && *off == '1') || mmap_requested;
     const bool embedding_candidate =
         entry.name.find("token_embedding") != std::string::npos;
-    bool to_host = off && *off == '1' && embedding_candidate &&
+    bool to_host = offload_requested && embedding_candidate &&
                    detail::embedding_is_lookup_only(entry, tensors_);
-    if (off && *off == '1' && embedding_candidate && !to_host &&
+    if (offload_requested && embedding_candidate && !to_host &&
         entry.name.find(".ple.") == std::string::npos) {
         std::cout << "  [VRAM] " << entry.name
                   << " compartido con lm_head; no se puede mapear a RAM"
@@ -1056,8 +1053,79 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
 
     void* d_ptr = nullptr;
     void* allocation_ptr = nullptr;
-    cudaError_t err;
-    if (to_host) {
+    size_t allocation_size = 0;
+    bool file_mapped = false;
+    cudaError_t err = cudaSuccess;
+
+    // Linux HMM permite que un kernel CUDA lea directamente un mmap pageable.
+    // El puntero es estable (compatible con CUDA Graph), pero solo se vuelven
+    // residentes las paginas de las filas realmente consultadas.
+    if (to_host && mmap_requested && !file_path_.empty()) {
+        int device = 0;
+        int pageable = 0;
+        if (cudaGetDevice(&device) == cudaSuccess) {
+            cudaDeviceGetAttribute(&pageable, cudaDevAttrPageableMemoryAccess,
+                                   device);
+        }
+        if (pageable) {
+            const long page_size = sysconf(_SC_PAGESIZE);
+            if (page_size > 0) {
+                const uint64_t abs_offset = entry.offset;
+                const uint64_t page_mask = uint64_t(page_size - 1);
+                const uint64_t map_offset = abs_offset & ~page_mask;
+                const size_t delta = size_t(abs_offset - map_offset);
+                if (entry.size <= std::numeric_limits<size_t>::max() - delta) {
+                    const size_t map_size = delta + entry.size;
+                    const int fd = ::open(file_path_.c_str(), O_RDONLY | O_CLOEXEC);
+                    if (fd >= 0) {
+                        struct stat st {};
+                        const bool in_bounds = fstat(fd, &st) == 0 && st.st_size >= 0 &&
+                            map_offset <= uint64_t(st.st_size) &&
+                            map_size <= uint64_t(st.st_size) - map_offset;
+                        if (in_bounds) {
+                            void* base = mmap(nullptr, map_size, PROT_READ,
+                                              MAP_PRIVATE, fd, off_t(map_offset));
+                            if (base != MAP_FAILED) {
+                                madvise(base, map_size, MADV_RANDOM);
+                                allocation_ptr = base;
+                                allocation_size = map_size;
+                                d_ptr = static_cast<uint8_t*>(base) + delta;
+                                file_mapped = true;
+                                std::cout << "  [MMAP] " << entry.name << " ("
+                                          << entry.size / (1024 * 1024)
+                                          << " MB, paginas bajo demanda)" << std::endl;
+                            }
+                        }
+                        ::close(fd);
+                    }
+                }
+            }
+        }
+        if (!file_mapped) {
+            std::cerr << "HnfLoader: mmap pageable no disponible para "
+                      << entry.name << " — usando RAM mapeada" << std::endl;
+        }
+    }
+
+    std::vector<uint8_t> host_data;
+    if (!file_mapped) {
+        const uint64_t abs_offset = entry.offset;
+        f.clear();
+        f.seekg(static_cast<std::streamoff>(abs_offset), std::ios::beg);
+        if (!f.good()) {
+            std::cerr << "HnfLoader: Seek failed: " << entry.name
+                      << " (offset=" << abs_offset << ")" << std::endl;
+            return false;
+        }
+        host_data.resize(entry.size);
+        f.read(reinterpret_cast<char*>(host_data.data()), entry.size);
+        if (!f) {
+            std::cerr << "HnfLoader: Read failed: " << entry.name << std::endl;
+            return false;
+        }
+    }
+
+    if (to_host && !file_mapped) {
         void* h_ptr = nullptr;
         err = cudaHostAlloc(&h_ptr, entry.size, cudaHostAllocMapped);
         if (err == cudaSuccess) {
@@ -1102,8 +1170,10 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     info.dtype = dtype;
     info.size_bytes = entry.size;
     info.owns_memory = true;
-    info.host_mapped = to_host;
+    info.host_mapped = to_host && !file_mapped;
+    info.file_mapped = file_mapped;
     info.allocation_ptr = allocation_ptr;
+    info.allocation_size = allocation_size;
     
     registry.register_tensor(entry.name, info);
     return true;

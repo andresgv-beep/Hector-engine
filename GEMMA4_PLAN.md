@@ -261,6 +261,13 @@ La solución de producción para el embedding sigue siendo el HNF actual con
 VRAM a RAM. Esos bytes continúan presentes en el archivo y en la memoria host;
 ese coste se acepta hasta encontrar un perfil que pase la barrera de producto.
 
+**Resolución posterior (2026-08-01):** `HELIOS_EMBED_MMAP=1` mantiene los bytes
+FP16 exactos en el HNF pero los expone a CUDA mediante `mmap` pageable. En
+Qwen3-4B elimina 754.323 KiB de RSS estable con −0,37 % de decode; en Gemma 4
+mapea también el PLE y baja el pico RSS de 4.203.816 a 700.944 KiB. El prompt
+de 953 tokens conserva salida exacta y ejercita la ventana >512. Se mantiene
+opt-in y no cambia el significado de `HELIOS_EMBED_IN_RAM=1`.
+
 La tabla compartida HQ5.1K queda únicamente como experimento opt-in. Su ahorro
 de archivo y RAM es real, pero la batería conversacional encontró escritura
 china, pérdida parcial de recuerdos y un bucle. Tampoco queda programada una
@@ -373,3 +380,4 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 | 2026-08-01 | Fase 8 (decisión de producción) | Offload actual conservado; siguiente palanca es cuantización ponderada | `HELIOS_EMBED_IN_RAM=1` mantiene calidad/velocidad y saca 741,87 MiB de VRAM; el duplicado sigue en archivo/RAM. Se descarta por ahora HQ5K compartido y se fija barrera conjunta: cero fallos conversacionales, dos corpus sin regresión, velocidad dentro del 1 % y ahorro de memoria/tamaño medido |
 | 2026-08-01 | Fase 8 (cierre) | Perfil ponderado rechazado por velocidad; baseline congelado | Tras retirar HQS legacy: conversor 39/39 y Héctor 14/14. A/B de 256 tokens: producción 104,3195 frente a 103,122 tok/s en régimen alto (−1,148 %) y 71,9505 frente a 67,0791 en bajo (−6,770 %). Se conserva `qwen3_4b_final.hnf` + offload y se abre V0 de visión |
 | 2026-08-01 | Recertificación HNF | Layout determinista y SHA reproducible | La iteración previa del `HashMap` aleatorizaba offsets sin alterar pesos. Dos conversiones independientes de Gemma son idénticas byte a byte: 4.250.889.522 bytes, SHA256 `b67df381…b79660`; validador 0/0 y generación greedy correcta. El SHA `c1e9a31f…` queda como layout legacy |
+| 2026-08-01 | Fase 8 (mmap embedding) | Embeddings FP16 exactos bajo demanda; producción opt-in | `HELIOS_EMBED_MMAP=1`: Qwen4 RSS estable 1.132.080→377.757 KiB, VRAM igual y decode −0,37 %; Qwen8 salida exacta y −0,89 % alto; Gemma corto 4.203.816→700.944 KiB de pico y 5,81→1,15 s. Prompt 953 tokens exacto. Suite 14/14 |

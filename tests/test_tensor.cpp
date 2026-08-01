@@ -6,6 +6,9 @@
 #include "dtype.hpp"
 #include <iostream>
 #include <cassert>
+#include <cerrno>
+#include <sys/mman.h>
+#include <unistd.h>
 
 using namespace helios;
 
@@ -177,6 +180,36 @@ void test_remove_and_clear() {
     std::cout << "PASSED" << std::endl;
 }
 
+void test_file_mapped_release() {
+    std::cout << "Test: File-mapped tensor release... ";
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    assert(page_size > 0);
+    void* mapping = mmap(nullptr, size_t(page_size), PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    assert(mapping != MAP_FAILED);
+
+    TensorRegistry registry;
+    TensorInfo info;
+    info.ptr = mapping;
+    info.shape = {uint32_t(page_size / sizeof(uint16_t))};
+    info.dtype = dtype::FP16();
+    info.size_bytes = size_t(page_size);
+    info.owns_memory = true;
+    info.file_mapped = true;
+    info.allocation_ptr = mapping;
+    info.allocation_size = size_t(page_size);
+    registry.register_tensor("mapped", info);
+    registry.remove("mapped");
+
+    unsigned char resident = 0;
+    errno = 0;
+    assert(mincore(mapping, size_t(page_size), &resident) == -1);
+    assert(errno == ENOMEM);
+
+    std::cout << "PASSED" << std::endl;
+}
+
 void test_print_summary() {
     std::cout << "Test: Print summary... " << std::endl;
     
@@ -220,6 +253,7 @@ int main() {
     test_allocate_and_register();
     test_quantized_tensor();
     test_remove_and_clear();
+    test_file_mapped_release();
     test_print_summary();
     
     std::cout << std::endl;

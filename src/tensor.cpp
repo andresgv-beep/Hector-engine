@@ -6,6 +6,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <algorithm>
+#include <sys/mman.h>
 
 namespace helios {
 
@@ -15,10 +16,12 @@ void release_tensor_memory(TensorInfo& info) {
     if (!info.owns_memory) return;
     void* allocation = info.allocation_ptr ? info.allocation_ptr : info.ptr;
     if (!allocation) return;
-    if (info.host_mapped) cudaFreeHost(allocation);
+    if (info.file_mapped) munmap(allocation, info.allocation_size);
+    else if (info.host_mapped) cudaFreeHost(allocation);
     else cudaFree(allocation);
     info.ptr = nullptr;
     info.allocation_ptr = nullptr;
+    info.allocation_size = 0;
 }
 
 } // namespace

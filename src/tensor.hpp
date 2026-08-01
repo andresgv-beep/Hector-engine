@@ -32,7 +32,9 @@ struct TensorInfo {
     size_t size_bytes = 0;      // Total size in bytes
     bool owns_memory = false;   // If true, registry releases allocation_ptr/ptr
     bool host_mapped = false;   // Owned allocation came from cudaHostAlloc
+    bool file_mapped = false;   // Owned allocation came from mmap(MAP_PRIVATE)
     void* allocation_ptr = nullptr; // Original host/device allocation handle
+    size_t allocation_size = 0; // Mapping length when file_mapped=true
     
     // Computed properties
     size_t numel() const {

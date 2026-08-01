@@ -450,3 +450,62 @@ El código experimental de normalización se retiró. El motor conserva el kerne
 de producción y las fusiones siguen opt-in. Resultado: no aparece otra mejora
 de decode que cumpla simultáneamente salida exacta y ganancia mínima; el
 baseline de texto permanece congelado para continuar con visión.
+
+## Embedding file-backed con HMM — 2026-08-01
+
+`HELIOS_EMBED_IN_RAM=1` eliminaba el consumo de VRAM, pero cargaba cada tabla
+completa dos veces durante el arranque (`vector` temporal + `cudaHostAlloc`) y
+dejaba una copia pinned residente. La RTX 5070 informa
+`cudaDevAttrPageableMemoryAccess=1` y una prueba CUDA aislada confirmó que el
+kernel puede leer directamente una región `mmap` normal.
+
+Se añadió `HELIOS_EMBED_MMAP=1` como modo opt-in:
+
+- mapea en solo lectura la región exacta del HNF;
+- no materializa el `vector` temporal ni reserva `cudaHostAlloc`;
+- conserva el puntero durante toda la vida del tensor, por lo que CUDA Graph y
+  los índices dinámicos no cambian;
+- pagina únicamente las filas consultadas;
+- libera con `munmap` y cae al offload pinned anterior si la GPU no anuncia
+  acceso pageable;
+- no altera el HNF ni su tamaño.
+
+### Qwen3-4B
+
+| Medida | RAM pinned | HNF mmap |
+|---|---:|---:|
+| RSS estable durante generación | 1.132.080 KiB | 377.757 KiB |
+| pico RSS de proceso | 1.873.956 KiB | 667.292 KiB |
+| VRAM | 3.444 MiB | 3.444 MiB |
+| decode alto, mediana n=5 | 104,447 tok/s | 104,065 tok/s |
+
+El ahorro residente es 754.323 KiB y la pérdida de decode **0,37 %**. Las cinco
+ejecuciones de 256 tokens conservaron el SHA de salida
+`6075fcf1998c5203…`.
+
+### Qwen3-8B
+
+- pico RSS: 2.785.396 a 861.476 KiB;
+- tiempo total de la prueba de 256 tokens: 11,94 a 8,31 s;
+- salida exacta (`34b1214f071f99ab…`);
+- régimen alto: 60,235 frente a 59,702 tok/s, **−0,89 %**.
+
+### Gemma 4 E2B-it
+
+Se mapean tanto `text.token_embedding.weight` (768 MB) como
+`text.ple.token_embedding.weight` (1.750 MB). En el prompt corto:
+
+- pico RSS: 4.203.816 a 700.944 KiB;
+- tiempo completo: 5,81 a 1,15 s;
+- misma respuesta exacta.
+
+El caso largo usa 953 tokens y cruza la ventana local de 512. También produce
+la misma salida. El primer prefill paga las faltas de página de las filas
+nuevas: 309,714 a 323,647 ms (+13,933 ms); a cambio, el pico RSS baja de
+4.764.240 a 701.240 KiB. El decode quedó 94,861 frente a 93,858 tok/s en esa
+pareja aislada.
+
+La suite completa pasa 14/14 e incluye pruebas de lectura CUDA desde mmap
+pageable y liberación del mapping. El modo se promueve como alternativa Linux
+de producción mediante `HELIOS_EMBED_MMAP=1`; el offload pinned antiguo sigue
+disponible y no cambia de significado.
