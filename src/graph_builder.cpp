@@ -1124,11 +1124,26 @@ void GraphBuilder::build_attention_block(
     if (arch.use_qk_norm && arch.rope_type != RoPEType::NONE) {
         uint32_t rope_offset = cache ? cache->cache_position : position_offset;
         bool device_pos = (cache != nullptr) && (seq_len == 1);
+        // Si ademas escribe el cache, el KV_CACHE_UPDATE de esta capa sobra.
+        // Solo en decode: en prefill el cache debe escribirse antes de la
+        // atencion sobre toda la historia, y ese orden lo fija el branch de
+        // abajo.
+        const bool fuse_kv = fuse_kv_into_rope_ && cache && seq_len == 1;
         auto id = OpTypeRegistry::instance().get_id("qk_norm_rope");
         auto& c = cb.add_op(id, S("q"));
-        c.in({S("q"), S("k"),
-              W(arch, layer_idx, "attn.q_norm.weight"),
-              W(arch, layer_idx, "attn.k_norm.weight")});
+        if (fuse_kv) {
+            c.in({S("q"), S("k"),
+                  W(arch, layer_idx, "attn.q_norm.weight"),
+                  W(arch, layer_idx, "attn.k_norm.weight"),
+                  S("v"),
+                  cache->kv_prefix + ".layer" + std::to_string(layer_idx) + ".k",
+                  cache->kv_prefix + ".layer" + std::to_string(layer_idx) + ".v"});
+            c.set("max_seq_len", cache->max_cache_len);
+        } else {
+            c.in({S("q"), S("k"),
+                  W(arch, layer_idx, "attn.q_norm.weight"),
+                  W(arch, layer_idx, "attn.k_norm.weight")});
+        }
         c.set("num_heads", H);
         c.set("num_kv_heads", KVH);
         c.set("dim", HD);
@@ -1222,9 +1237,13 @@ void GraphBuilder::build_attention_block(
             // ============================================================
             // device_pos: position/total_seq se leen de device en ejecución
             // (los params horneados son solo fallback sin CUDA Graph)
-            cb.add_kv_cache_update(k_cache, v_cache, S("k"), S("v"),
-                                   cache->cache_position, cache->max_cache_len, KVH, HD, 1);
-            cb.commands().back().set("device_pos", (uint32_t)1);
+            const bool ya_escrito = fuse_kv_into_rope_ && arch.use_qk_norm &&
+                                    arch.rope_type != RoPEType::NONE;
+            if (!ya_escrito) {
+                cb.add_kv_cache_update(k_cache, v_cache, S("k"), S("v"),
+                                       cache->cache_position, cache->max_cache_len, KVH, HD, 1);
+                cb.commands().back().set("device_pos", (uint32_t)1);
+            }
 
             uint32_t total_seq = cache->cache_position + seq_len;
             cb.add_attention_cached(S("attn_out"), S("q"), k_cache, v_cache,

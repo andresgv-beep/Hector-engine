@@ -341,6 +341,13 @@ public:
     // OUTPUT ACCESS
     // ========================================================================
     
+    // HELIOS_FUSE_KV_ROPE=1: qk_norm_rope escribe tambien el KV cache y se
+    // ahorra un lanzamiento por capa. Medido en 151 us/token sobre Qwen3-4B.
+    bool fuse_kv_into_rope_ = [] {
+        const char* e = getenv("HELIOS_FUSE_KV_ROPE");
+        return e && e[0] == '1';
+    }();
+
     TensorInfo* get_logits(Engine& engine) const;
     TensorInfo* get_hidden(Engine& engine) const;
     

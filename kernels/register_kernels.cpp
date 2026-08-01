@@ -756,7 +756,28 @@ void register_attention_kernels(Engine& engine) {
             rotary_dim = (rotary_dim / 2) * 2;
             if (rotary_dim <= 0) rotary_dim = HD;
 
-            if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            const bool dev_pos = cmd.get<uint32_t>("device_pos", 0) &&
+                                 engine.has_device_cache_pos();
+
+            // Variante fusionada: si el comando trae v/k_cache/v_cache como
+            // entradas extra, esta op escribe tambien el cache y el grafo se
+            // ahorra el KV_CACHE_UPDATE de esa capa.
+            if (cmd.inputs.size() >= 7) {
+                TensorInfo* v  = ctx.in(4);
+                TensorInfo* kc = ctx.in(5);
+                TensorInfo* vc = ctx.in(6);
+                if (!v || !kc || !vc) {
+                    throw std::runtime_error("QK_NORM_ROPE: missing kv cache tensors");
+                }
+                launch_qk_norm_rope_kv_fp16(
+                    as_fp16(q), as_fp16(k), as_fp16_const(v),
+                    as_fp16_const(qw), as_fp16_const(kw),
+                    as_fp16(kc), as_fp16(vc),
+                    1, seq_len, H, KVH, HD, rotary_dim,
+                    offset, dev_pos ? engine.device_cache_pos() : nullptr,
+                    (int)cmd.get<uint32_t>("max_seq_len", 4096),
+                    eps, theta, scaling_factor, ctx.stream);
+            } else if (dev_pos) {
                 launch_qk_norm_rope_fp16_dp(
                     as_fp16(q), as_fp16(k), as_fp16_const(qw), as_fp16_const(kw),
                     1, seq_len, H, KVH, HD, rotary_dim,
