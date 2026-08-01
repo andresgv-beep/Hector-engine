@@ -25,7 +25,8 @@ de imagen dentro del motor.
 
 1. Solo una fase activa y una prueba de salida por fase.
 2. La ruta de texto puro debe quedar idéntica y pasar sus regresiones.
-3. La referencia inicial es FP16/BF16; no se cuantiza visión para ocultar errores.
+3. El oráculo promueve los pesos BF16 exactos a FP32; el primer HNF visual usa
+   FP16 y se compara contra esa referencia. No se cuantiza visión para ocultar errores.
 4. No se reutiliza el mapper CLIP: Gemma 4 tiene otro contrato.
 5. Un campo o una operación no soportados deben producir error explícito.
 6. Los artefactos grandes y los volcados de activaciones no se versionan.
@@ -171,7 +172,7 @@ Huecos concretos:
 
 ## Hoja de ruta
 
-### V0 — Oráculo y contrato reproducible
+### V0 — Oráculo y contrato reproducible — CERRADA
 
 Crear una herramienta de referencia que cargue únicamente torre visual y
 proyector desde el checkpoint. La fixture principal será un RGB sintético
@@ -189,10 +190,17 @@ formas, dtype, mínimos/máximos, media, RMS, SHA256 de cada volcado y toleranci
 Los binarios de activaciones vivirán fuera de Git; solo se versionan fixture,
 script e informe pequeño.
 
+La ejecución dorada será FP32 en CPU: los valores BF16 del checkpoint se
+representan exactamente al promoverlos y el resultado no depende de kernels de
+una GPU concreta. El futuro runner FP16 se aceptará por error numérico frente a
+este oráculo, nunca por igualdad bit a bit.
+
 **Salida:** artefacto reproducible con formas, hashes y tolerancias fijadas antes
 de implementar CUDA.
 
-### V1 — Mapper visual y HNF
+Resultado y hashes: `tools/GEMMA4_VISION_V0.md`.
+
+### V1 — Mapper visual y HNF — CERRADA
 
 - Añadir selección de mapper por arquitectura **y modalidad**.
 - Implementar `Gemma4VisionMapper` para los 659 tensores.
@@ -224,6 +232,9 @@ correctos tanto para texto+visión como para visión sola; rechazo del contrato
 incompleto. Ejecutar además las 39 pruebas actuales del conversor sin cambios.
 
 **Salida:** HNF texto+visión inspeccionable, todavía sin ejecutar visión.
+
+Resultado: mapper 659/659, HNF visual FP16 reproducible y HNF combinado
+texto+visión válidos. Evidencia en `../helios_convert_v9.1/GEMMA4_VISION_V1.md`.
 
 ### V2 — Loader y validador de visión
 
@@ -304,8 +315,17 @@ arriesgar el HNF de producción.
 
 ## Estado actual
 
-- **Fase activa:** V0 — oráculo y contrato reproducible. No se ha iniciado aún
-  código de visión.
+- **Fase cerrada:** V0 — dos ejecuciones CPU/FP32 produjeron ocho artefactos
+  idénticos byte a byte. El oráculo cargó 659/659 tensores y terminó con
+  `[280,1536]` sin valores no finitos. Evidencia en
+  `tools/GEMMA4_VISION_V0.md`.
+- **Fase cerrada:** V1 — mapper 659/659, modalidad separada y extensión binaria
+  `GM4V`. El HNF solo visual de 337.212.903 bytes se reprodujo byte a byte
+  (`5dde9dbc…4edb057`); el combinado texto+visión contiene 1260 tensores y
+  pasa el validador estricto. Evidencia en
+  `../helios_convert_v9.1/GEMMA4_VISION_V1.md`.
+- **Fase activa:** V2 — loader y validador visual de Héctor. No se ha iniciado
+  aún el forward ni ningún kernel visual.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -317,5 +337,5 @@ arriesgar el HNF de producción.
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
   Transformers `b3a36037`. Baseline ejecutado tras esta auditoría: Héctor
   14/14 y conversor 39/39; el único cambio de producto pendiente es este plan.
-- **Siguiente acción exacta:** crear el oráculo mínimo y fijar las salidas de
-  una imagen sintética antes de implementar `Gemma4VisionMapper`.
+- **Siguiente acción exacta:** hacer que Héctor reconozca `encoder_type=4`,
+  valide `GM4V` y cargue/descargue los 659 tensores FP16 sin ejecutar la torre.
