@@ -10,6 +10,9 @@
 #include "hqs_common.cuh"
 #include <cuda_fp16.h>
 #include <unordered_map>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
 
 namespace helios {
 namespace kernels {
@@ -319,6 +322,15 @@ void launch_matmul_hq41k(
             if (ms_b < best_ms) { best = 1; best_ms = ms_b; }
             if (ms_c < best_ms) { best = 2; best_ms = ms_c; }
             s_tune_cache_hq41k[key] = best;
+            if (getenv("HELIOS_TUNE_DEBUG")) {
+                // ¿Gana algo el autoajuste? Si A/B/C quedan a menos de un 2%,
+                // no compensa el coste del primer run.
+                float peor = fmaxf(ms_a, fmaxf(ms_b, ms_c));
+                fprintf(stderr, "[tune] hq41k K=%d N=%d  A=%.1fus B=%.1fus C=%.1fus"
+                        "  -> %c  (mejor vs peor: %.1f%%)\n",
+                        K, N, ms_a*1000, ms_b*1000, ms_c*1000, 'A'+best,
+                        100.0f*(peor/best_ms - 1.0f));
+            }
             it = s_tune_cache_hq41k.find(key);
         }
         switch (it->second) {
