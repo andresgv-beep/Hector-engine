@@ -253,7 +253,7 @@ Una sola reserva contigua deja el consumo medido en 337.641.472 bytes y evita
 136.314.880 bytes de overhead frente a reservar los 659 tensores por separado.
 Evidencia en `tools/GEMMA4_VISION_V2.md`.
 
-### V3 — Preprocesado exacto sin dependencia de UI
+### V3 — Preprocesado exacto sin dependencia de UI — CERRADA
 
 - Implementar primero sobre un buffer RGB ya decodificado.
 - Resize bicúbico con relación de aspecto y alineación a 48 píxeles.
@@ -265,6 +265,12 @@ Evidencia en `tools/GEMMA4_VISION_V2.md`.
 
 **Pruebas:** coincidencia exacta de tamaños/coordenadas y tolerancia numérica
 del resize/patchify contra el oráculo en varias relaciones de aspecto.
+
+Resultado: cinco relaciones de aspecto, incluido el caso extremo, coinciden
+byte a byte con `aten._upsample_bicubic2d_aa`; patches y posiciones del caso
+alineado reproducen además los hashes raw de V0. La salida conserva 2.520 slots
+pero devuelve 280/256/252/266/280 soft tokens reales según la imagen. Evidencia
+en `tools/GEMMA4_VISION_V3.md`.
 
 ### V4 — Encoder visual FP16
 
@@ -334,8 +340,11 @@ arriesgar el HNF de producción.
 - **Fase cerrada:** V2 — loader estricto `GM4V`, inventario 659/659, clamps
   448/448 y carga/descarga independiente verificados sobre los HNF visual y
   combinado. Evidencia en `tools/GEMMA4_VISION_V2.md`.
-- **Fase activa:** V3 — preprocesado exacto desde buffer RGB, todavía sin
-  forward ni kernels visuales.
+- **Fase cerrada:** V3 — resize bicúbico AA RGB8, patchify HWC, posiciones XY,
+  padding y soft tokens dinámicos verificados contra ATen 2.9.1 y V0. Evidencia
+  en `tools/GEMMA4_VISION_V3.md`.
+- **Fase activa:** V4 — runner FP16 visual independiente y comparación por
+  fronteras contra el oráculo V0.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -347,6 +356,6 @@ arriesgar el HNF de producción.
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
   Transformers `b3a36037`. Baseline ejecutado tras esta auditoría: Héctor
   14/14 y conversor 39/39; el único cambio de producto pendiente es este plan.
-- **Siguiente acción exacta:** implementar resize/patchify/coordenadas sobre un
-  buffer RGB y compararlos contra las fixtures V0 en varias relaciones de
-  aspecto, sin elegir aún una librería PNG/JPEG.
+- **Siguiente acción exacta:** implementar primero patch projection + posición
+  aprendida del `Gemma4VisionRunner`, comparar esa frontera contra V0 y solo
+  entonces avanzar por las capas visuales.
