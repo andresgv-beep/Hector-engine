@@ -28,9 +28,50 @@ def quant_dequant(w, q_max, group_size=8, scale_bits=4, super_size=SUPER):
     ngroups = super_size // group_size
     g = blocks.reshape(-1, ngroups, group_size)
 
-    # 1) parametros por grupo, redondeados a fp16 como hace common.rs
-    gmin = f16(g.min(axis=2))
-    gscale = np.maximum(f16(np.maximum(g.max(axis=2) - g.min(axis=2), EPS)), EPS)
+    if os.environ.get('HQS_WLSQ') == '1':
+        # Ajuste por minimos cuadrados PONDERADO POR MAGNITUD, portado de
+        # make_qkx2_quants de llama.cpp (ggml/src/ggml-quants.c).
+        #
+        # Nuestro compute_group_params coge los extremos: scale = max - min.
+        # Eso le da el mismo voto a un peso enorme que a uno insignificante.
+        # llama.cpp pondera cada elemento por su magnitud —w = av_x + |x|,
+        # y eso YA SIN matriz de importancia— y para cada asignacion tentativa
+        # de indices resuelve en forma cerrada la (escala, minimo) optimos.
+        av = np.sqrt(2.0 * (g * g).sum(axis=2) / g.shape[2])[:, :, None]
+        w = av + np.abs(g)
+        gmax = g.max(axis=2, keepdims=True)
+        gmn = np.minimum(g.min(axis=2, keepdims=True), 0.0)   # if (min > 0) min = 0
+        rng = np.maximum(gmax - gmn, EPS)
+        sw = w.sum(axis=2, keepdims=True)
+        sx = (w * g).sum(axis=2, keepdims=True)
+        best_s = rng / q_max
+        best_m = gmn
+        best_e = np.full(gmn.shape, np.inf)
+        RMIN, RDELTA, NSTEP = -0.5, 0.1, 15
+        for it in range(NSTEP + 2):
+            isc = (q_max if it == 0 else (RMIN + RDELTA * (it - 1) + q_max)) / rng
+            L = np.clip(np.round(isc * (g - gmn)), 0, q_max)
+            sl = (w * L).sum(axis=2, keepdims=True)
+            sl2 = (w * L * L).sum(axis=2, keepdims=True)
+            sxl = (w * L * g).sum(axis=2, keepdims=True)
+            D = sw * sl2 - sl * sl
+            ok = D > 0
+            ts = np.where(ok, (sw * sxl - sx * sl) / np.where(ok, D, 1.0), rng / q_max)
+            tm = np.where(ok, (sl2 * sx - sl * sxl) / np.where(ok, D, 1.0), gmn)
+            tm = np.minimum(tm, 0.0)
+            ts = np.maximum(ts, EPS)
+            err = (w * (ts * L + tm - g) ** 2).sum(axis=2, keepdims=True)
+            better = err < best_e
+            best_e = np.where(better, err, best_e)
+            best_s = np.where(better, ts, best_s)
+            best_m = np.where(better, tm, best_m)
+        # el resto del pipeline espera (min, rango) en fp16
+        gmin = f16(best_m[:, :, 0])
+        gscale = np.maximum(f16(np.maximum(best_s[:, :, 0] * q_max, EPS)), EPS)
+    else:
+        # 1) parametros por grupo, redondeados a fp16 como hace common.rs
+        gmin = f16(g.min(axis=2))
+        gscale = np.maximum(f16(np.maximum(g.max(axis=2) - g.min(axis=2), EPS)), EPS)
 
     # 2) parametros del superbloque, tambien en fp16 antes de derivar nada
     #

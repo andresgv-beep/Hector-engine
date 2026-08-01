@@ -248,18 +248,40 @@ la diferencia de velocidad es casi toda bytes leídos.
 Ese 14% extra de bytes es el precio de agrupar de 8 en 8 — exactamente lo que
 compra la ventaja de calidad. Es un intercambio deliberado, no un defecto.
 
-### Ajuste ponderado de llama.cpp: probado, no aporta
+### Ajuste ponderado de llama.cpp: SÍ aporta, +2,3 puntos gratis
 
 `make_qkx2_quants` no coge los extremos: para cada asignación tentativa de
-índices resuelve por mínimos cuadrados **ponderados por magnitud** (`w = av_x +
-|x|`, ya sin matriz de importancia) la escala y el mínimo óptimos. Portado al
-simulador: MSE −0,6% en MLP y −3,3% en atención; end-to-end +1,0 punto con
-**p=0,36** en el corpus narrativo. No significativo.
+índices resuelve por mínimos cuadrados **ponderados por magnitud** la escala y
+el mínimo óptimos. Los pesos existen **aunque no haya matriz de importancia**:
 
-Explicación probable: ellos agrupan de 32 en 32, donde los extremos son mala
-referencia y ajustar compensa. Con grupos de 8, mínimo y máximo ya describen
-casi todo. **Nuestro grupo fino da estructuralmente lo que ellos consiguen
-algorítmicamente.**
+    weights[l] = av_x + fabsf(x[l]);                    // sin imatrix
+    weights[l] = qw[l] * sqrtf(sigma2 + x[l]*x[l]);     // con imatrix
+
+Portado al simulador (`HQS_WLSQ=1` en `hqs_sim.py`) y medido sobre el perfil de
+4 bits:
+
+| corpus | min/max (nuestro) | ponderado |
+|---|---:|---:|
+| narrativa (1107 pos.) | 87,5% | 88,5% |
+| técnico (648 pos.) | 88,1% | 92,4% |
+| **combinado (1755 pos.)** | **87,7%** | **90,0%** |
+
+McNemar 115 vs 76, **p=0,006**. Positivo en ambos corpus. **+2,3 puntos a coste
+cero**: mismo formato, mismos bits, mismo kernel, misma velocidad. Solo cambia
+`compute_group_params` en el conversor.
+
+**Ojo con el MSE, otra vez:** el error sin ponderar apenas baja (−0,6% en MLP,
+−3,3% en atención) y aun así el modelo mejora 2,3 puntos. Es la tercera vez en
+la sesión que el MSE sobre los pesos no predice nada.
+
+**Predicción fallida documentada a propósito:** se predijo que no aportaría,
+razonando que con grupos de 8 los extremos ya describen casi todo el grupo. El
+error de razonamiento fue creer que ponderar sirve para *describir* mejor; lo
+que hace es *decidir a quién sacrificar*. Con `w = av_x + |x|` los pesos grandes
+mandan en la escala y los pequeños aceptan más error, y eso funciona igual con
+8 elementos que con 32.
+
+**Falta el A/B** antes de producción, como todo lo demás.
 
 ### Heurísticas suyas que no hemos probado
 

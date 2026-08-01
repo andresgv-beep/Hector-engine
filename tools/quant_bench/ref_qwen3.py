@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Referencia fp32 independiente de Qwen3, en numpy sobre el safetensors de HF.
 Emite el argmax de CADA posicion para comparar contra Hector y contra Ollama."""
-import json, struct, sys, math, os, glob
+import json, struct, sys, math, os, glob, re
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hqs_sim import quant_dequant
@@ -11,10 +11,30 @@ from hqs_sim import quant_dequant
 _Q = float(os.environ.get('HQS_QMAX', '0'))       # todas las capas
 _QMLP = float(os.environ.get('HQS_QMLP', '0'))    # solo MLP (perfil mixto)
 _QATT = float(os.environ.get('HQS_QATT', '0'))    # solo atencion
+_QGATE = float(os.environ.get('HQS_QGATE', '0'))  # override gate_proj
+_QUP = float(os.environ.get('HQS_QUP', '0'))       # override up_proj
+_QDOWN = float(os.environ.get('HQS_QDOWN', '0'))   # override down_proj
+_QLAYER_START = int(os.environ.get('HQS_LAYER_START', '0'))
+_QLAYER_END = int(os.environ.get('HQS_LAYER_END', str(1 << 30)))
 _MLP = ('gate_proj','up_proj','down_proj')
 _ATT = ('q_proj','k_proj','v_proj','o_proj')
+def _scoped_override(name, value):
+    if value <= 0:
+        return 0.0
+    match = re.search(r'model\.layers\.(\d+)\.', name)
+    if not match:
+        return value
+    layer = int(match.group(1))
+    return value if _QLAYER_START <= layer <= _QLAYER_END else 0.0
+
 def _q(name, w):
-    if any(k in name for k in _MLP):
+    if 'gate_proj' in name:
+        q = _scoped_override(name, _QGATE) or _QMLP or _Q
+    elif 'up_proj' in name:
+        q = _scoped_override(name, _QUP) or _QMLP or _Q
+    elif 'down_proj' in name:
+        q = _scoped_override(name, _QDOWN) or _QMLP or _Q
+    elif any(k in name for k in _MLP):
         q = _QMLP or _Q
     elif any(k in name for k in _ATT):
         q = _QATT or _Q
