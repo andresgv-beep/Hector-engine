@@ -27,9 +27,17 @@ constexpr int COMPACT_GEMM_THRESHOLD = 4;
 void launch_matmul_hq41k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
 void launch_matmul_hq51k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
 
-constexpr int CCA_WPR = 4, CCA_RPB = 4, CCA_BLOCK = CCA_WPR * CCA_RPB * 32;
+// Candidatos del autoajuste (warps por fila x filas por bloque).
+//
+// Elegidos barriendo las 14 combinaciones legales sobre ocho formas reales de
+// Qwen3-4B, Qwen3-8B y Gemma 4. Los anteriores eran 4x4, 2x8 y 4x1: los dos
+// primeros no ganaban en NINGUNA forma y el 4x1 llegaba a tardar el doble que
+// el mejor en down_proj (211,9 frente a 95,7 us en el 8B). Todo lo bueno vive
+// en warps_por_fila de 1 o 2 con 4 u 8 filas por bloque; 1x1 y 8x4 son
+// desastrosos en todas.
+constexpr int CCA_WPR = 1, CCA_RPB = 4, CCA_BLOCK = CCA_WPR * CCA_RPB * 32;
 constexpr int CCB_WPR = 2, CCB_RPB = 8, CCB_BLOCK = CCB_WPR * CCB_RPB * 32;
-constexpr int CCC_WPR = 4, CCC_RPB = 1, CCC_BLOCK = CCC_WPR * CCC_RPB * 32;
+constexpr int CCC_WPR = 2, CCC_RPB = 4, CCC_BLOCK = CCC_WPR * CCC_RPB * 32;
 
 // ============================================================================
 // GEMV HQ4.1K KERNEL
