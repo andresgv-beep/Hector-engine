@@ -50,6 +50,15 @@ const char* response_act_name(ResponseAct act);
 // aplicando: son deterministas y no pasan por la boca del modelo.
 bool contract_needed(const TurnFrame& frame);
 
+// Los actos sociales tampoco pueden ir sin freno: quitarles el contrato mató
+// la recitación pero los dejó sin condición de parada, y el modelo llenaba
+// 300 tokens de ánimos, listas de opciones y valoraciones sobre la persona
+// hasta que el presupuesto cortaba a media frase. Esto es una orden corta e
+// IMPERATIVA, no una descripción de la respuesta: lo que se recitaba era el
+// contrato meta ("Acto: conversar. Registro: ..."), no una instrucción seca.
+// Vacío para los actos con contrato propio.
+std::string social_steer(const TurnFrame& frame);
+
 // Clasificador deliberadamente conservador y determinista. No pretende
 // entender toda la lengua: fija el acto cuando hay una señal clara y deja el
 // resto como conversación/colaboración acotada.

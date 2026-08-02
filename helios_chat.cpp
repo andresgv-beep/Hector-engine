@@ -1514,6 +1514,7 @@ int main(int argc, char** argv) {
                     : std::string();
             const bool recall_has_evidence = !authoritative_context.empty();
             const bool inject_contract = ck::contract_needed(turn_frame);
+            const std::string social_steer = ck::social_steer(turn_frame);
             const std::string turn_contract = ck::response_contract(
                 turn_frame, registro_name(registro));
             const bool carry_contract_in_user = inject_contract &&
@@ -1523,6 +1524,12 @@ int main(int argc, char** argv) {
                       user_msg, turn_frame, registro_name(registro),
                       authoritative_context)
                 : user_msg;
+            // Gemma 4 solo admite `system` al inicio: el freno social viaja
+            // delante del mensaje, igual que hace frame_user_message con el
+            // contrato de los actos de tarea.
+            if (is_gemma4 && !social_steer.empty()) {
+                model_user_msg = "[" + social_steer + "]\n\n" + model_user_msg;
+            }
             if (trivial && !is_gemma4) model_user_msg += " /no_think";
             artefacto_turnos = trae_artefacto ? 3
                              : (artefacto_turnos > 0 ? artefacto_turnos - 1 : 0);
@@ -1559,6 +1566,11 @@ int main(int argc, char** argv) {
                     turn_frame.act != ck::ResponseAct::Recall) {
                     turn_ids.push_back(*turn_start);
                     push_text("system\n" + turn_contract);
+                    turn_ids.push_back(*turn_end);
+                    push_text("\n");
+                } else if (!social_steer.empty()) {
+                    turn_ids.push_back(*turn_start);
+                    push_text("system\n" + social_steer);
                     turn_ids.push_back(*turn_end);
                     push_text("\n");
                 }

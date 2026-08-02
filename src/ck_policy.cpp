@@ -115,6 +115,17 @@ bool contract_needed(const TurnFrame& frame) {
     }
 }
 
+std::string social_steer(const TurnFrame& frame) {
+    if (contract_needed(frame)) return {};
+    // Cada prohibición corresponde a un desbordamiento observado en vivo:
+    // listas de opciones ("puedo ofrecerte: - un desafío mental..."), ánimos
+    // ("¡eres muy rápido! ⚡🔥"), valoraciones ("tienes un potencial
+    // intelectual extremadamente elevado") y el remate filosófico.
+    return "Habla como en persona: máximo tres frases. No enumeres opciones, "
+           "no elogies a quien te habla ni valores sus capacidades, y no "
+           "cierres con ánimos ni reflexiones. Di lo tuyo y calla.";
+}
+
 TurnFrame classify_turn(std::string_view message,
                         bool trivial,
                         bool artifact_active,
@@ -293,10 +304,14 @@ std::string frame_user_message(std::string_view message,
 
 int visible_token_budget(const TurnFrame& frame) {
     switch (frame.act) {
-        case ResponseAct::Acknowledge:      return 100;
+        // Los sociales van cortos A PROPÓSITO: el presupuesto se agotaba
+        // sistemáticamente en charla y cortaba a media frase, señal de que el
+        // modelo no para solo. Un techo bajo produce respuestas completas y
+        // breves en vez de parrafadas truncadas.
+        case ResponseAct::Acknowledge:      return 70;
         case ResponseAct::Greet:            return 60;
         case ResponseAct::CheckIn:          return 80;
-        case ResponseAct::Converse:         return 260;
+        case ResponseAct::Converse:         return 150;
         case ResponseAct::Answer:           return 500;
         case ResponseAct::Recall:           return 500;
         case ResponseAct::Explain:          return 900;
