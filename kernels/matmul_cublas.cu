@@ -352,20 +352,24 @@ void launch_matmul_hq41k_cublas(
         weights, g_dequant_buffer, K, N
     );
 
-    // Igual que launch_matmul_fp16_cublas: acumular en fp32, no en fp16.
-    // Hgemm acumulaba en fp16 y era la fuente principal del desvio del motor.
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    cublasGemmEx(g_cublas_handle,
+    // Hgemm (acumulacion fp16) A PROPOSITO, no por descuido. En las GeForce
+    // NVIDIA capa a la MITAD el fp16 con acumulacion fp32 en los tensor cores
+    // — segmentacion de producto: en datacenter va a velocidad plena. Este
+    // camino solo se usa en PREFILL por lotes (M >= COMPACT_GEMM_THRESHOLD),
+    // donde acumular en fp32 costaba 2x de tiempo sin ganancia de calidad
+    // medible (ver tools/quant_bench/prefill_logits_gemma4.cu). El decode va
+    // por los kernels propios de matmul_hqs_compact.cu, que SI acumulan en
+    // fp32 y no pasan por aqui.
+    __half alpha_h = __float2half(1.0f);
+    __half beta_h = __float2half(0.0f);
+    cublasHgemm(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
-        &alpha,
-        g_dequant_buffer, CUDA_R_16F, K,
-        input, CUDA_R_16F, K,
-        &beta,
-        output, CUDA_R_16F, N,
-        CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT
+        &alpha_h,
+        g_dequant_buffer, K,
+        input, K,
+        &beta_h,
+        output, N
     );
 }
 
@@ -387,20 +391,24 @@ void launch_matmul_hq51k_cublas(
         weights, g_dequant_buffer, K, N
     );
 
-    // Igual que launch_matmul_fp16_cublas: acumular en fp32, no en fp16.
-    // Hgemm acumulaba en fp16 y era la fuente principal del desvio del motor.
-    float alpha = 1.0f;
-    float beta = 0.0f;
-    cublasGemmEx(g_cublas_handle,
+    // Hgemm (acumulacion fp16) A PROPOSITO, no por descuido. En las GeForce
+    // NVIDIA capa a la MITAD el fp16 con acumulacion fp32 en los tensor cores
+    // — segmentacion de producto: en datacenter va a velocidad plena. Este
+    // camino solo se usa en PREFILL por lotes (M >= COMPACT_GEMM_THRESHOLD),
+    // donde acumular en fp32 costaba 2x de tiempo sin ganancia de calidad
+    // medible (ver tools/quant_bench/prefill_logits_gemma4.cu). El decode va
+    // por los kernels propios de matmul_hqs_compact.cu, que SI acumulan en
+    // fp32 y no pasan por aqui.
+    __half alpha_h = __float2half(1.0f);
+    __half beta_h = __float2half(0.0f);
+    cublasHgemm(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
-        &alpha,
-        g_dequant_buffer, CUDA_R_16F, K,
-        input, CUDA_R_16F, K,
-        &beta,
-        output, CUDA_R_16F, N,
-        CUBLAS_COMPUTE_32F,
-        CUBLAS_GEMM_DEFAULT
+        &alpha_h,
+        g_dequant_buffer, K,
+        input, K,
+        &beta_h,
+        output, N
     );
 }
 
