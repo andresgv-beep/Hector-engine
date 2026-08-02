@@ -97,10 +97,15 @@ set(KERNEL_SOURCES
 
 find_package(CUDAToolkit REQUIRED)
 
-# Force CUDA include path (fix for some systems)
-set(CUDA_INCLUDE_DIR "/usr/local/cuda/include")
-if(NOT EXISTS "${CUDA_INCLUDE_DIR}/cuda_runtime.h")
-    set(CUDA_INCLUDE_DIR "/usr/local/cuda-12.6/include")
+# Preferir lo que reporta find_package: funciona con cualquier version y
+# cualquier prefijo de instalacion. Las rutas fijas de abajo solo son el
+# ultimo recurso — adivinar "cuda-12.6" rompia en maquinas con otra version.
+set(CUDA_INCLUDE_DIR ${CUDAToolkit_INCLUDE_DIRS})
+if(NOT CUDA_INCLUDE_DIR)
+    set(CUDA_INCLUDE_DIR "/usr/local/cuda/include")
+    if(NOT EXISTS "${CUDA_INCLUDE_DIR}/cuda_runtime.h")
+        set(CUDA_INCLUDE_DIR "/usr/local/cuda-12.6/include")
+    endif()
 endif()
 
 message(STATUS "CUDA include dir: ${CUDA_INCLUDE_DIR}")
