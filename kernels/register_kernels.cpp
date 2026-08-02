@@ -433,12 +433,15 @@ void register_linear_kernels(Engine& engine) {
                 M, K, N,
                 ctx.stream
             );
-        } else {
+        } else if (weight->dtype == dtype::FP16()) {
             launch_matmul_fp16(
                 in_ptr, as_fp16_const(weight), as_fp16(output),
                 M, K, N,
                 ctx.stream
             );
+        } else {
+            throw std::runtime_error("MATMUL: unsupported weight dtype " +
+                                     std::string(dtype_name(weight->dtype)));
         }
     });
     
@@ -476,6 +479,11 @@ void register_memory_kernels(Engine& engine) {
             );
         } else if (table->dtype == dtype::HQ51K()) {
             launch_embedding_hq51k(
+                as_i32(indices), as_u8_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
+        } else if (table->dtype == dtype::HQ62K()) {
+            launch_embedding_hq62k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),
                 batch, seq, vocab, dim, ctx.stream
             );

@@ -30,6 +30,7 @@ constexpr int PAYLOAD_5BIT = 160;
 
 constexpr float Q_MAX_4BIT = 15.0f;
 constexpr float Q_MAX_5BIT = 31.0f;
+constexpr float Q_MAX_6BIT = 63.0f;
 constexpr float Q_MAX_3BIT = 7.0f;
 
 constexpr float EPS = 1e-7f;
@@ -51,6 +52,13 @@ constexpr int HQ31K_PAYLOAD = 96;
 constexpr int HQ31K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ31K_PAYLOAD;  // 136
 constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_4BIT;  // 168
 constexpr int HQ51K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_5BIT;  // 200
+
+// HQ6.2K layout (264 bytes): fp16 d_scale/d_min/min_base, two padding
+// bytes, 32 byte-aligned q_scale values, 32 byte-aligned q_min values and
+// 192 bytes of 6-bit payload.
+constexpr int HQ62K_HEADER_SIZE = 72;
+constexpr int HQ62K_PAYLOAD = 192;
+constexpr int HQ62K_BLOCK_SIZE = HQ62K_HEADER_SIZE + HQ62K_PAYLOAD;  // 264
 
 // ============================================================================
 // DEVICE FUNCTIONS - Compact Header decoding (40-byte)
@@ -82,6 +90,25 @@ void decode_compact_group(
     float scale = d_scale * (float(q_s) * (1.0f / 15.0f));
     min_f = min_base + d_min * (float(q_m) * (1.0f / 15.0f));
     scoeff = scale * q_max_inv;
+}
+
+__device__ __forceinline__
+void decode_hq62k_group(
+    const uint8_t* block_ptr,
+    int group_idx,
+    float& min_f,
+    float& scoeff
+) {
+    float d_scale = __half2float(__ushort_as_half(
+        block_ptr[0] | (block_ptr[1] << 8)));
+    float d_min = __half2float(__ushort_as_half(
+        block_ptr[2] | (block_ptr[3] << 8)));
+    float min_base = __half2float(__ushort_as_half(
+        block_ptr[4] | (block_ptr[5] << 8)));
+    float scale = d_scale * (float(block_ptr[8 + group_idx]) * (1.0f / 255.0f));
+    min_f = min_base + d_min *
+        (float(block_ptr[40 + group_idx]) * (1.0f / 255.0f));
+    scoeff = scale * (1.0f / Q_MAX_6BIT);
 }
 
 // ============================================================================

@@ -1,6 +1,11 @@
 # Notas de optimización — Héctor v1
 
 > Diagnóstico hecho el 2026-07-29. Plan: **medir primero, tocar después.**
+>
+> **Archivo histórico:** las afirmaciones sobre herramientas o modelos ausentes
+> describen aquel corte y ya no son estado operativo. Para Gemma 4 y el runtime
+> vigente, usar `GEMMA4_PLAN.md`, `GEMMA4_VISION_PLAN.md` y
+> `tools/MODEL_CAPABILITIES.md`.
 
 ## ✅ ESTADO (actualizado 2026-07-29 tarde)
 

@@ -129,8 +129,9 @@ segundo decode            24 tokens · 116,40 tok/s
 ## Uso experimental
 
 ```bash
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 HELIOS_VISION_MMAP=1 HELIOS_CTX=4096 \
-  build/gemma4_vision_chat modelo-combinado.hnf imagen.png \
+  build/gemma4_vision_chat "$GEMMA4_HNF" imagen.png \
   "Describe la imagen" 64 0
 ```
 

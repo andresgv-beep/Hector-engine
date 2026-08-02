@@ -152,6 +152,7 @@ namespace dtype {
     inline DTypeID HQ31K() { return DTypeRegistry::instance().get_id("hq31k"); }
     inline DTypeID HQ41K() { return DTypeRegistry::instance().get_id("hq41k"); }
     inline DTypeID HQ51K() { return DTypeRegistry::instance().get_id("hq51k"); }
+    inline DTypeID HQ62K() { return DTypeRegistry::instance().get_id("hq62k"); }
 }
 
 } // namespace helios

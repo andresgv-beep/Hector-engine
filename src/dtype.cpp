@@ -105,6 +105,19 @@ void DTypeRegistry::register_builtins() {
         return num_blocks * 200;
     };
     register_dtype(info);
+
+    // HQ6.2K - 6-bit payload with byte-aligned 8-bit group metadata.
+    // This experimental dtype is lookup-only until a matmul kernel exists.
+    info = DTypeInfo{};
+    info.name = "hq62k";
+    info.block_elements = 256;
+    info.block_bytes = 264;
+    info.is_quantized = true;
+    info.calc_size = [](size_t n) -> size_t {
+        size_t num_blocks = (n + 255) / 256;
+        return num_blocks * 264;
+    };
+    register_dtype(info);
 }
 
 DTypeID DTypeRegistry::register_dtype(const DTypeInfo& info) {

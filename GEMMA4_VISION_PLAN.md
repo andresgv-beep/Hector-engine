@@ -333,10 +333,9 @@ y una transferencia contigua por patch/layer/proyector.
 `+336 MiB` frente a `+626 MiB`, torre caliente de ~102 ms frente a ~69 ms y
 decode dentro del 1 %. Evidencia en `tools/GEMMA4_VISION_V7.md`.
 
-### V8 — Integración de producto y optimización opcional
+### V8 — Integración de producto y optimización opcional — CERRADA
 
-- mover la selección por capacidades y el ciclo de vida a HexOS — política
-  implementada y pendiente de commit en `hexos-core`;
+- selección por capacidades y ciclo de vida integrados en HexOS;
 - perfil de doble buffer cerrado: 28,95 ms calientes son copias, cada capa
   ofrece 4,25 ms de cómputo para ocultar 1,62 ms de transporte y la GPU solapa
   de verdad memoria pageable. El pipeline genérico recupera 24,49 ms y cuesta
@@ -345,6 +344,12 @@ decode dentro del 1 %. Evidencia en `tools/GEMMA4_VISION_V7.md`.
   `tools/MAPPED_WEIGHT_PIPELINE.md`;
 - cuantización visual solo contra el HNF FP16 y con A/B conversacional;
 - varias imágenes, vídeo y audio como contratos separados.
+
+El cierre añadió la sonda `helios.model-capabilities.v1`, el adaptador
+persistente `helios.gemma4.vision.v1`, framing RGB8 binario entre HexOS y
+Héctor, continuidad del mismo KV y una UI que solo ofrece imágenes cuando
+`/api/status` anuncia visión `runtime_ready`. El recorrido UI→HexOS→Héctor se
+verificó con imagen real y seguimiento textual.
 
 ## Primera acción segura
 
@@ -388,21 +393,26 @@ arriesgar el HNF de producción.
   HNF/RAM y usa una ventana temporal de 32 MiB. Ahorra 290 MiB de pico frente
   a V6, añade ~33 ms por imagen caliente y conserva precisión/decode. Evidencia
   en `tools/GEMMA4_VISION_V7.md`.
-- **Fase activa:** V8 — política HexOS implementada y pipeline genérico de
-  doble buffer certificado con Gemma 4; falta decidir el default de producto y
-  conectar adjuntos al proceso persistente.
-- **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
-  `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
-  `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
-  histórica de comparación. La campaña de decode cerró el perfil ponderado por
-  perder 1,148 % en potencia alta y 6,770 % en potencia baja. Los dos HNF se
-  recertificaron con el conversor determinista `37610b3`: Qwen SHA256
-  `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
-- **Última comprobación:** V4 coincide con las mismas métricas usando pesos en
-  VRAM o staging desde HNF; carga/descarga mmap recupera toda la memoria. Con
-  contexto 4096, prefill y decode permanecen en 85,8 ms y 136,4 tok/s. Tras V7,
-  Héctor pasa 18/18 y texto conserva sus barreras independientes.
-- **Siguiente acción exacta:** hacer que HexOS active
-  `HELIOS_MMAP_DOUBLE_BUFFER=1` junto al mmap visual compatible, conservando el
-  override a cero. Después, diseñar el contrato de adjuntos del chat persistente
-  sobre detección de modalidad HNF, no sobre nombres de modelos.
+- **Fase cerrada:** V8 — pipeline genérico de doble buffer certificado,
+  política de residencia y capacidades integradas en HexOS, adaptador
+  multimodal persistente y adjuntos RGB8 conectados hasta la UI.
+- **Artefacto multimodal canónico:**
+  `../helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf`, 4.588.102.267
+  bytes y SHA256 `b1b05c30…b6c51`. La sonda lo declara `runtime_ready` para
+  texto y visión. Las rutas `~/.cache/helios/gemma4_vision_v1/` pertenecen al
+  registro histórico de V1 y no deben usarse para arrancar el producto.
+- **Baseline de texto:** `qwen3_4b_final.hnf` permanece para regresión general.
+  El Gemma textual independiente `gemma4-e2b-it-text-compact.hnf` fue
+  recertificado con SHA256 `b67df381…b79660` y después retirado del disco; la
+  integración usa ahora el HNF multimodal canónico. Ambos caminos usan
+  `HELIOS_EMBED_MMAP=1`; `HELIOS_EMBED_IN_RAM=1` queda únicamente como control
+  histórico. La campaña de decode rechazó el perfil ponderado por perder
+  1,148 % en potencia alta y 6,770 % en potencia baja.
+- **Última comprobación:** las cinco fronteras V4 permanecen exactas con doble
+  buffer; la torre caliente baja de 97,74 a 73,25 ms, Héctor pasa 18/18 y la
+  sesión persistente conserva el KV tras imagen y seguimiento. HexOS transporta
+  el RGB8 sin base64 ni fichero temporal y la UI ya consume ese contrato.
+- **Siguiente acción exacta:** congelar este recorrido como baseline de Gemma 4.
+  La siguiente arquitectura visual debe reutilizar capacidades, transporte,
+  UI y `MappedWeightPipeline`, añadiendo únicamente config HNF, runner y regla
+  de adaptador propios.

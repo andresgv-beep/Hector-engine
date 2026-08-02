@@ -1,8 +1,8 @@
 # Gemma 4 E2B en Héctor — plan de integración por fases
 
-> Actualizado el 2026-07-31. Este documento es la fuente de verdad para la
-> integración de Gemma 4 E2B. El trabajo debe avanzar en orden: no se comienza
-> una fase hasta cumplir el criterio de salida de la anterior.
+> Actualizado el 2026-08-02. Este documento conserva la certificación del
+> decoder de texto. La integración multimodal posterior está cerrada y su
+> fuente de verdad es `GEMMA4_VISION_PLAN.md`.
 
 ## Objetivo y alcance
 
@@ -11,7 +11,8 @@ v9 propio de HELIOS. El artefacto de chat certificado es el checkpoint instruct:
 
 - Checkpoint: `google/gemma-4-E2B-it`, SHA256
   `2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550`
-- HNF: `gemma4-e2b-it-text-compact.hnf`
+- HNF textual certificado: `gemma4-e2b-it-text-compact.hnf` (histórico; ya no
+  se conserva como fichero independiente)
 - Tamaño: 4.250.889.522 bytes (3,959 GiB)
 - SHA256 HNF determinista:
   `b67df38138b3aac46c7fef0a1fce5b9b74b96ce95aff2bf1c2b6839920b79660`
@@ -19,6 +20,10 @@ v9 propio de HELIOS. El artefacto de chat certificado es el checkpoint instruct:
 - Tensores: 601
 - Cuantización: 283 FP16, 213 HQ51K y 105 HQ41K
 - Validador estricto del convertidor: 0 errores, 0 avisos
+
+El artefacto operativo vigente incluye ese decoder y la torre visual:
+`../helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf`, 4.588.102.267
+bytes, SHA256 `b1b05c30e2d116fa7eb13ea322738519b3960ceb67af30089ea798c6684b6c51`.
 
 Fuera de alcance hasta terminar texto: vision tower, audio tower, interfaz de
 chat, servidor/API y optimizaciones de rendimiento no necesarias para lograr
@@ -324,23 +329,25 @@ de mirar el resultado, separando error de FP16 del error de cuantización HQS.
 
 ## Estado actual
 
-- **Fase activa:** Fase 9 — multimodal, desarrollada por separado en
+- **Plan cerrado:** fases 1–8 de texto y fase 9 multimodal completadas. V0–V8
+  de visión, adaptador persistente, transporte HexOS y UI están cerrados en
   `GEMMA4_VISION_PLAN.md`.
-- **Última fase completada:** Fase 8 — rendimiento y robustez.
-- **Siguiente acción exacta:** iniciar V0 de visión con el HNF actual y
-  `HELIOS_EMBED_IN_RAM=1` congelados como baseline de texto. La tabla compartida
-  HQ5.1K, HQ3.1K y el perfil ponderado permanecen experimentales; no se cambia
-  cuantización ni kernels durante el oráculo visual.
+- **Artefacto canónico:**
+  `../helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf`.
+- **Siguiente acción exacta:** conservar Gemma 4 como baseline. Otra
+  arquitectura visual debe reutilizar la sonda de capacidades, el transporte
+  RGB8, la UI y el pipeline de pesos mapeados.
 - **Cambios de código realizados:** loader/validador GM4X, pruebas metadata-only,
   primitivas, ruta PLE, grafo por capa, KV heterogéneo compartido y forward
   cached completo.
-- **Hallazgo pendiente del conversor:** el HNF compacto afila la distribución
+- **Hallazgo histórico del conversor:** el HNF compacto afila la distribución
   (`KL=0,123965`, masa top-1 `0,1161` frente a `0,0599` de referencia), mientras
   el HNF FP16 reproduce la referencia. La calibración IT de 1.157 predicciones
   localiza el mismo riesgo en las posiciones abiertas: cuando top-1 FP16 < 0,80,
   el compacto sube la masa media de 0,4641 a 0,5525 y baja la entropía de 3,0674
-  a 2,6868. No es un defecto de Héctor ni de la ventana de 512; aislar la familia
-  de tensores antes de certificar calidad de sampling.
+  a 2,6868. La investigación posterior no encontró un tensor culpable ni un
+  defecto de Héctor; esta línea queda como evidencia de cuantización, no como
+  bloqueo de la integración multimodal.
 
 ## Registro de trabajo
 

@@ -1584,8 +1584,7 @@ void GraphBuilder::fuse_weights(Engine& engine, ArchDescriptor& arch, const Mode
             // Q_blob + K_blob + V_blob does NOT produce a valid [Q+K+V, K] quantized tensor.
             // The dequant kernel would index into wrong rows.
             // Only fuse FP16/FP32 tensors where rows are simple contiguous memory.
-            bool is_quantized = (qkv_dtype == dtype::HQ41K() || qkv_dtype == dtype::HQ51K() ||
-                                 qkv_dtype == dtype::HQ31K());
+            bool is_quantized = dtype_is_quantized(qkv_dtype);
             
             if (is_quantized) {
                 // printf("  [FUSE] Skipping QKV fusion for quantized dtype=%s (superblock layout incompatible)\n",
@@ -1688,8 +1687,7 @@ void GraphBuilder::fuse_weights(Engine& engine, ArchDescriptor& arch, const Mode
         }
         
         if (ok && gate_dtype != 0) {
-            bool is_quantized = (gate_dtype == dtype::HQ41K() || gate_dtype == dtype::HQ51K() ||
-                                 gate_dtype == dtype::HQ31K());
+            bool is_quantized = dtype_is_quantized(gate_dtype);
             
             if (is_quantized) {
                 // printf("  [FUSE] Skipping gate+up fusion for quantized dtype=%s\n",

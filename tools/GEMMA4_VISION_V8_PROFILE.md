@@ -21,20 +21,22 @@ la torre dentro del mismo proceso. La primera se descarta por inicialización
 fría de cuBLAS y page cache.
 
 ```bash
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 HELIOS_VISION_MMAP=1 HELIOS_EMBED_MMAP=1 HELIOS_CTX=4096 \
 HELIOS_VISION_REPEAT=3 \
 /usr/local/cuda/bin/nsys profile --trace=cuda --sample=none \
   --cpuctxsw=none --output=/tmp/gemma4_v8_staging \
-  build/gemma4_vision_chat modelo-combinado.hnf imagen.png \
+  build/gemma4_vision_chat "$GEMMA4_HNF" imagen.png \
   "Describe brevemente la imagen." 1 0
 ```
 
 Control sin staging:
 
 ```bash
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 HELIOS_VISION_MMAP=0 HELIOS_EMBED_MMAP=1 HELIOS_CTX=4096 \
 HELIOS_VISION_REPEAT=3 \
-  build/gemma4_vision_chat modelo-combinado.hnf imagen.png \
+  build/gemma4_vision_chat "$GEMMA4_HNF" imagen.png \
   "Describe brevemente la imagen." 1 0
 ```
 

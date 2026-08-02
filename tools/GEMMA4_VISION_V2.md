@@ -67,12 +67,14 @@ Comandos de reproducción:
 
 ```bash
 cmake --build build -j2 --target test_gemma4_vision_metadata
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 ./build/test_gemma4_vision_metadata \
-  /home/andres/.cache/helios/gemma4_vision_v1/gemma4-e2b-vision-fp16.hnf --load
-./build/test_gemma4_vision_metadata \
-  /home/andres/.cache/helios/gemma4_vision_v1/gemma4-e2b-text-compact-vision-fp16.hnf --load
+  "$GEMMA4_HNF" --load
 ctest --test-dir build --output-on-failure
 ```
+
+El HNF solo visual usado al cerrar V2 era un artefacto de certificación. La
+reproducción vigente usa el bloque `vision` del combinado canónico anterior.
 
 Regresión completa al cierre: **15/15**. La prueba nueva se ejecuta sin modelo
 ni GPU mediante el HNF sintético; el argumento `--load` activa explícitamente

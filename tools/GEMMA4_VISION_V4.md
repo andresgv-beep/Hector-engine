@@ -33,9 +33,9 @@ tensor FP16 `vision.projector.weight`.
 
 ## Comparación contra V0
 
-HNF visual:
+HNF combinado canónico (el test carga únicamente su bloque visual):
 
-`/home/andres/.cache/helios/gemma4_vision_v1/gemma4-e2b-vision-fp16.hnf`
+`/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf`
 
 Oráculo FP32:
 
@@ -50,8 +50,8 @@ Oráculo FP32:
 | proyección | 0,004182350 | 0,030 | 0,999991278 | 0,9990 |
 
 Todas las formas coinciden y todos los valores son finitos. El mismo test
-también pasó cargando únicamente el bloque visual del HNF combinado
-`gemma4-e2b-text-compact-vision-fp16.hnf`.
+pasó originalmente con el HNF solo visual y con el combinado de V1. La ruta
+vigente anterior sustituye ambos artefactos operativos sin cambiar los pesos.
 
 La tabla fue recertificada después de `d635d2b`, que sustituyó la acumulación
 FP16 de `cublasHgemm` por acumulación FP32. Los valores anteriores permanecían
@@ -78,8 +78,9 @@ prueba numérica pesada, que además carga y descarga el bloque real, se ejecuta
 con:
 
 ```bash
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 ./build/test_gemma4_vision_runner \
-  /home/andres/.cache/helios/gemma4_vision_v1/gemma4-e2b-vision-fp16.hnf \
+  "$GEMMA4_HNF" \
   /home/andres/.cache/helios/gemma4_vision_oracle/fp32-b3a36037-run1
 ```
 

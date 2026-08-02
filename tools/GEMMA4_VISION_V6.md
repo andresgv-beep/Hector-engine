@@ -27,8 +27,9 @@ Si CMake encuentra `libpng`, construye el ejecutable automáticamente:
 
 ```bash
 cmake --build build -j"$(nproc)"
+GEMMA4_HNF=/home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4-e2b-it-multimodal.hnf
 build/gemma4_vision_chat \
-  /home/andres/.cache/helios/gemma4_vision_v1/gemma4-e2b-text-compact-vision-fp16.hnf \
+  "$GEMMA4_HNF" \
   imagen.png \
   "Describe la imagen" \
   64 0
