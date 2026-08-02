@@ -416,12 +416,26 @@ REF_DUMP_LAYERS=/tmp/oro REF_ALL_POSITIONS=1 \
 
 Los `.npz` no se versionan (unos 42 MB); se regeneran con el comando de arriba.
 
-**Sitios donde se escapa algo así en Gemma 4**, por si el barrido no es
-concluyente: RoPE proporcional (las dimensiones que deben quedar a CERO), las
-escalas del PLE (`sqrt(D)`, `sqrt(PLE)`, el `1/sqrt(2)`), el `layer_scalar` de
-cada capa, el `v_norm` que va **sin** escala, el borde de la ventana (`< W`),
-el `final_logit_softcapping`, y el scaling de atención, que en Gemma 4 es
-**1.0** — rarísimo, y muy fácil de "corregir" a `1/sqrt(head_dim)` sin querer.
+**Ya comprobados por lectura del código el 2026-08-02, los diez limpios** — no
+volver a mirarlos sin una razón nueva:
+
+| candidato | dónde | veredicto |
+|---|---|---|
+| scaling de atención = 1.0 | `graph_builder.cpp:777` | coincide |
+| escalas del PLE (`sqrt(PLE)`, `1/sqrt(D)`, `1/sqrt(2)`) | `gemma4_ple.cpp` | coinciden |
+| inyección del PLE por capa + `layer_scalar` | `gemma4_ple.cpp` | coincide |
+| GELU: aproximación tanh, no la exacta | `activations.cu:57` | coincide |
+| RoPE proporcional: nº de ángulos | `attention.cu:1024` | 32 y 64, exacto |
+| RoPE: frecuencia dividida por `head_dim` completo | `attention.cu:637` | coincide |
+| RoPE: rotación por mitades | `attention.cu:642` | coincide |
+| ventana deslizante | `attention.cu:60` | `k+W<=s` ≡ `s-k<W`, coincide |
+| `v_norm` **sin** peso | `graph_builder.cpp:637` | coincide |
+| KV compartido: qué capa física alimenta a cuál | `gemma4_kv_cache.hpp:83` | coincide |
+
+**Lo que queda, y es de otra naturaleza:** ya no son constantes ni fórmulas
+sueltas. Los sospechosos son las **numéricas del kernel de atención** (softmax
+online, orden de acumulación) y las **diferencias entre el camino de prefill y
+el de decode**. Eso no se ve leyendo: hace falta el volcado por capa.
 
 **El arreglo duradero** no es encontrar este bug, es que los tests carguen
 valores de oro de una implementación externa en vez de recalcularlos. Con
