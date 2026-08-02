@@ -5,10 +5,16 @@ Alineacion verificada, no supuesta: se comprueba que prompt_eval_count coincida
 con la longitud del prefijo. Si no coincide, la posicion se descarta en vez de
 contaminar la medida.
 """
-import json, subprocess, sys, urllib.request
+import json, os, subprocess, sys, urllib.request
 HNF = sys.argv[1]; TOKS = [int(x) for x in open(sys.argv[2]).read().strip().split(',')]
 OUT = sys.argv[3]; N = int(sys.argv[4]) if len(sys.argv) > 4 else 150
-DEC = sys.argv[0].rsplit('/',1)[0] + '/dec'
+# OLLAMA_MODEL elige el modelo; TOK_BIN el codec (por defecto ./dec junto al script)
+MODEL = os.environ.get('OLLAMA_MODEL', 'qwen3:4b')
+# Gemma exige <bos> y Ollama lo antepone incluso en raw, asi que su cuenta sale
+# en +1. BOS_EXTRA=1 lo espera de forma explicita en vez de relajar la
+# comprobacion; el lado de Hector debe recibir el mismo <bos> por delante.
+BOS_EXTRA = int(os.environ.get('BOS_EXTRA', '0'))
+DEC = os.environ.get('TOK_BIN') or (sys.argv[0].rsplit('/',1)[0] + '/dec')
 
 def decode(ids):
     return subprocess.run([DEC, HNF, 'dec', ','.join(map(str,ids))],
@@ -24,7 +30,7 @@ res, desalineadas = {}, 0
 for n, p in enumerate(posiciones):
     pref = TOKS[:p+1]
     txt = decode(pref)
-    body = json.dumps({"model":"qwen3:4b","prompt":txt,"raw":True,"stream":False,
+    body = json.dumps({"model":MODEL,"prompt":txt,"raw":True,"stream":False,
                        "options":{"temperature":0,"num_predict":1,"num_ctx":4096}}).encode()
     try:
         with urllib.request.urlopen(urllib.request.Request(
@@ -33,7 +39,7 @@ for n, p in enumerate(posiciones):
             d = json.load(r)
     except Exception as e:
         print(f'\r  pos {p}: fallo {e}', file=sys.stderr); continue
-    if d.get('prompt_eval_count') != len(pref):        # el prefijo no re-tokeniza igual
+    if d.get('prompt_eval_count') != len(pref) + BOS_EXTRA:   # el prefijo no re-tokeniza igual
         desalineadas += 1; continue
     ids = encode(d.get('response',''))
     if ids: res[p] = ids[0]
