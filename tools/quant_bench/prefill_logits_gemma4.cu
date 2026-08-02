@@ -57,5 +57,31 @@ int main(int argc, char** argv) {
     for (uint32_t i=0;i<V;i++){ f32[i]=__half2float(h[i]); if(f32[i]>bv){bv=f32[i];best=i;} }
     fprintf(stderr, "  argmax=%u  max=%.4f\n", best, bv);
     FILE* f=fopen(argv[3],"wb"); fwrite(f32.data(),4,V,f); fclose(f);
+
+    // GEN=<n>: seguir generando greedy DESDE el KV que construyo el prefill.
+    // Es lo que decide de verdad: comparar solo los logits del prefill no ve
+    // si el error se arrastra por el cache a lo largo de la generacion.
+    const char* gen_env = getenv("GEN");
+    if (gen_env) {
+        int n_gen = atoi(gen_env);
+        void* tk1 = engine.tensors().allocate_and_register("t1", {1,1}, helios::dtype::INT32());
+        b.allocate_gemma4_scratch(engine, config, gemma, arch, 1, 1);
+        std::vector<int32_t> salida;
+        int32_t tok = (int32_t)best;
+        for (int i = 0; i < n_gen; i++) {
+            salida.push_back(tok);
+            cudaMemcpy(tk1, &tok, 4, cudaMemcpyHostToDevice);
+            engine.execute(b.build_gemma4_forward_cached(
+                engine, config, gemma, arch, "t1", 1, 1, {"_k", S + (uint32_t)i, 4096}));
+            engine.sync();
+            cudaMemcpy(h.data(), engine.tensors().at("_s.logits").ptr, (size_t)V*2, cudaMemcpyDeviceToHost);
+            uint32_t bi=0; float bvv=-1e30f;
+            for (uint32_t j=0;j<V;j++){ float x=__half2float(h[j]); if(x>bvv){bvv=x;bi=j;} }
+            tok = (int32_t)bi;
+        }
+        std::string ruta = std::string(argv[3]) + ".gen";
+        FILE* g=fopen(ruta.c_str(),"wb"); fwrite(salida.data(),4,salida.size(),g); fclose(g);
+        fprintf(stderr, "  %d tokens generados -> %s\n", n_gen, ruta.c_str());
+    }
     return 0;
 }
