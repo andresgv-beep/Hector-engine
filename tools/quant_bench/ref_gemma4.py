@@ -102,10 +102,22 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
     if visual is not None:
         h[image_mask] = visual
 
+    # REF_QUANT_PLE=1 pasa los pesos del PLE por HQ5.1K simulado, igual que el
+    # HNF de produccion. Sirve para saber si el desvio restante del motor lo
+    # explica el PLE cuantizado o hay algo mas. Cuantizar solo las filas
+    # recogidas equivale a cuantizar la tabla entera: los superbloques de 256
+    # caen dentro de cada fila (8960 = 35x256) y las filas son independientes.
+    if os.environ.get('REF_QUANT_PLE') == '1':
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from hqs_sim import quant_dequant
+        qp = lambda t: quant_dequant(t, 31)
+    else:
+        qp = lambda t: t
+
     # --- PLE: identidad del token + contexto proyectado, combinados a 1/sqrt(2)
-    ident = st.rows(P + 'embed_tokens_per_layer.weight', lookup_ids) * math.sqrt(PLE)
+    ident = qp(st.rows(P + 'embed_tokens_per_layer.weight', lookup_ids)) * math.sqrt(PLE)
     ident = ident.reshape(S, L, PLE)
-    ctx = (h @ st.f32(P + 'per_layer_model_projection.weight').T) / math.sqrt(D)
+    ctx = (h @ qp(st.f32(P + 'per_layer_model_projection.weight')).T) / math.sqrt(D)
     ctx = rmsnorm(ctx.reshape(S, L, PLE), st.f32(P + 'per_layer_projection_norm.weight'), eps)
     ple = (ctx + ident) * (1.0 / math.sqrt(2.0))
 
@@ -167,8 +179,8 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
         h = res + rmsnorm(x, w('post_feedforward_layernorm.weight'), eps)
 
         res = h                                 # inyeccion del PLE de esta capa
-        g = gelu_tanh(h @ w('per_layer_input_gate.weight').T) * ple[:, i, :]
-        g = r16(g @ w('per_layer_projection.weight').T)
+        g = gelu_tanh(h @ qp(w('per_layer_input_gate.weight')).T) * ple[:, i, :]
+        g = r16(g @ qp(w('per_layer_projection.weight')).T)
         h = res + rmsnorm(g, w('post_per_layer_input_norm.weight'), eps)
         h = h * w('layer_scalar')
         if os.environ.get('REF_FP16_RESIDUAL') == '1':

@@ -352,16 +352,20 @@ void launch_matmul_hq41k_cublas(
         weights, g_dequant_buffer, K, N
     );
 
-    __half alpha_h = __float2half(1.0f);
-    __half beta_h = __float2half(0.0f);
-    cublasHgemm(g_cublas_handle,
+    // Igual que launch_matmul_fp16_cublas: acumular en fp32, no en fp16.
+    // Hgemm acumulaba en fp16 y era la fuente principal del desvio del motor.
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    cublasGemmEx(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
-        &alpha_h,
-        g_dequant_buffer, K,
-        input, K,
-        &beta_h,
-        output, N
+        &alpha,
+        g_dequant_buffer, CUDA_R_16F, K,
+        input, CUDA_R_16F, K,
+        &beta,
+        output, CUDA_R_16F, N,
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT
     );
 }
 
@@ -383,16 +387,20 @@ void launch_matmul_hq51k_cublas(
         weights, g_dequant_buffer, K, N
     );
 
-    __half alpha_h = __float2half(1.0f);
-    __half beta_h = __float2half(0.0f);
-    cublasHgemm(g_cublas_handle,
+    // Igual que launch_matmul_fp16_cublas: acumular en fp32, no en fp16.
+    // Hgemm acumulaba en fp16 y era la fuente principal del desvio del motor.
+    float alpha = 1.0f;
+    float beta = 0.0f;
+    cublasGemmEx(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
-        &alpha_h,
-        g_dequant_buffer, K,
-        input, K,
-        &beta_h,
-        output, N
+        &alpha,
+        g_dequant_buffer, CUDA_R_16F, K,
+        input, CUDA_R_16F, K,
+        &beta,
+        output, CUDA_R_16F, N,
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT
     );
 }
 
@@ -403,18 +411,27 @@ void launch_matmul_fp16_cublas(
 ) {
     ensure_cublas();
     cublasSetStream(g_cublas_handle, stream);  // ALWAYS set
-    
-    __half alpha_h = __float2half(1.0f);
-    __half beta_h = __float2half(0.0f);
-    
-    cublasHgemm(g_cublas_handle,
+
+    // GemmEx con CUBLAS_COMPUTE_32F, no Hgemm: entradas y salida en fp16 pero
+    // ACUMULACION en fp32. Hgemm acumula en fp16 y con K de miles y las
+    // activaciones grandes de Gemma 4 (normas de +236) ese redondeo por paso
+    // era la fuente principal del desvio del motor frente a la implementacion
+    // oficial con el modelo SIN cuantizar. Los kernels propios de este repo
+    // (gemv_fp16_v3, matmul_fp16_kernel, y todos los HQS) ya acumulaban en
+    // fp32; cublas era el unico camino que no.
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    cublasGemmEx(g_cublas_handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
-        &alpha_h,
-        B, K,
-        A, K,
-        &beta_h,
-        C, N
+        &alpha,
+        B, CUDA_R_16F, K,
+        A, CUDA_R_16F, K,
+        &beta,
+        C, CUDA_R_16F, N,
+        CUBLAS_COMPUTE_32F,
+        CUBLAS_GEMM_DEFAULT
     );
 }
 

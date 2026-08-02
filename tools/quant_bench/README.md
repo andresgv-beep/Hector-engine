@@ -432,10 +432,31 @@ volver a mirarlos sin una razón nueva:
 | `v_norm` **sin** peso | `graph_builder.cpp:637` | coincide |
 | KV compartido: qué capa física alimenta a cuál | `gemma4_kv_cache.hpp:83` | coincide |
 
-**Lo que queda, y es de otra naturaleza:** ya no son constantes ni fórmulas
-sueltas. Los sospechosos son las **numéricas del kernel de atención** (softmax
-online, orden de acumulación) y las **diferencias entre el camino de prefill y
-el de decode**. Eso no se ve leyendo: hace falta el volcado por capa.
+**RESUELTO el 2026-08-02 por la mañana.** El desvío se descompuso en dos partes,
+las dos medidas:
+
+1. **0,4 puntos: `cublasHgemm` acumulaba en fp16.** Los kernels propios (GEMV
+   fp16, todos los HQS) acumulan en fp32, pero los tres caminos cublas usaban
+   `Hgemm`, que acumula en fp16. **Arreglado** en `kernels/matmul_cublas.cu`:
+   `cublasGemmEx` con `CUBLAS_COMPUTE_32F` — mismas entradas/salidas fp16,
+   acumulación fp32, tensor cores intactos. Velocidad sin cambio medible
+   (66 tok/s; el decode usa los GEMV propios y ni pasa por ahí). Los tests no
+   lo podían ver: toleran 0,003 por elemento, y esto es exactamente esa clase
+   de error.
+2. **~3,7 puntos: el PLE cuantizado (HQ5.1K) + redondeo fp16.** No es un bug.
+   Simulado fielmente en la referencia (`REF_QUANT_PLE=1` + `REF_FP16_ALL=1`):
+   la simulación da 95,9% y Héctor real 96,3% — el motor está *dentro* de lo
+   que sus restricciones de despliegue predicen, incluso una pizca mejor.
+
+El volcado por capa (`dump_hidden_gemma4.cu` contra los `.npz` de oro) mostró
+**rampa suave, no escalón**: NRMSE 0,004 en la capa 0 creciendo gradualmente a
+~0,03-0,05, coseno ≥0,998 en las 35 capas. Ese perfil es acumulación de ruido,
+no un bug localizado — y fue lo que redirigió la búsqueda de "qué fórmula está
+mal" a "qué fuente de ruido no estoy contando".
+
+**Conclusión: el motor no tiene ningún desvío de implementación pendiente.**
+La fidelidad de Gemma 4 en Héctor está limitada solo por lo que se decide
+cuantizar. Si algún día hace falta más, el mando es el PLE (fp16 = +2,9 GB).
 
 **El arreglo duradero** no es encontrar este bug, es que los tests carguen
 valores de oro de una implementación externa en vez de recalcularlos. Con
