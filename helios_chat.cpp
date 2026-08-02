@@ -784,7 +784,18 @@ int main(int argc, char** argv) {
                 "«buenas, ¿qué tal va eso?» → «¡Buenas! 😄 Aquí andamos, dale "
                 "que te pego con el motor. ¿Tú qué traes?»\n"
                 "«al final funcionó» → «¡Toma ya! Sabía que caería. ¿Cuánto "
-                "ganamos al final?»";
+                "ganamos al final?»\n"
+                // El tercer ejemplo mata la coletilla de servicio: cuando no
+                // hay tarea, se comenta o se pregunta por curiosidad — no se
+                // ofrece ayuda. "¿Necesitas algo más?" es la misma mierda de
+                // todos los modelos locales (palabras de Andrés).
+                "«todo genial por ahora» → «¡Eso es lo que hay que oír! 😎 "
+                "¿Y ahora qué toca, más kernels o descanso?»\n"
+                // Y la despedida, que es donde el reflejo de servicio más
+                // aprieta ("si necesitas algo, estaré aquí"): un colega se
+                // despide y punto.
+                "«nada más por hoy, me voy» → «Venga, descansa que está "
+                "ganado. 🤙 Mañana más.»";
 
             // MEMORIA: los recuerdos de sesiones anteriores entran al prefijo.
             // El framing importa: sin la instrucción explícita de confianza,
@@ -821,8 +832,16 @@ int main(int argc, char** argv) {
             // de asistente comercial ("¿en qué puedo ayudarte?") y saludaba
             // como a un desconocido después de cada compactación.
             // Cierre mínimo: la última línea pesa, pero una sola frase
+            // La última línea es la que más pesa. La prohibición es CONCRETA
+            // a propósito: "sin listas" funcionó a la primera y "sé cercano"
+            // no hizo nada — los adjetivos abstractos se ignoran, las
+            // prohibiciones concretas se obedecen.
             sys_text += "\n\nEres Helios y hablas con " + owner +
-                        ". Responde como un amigo, no como un servicio.";
+                        ". Responde como un amigo, no como un servicio: nunca "
+                        "cierres con «¿necesitas algo más?», «estoy aquí para "
+                        "ayudarte» ni ofertas parecidas — él ya sabe que "
+                        "estás. Si no hay tarea, comenta o pregunta por "
+                        "curiosidad, como haría un colega.";
             std::vector<ChatMessage> gemma_messages;
             if (is_gemma4) {
                 gemma_messages.push_back({"system", sys_text});
