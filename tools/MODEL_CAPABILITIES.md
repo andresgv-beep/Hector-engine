@@ -67,7 +67,9 @@ pasos.
 
 ## Estado de las modalidades
 
-Visión Gemma 4 tiene adaptador listo. CLIP, SigLIP, ViT y EVA ya caben en el
+Visión Gemma 4 tiene adaptador persistente listo mediante
+`MultimodalAdapter`; su frontera y framing se documentan en
+`MULTIMODAL_ADAPTER.md`. CLIP, SigLIP, ViT y EVA ya caben en el
 vocabulario binario, pero permanecen `metadata_ready` hasta tener runner y
 regla. Audio y vídeo pueden detectarse por bloque/flags; sus configs binarias
 y adaptadores todavía no existen y por ello aparecen `declared_only`.

@@ -1,4 +1,8 @@
 #include "gemma4_multimodal.hpp"
+#include "multimodal_adapter.hpp"
+#include "chat_template.hpp"
+#include "gemma4_kv_cache.hpp"
+#include "model_capabilities.hpp"
 #include "engine.hpp"
 #include "kernels.hpp"
 
@@ -142,11 +146,130 @@ void test_scatter_rows() {
     std::cout << "PASS: FP16 visual row substitution" << std::endl;
 }
 
+void test_generic_attachment_contract() {
+    std::vector<uint8_t> pixels(4 * 2 * 3, 127);
+    helios::MultimodalTurnInput turn;
+    turn.formatted_token_ids = {2, 18, 9};
+    turn.attachments.push_back({
+        helios::AttachmentKind::ImageRgb8,
+        pixels.data(), pixels.size(), "image/rgb8",
+        4, 2, 12, 0, 0});
+    const helios::MultimodalAdapterLimits limits{
+        helios::attachment_kind_bit(helios::AttachmentKind::ImageRgb8),
+        1, 512, 1024};
+    std::string error;
+    require(helios::validate_multimodal_turn(turn, limits, &error),
+            "valid generic RGB8 attachment: " + error);
+
+    turn.attachments.front().byte_size--;
+    require(!helios::validate_multimodal_turn(turn, limits, &error) &&
+            error.find("shorter") != std::string::npos,
+            "truncated RGB8 attachment must be rejected");
+    turn.attachments.front().byte_size++;
+    turn.attachments.front().kind = helios::AttachmentKind::AudioPcmF32;
+    require(!helios::validate_multimodal_turn(turn, limits, &error) &&
+            error.find("unsupported") != std::string::npos,
+            "adapter mask must reject an unsupported modality");
+    std::cout << "PASS: generic borrowed-attachment contract" << std::endl;
+}
+
+void test_real_persistent_adapter(const std::string& path) {
+    setenv("HELIOS_EMBED_MMAP", "1", 1);
+    setenv("HELIOS_VISION_MMAP", "1", 1);
+
+    cudaStream_t stream = nullptr;
+    cuda_require(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+                 "create adapter test stream");
+    helios::EngineConfig engine_config;
+    engine_config.scratch_pool.auto_fraction = 0.0f;
+    engine_config.stream = stream;
+    helios::Engine engine(engine_config);
+    helios::kernels::register_all_kernels(engine);
+
+    helios::HnfLoader loader;
+    require(loader.open(path), "open combined HNF: " + loader.last_error());
+    require(loader.load_block(helios::BLOCK_TEXT_MODEL, engine),
+            "load text block: " + loader.last_error());
+    const auto* tokenizer = loader.tokenizer("text");
+    require(tokenizer, "combined HNF tokenizer");
+
+    constexpr uint32_t kContext = 1024;
+    helios::Gemma4KVCache cache;
+    require(cache.allocate(loader.gemma4_config(),
+                           loader.config().num_key_value_heads(), 1, kContext),
+            "allocate persistent adapter KV");
+    cache.register_tensors(engine, "_mm_adapter_test_kv");
+
+    helios::GraphBuilder graph;
+    const auto text_arch = graph.detect_architecture(
+        engine, "text", loader.config());
+    graph.allocate_gemma4_scratch(
+        engine, loader.config(), loader.gemma4_config(), text_arch, 1, 512);
+
+    const auto capabilities = helios::inspect_model_capabilities(loader);
+    const auto* vision = capabilities.find(helios::ModelModality::Vision);
+    require(vision && vision->status == helios::AdapterStatus::RuntimeReady,
+            "real HNF must resolve a runtime vision adapter");
+    std::string error;
+    auto adapter = helios::create_multimodal_adapter(
+        vision->adapter_id, engine, loader, graph, text_arch, 512, &error);
+    require(adapter != nullptr, "create persistent adapter: " + error);
+
+    std::vector<uint8_t> pixels(96 * 72 * 3);
+    for (uint32_t y = 0; y < 72; ++y) {
+        for (uint32_t x = 0; x < 96; ++x) {
+            const size_t p = (size_t(y) * 96 + x) * 3;
+            pixels[p + 0] = static_cast<uint8_t>(x * 255 / 95);
+            pixels[p + 1] = static_cast<uint8_t>(y * 255 / 71);
+            pixels[p + 2] = 63;
+        }
+    }
+    const helios::TurnAttachment image{
+        helios::AttachmentKind::ImageRgb8,
+        pixels.data(), pixels.size(), "image/rgb8",
+        96, 72, 96 * 3, 0, 0};
+
+    auto first_ids = tokenizer->encode(helios::format_gemma4_chat(
+        {{"user", "<|image|>\nDescribe la imagen."}}), false, false);
+    helios::MultimodalTurnInput first{first_ids, {image}};
+    helios::MultimodalPrefillResult first_result;
+    require(adapter->prefill(
+                first, {"_mm_adapter_test_kv", 0, kContext},
+                first_result, &error),
+            "first persistent image prefill: " + error);
+    require(first_result.attachment_count == 1 &&
+            first_result.injected_tokens > 0 &&
+            first_result.sequence_tokens > first_ids.size(),
+            "first image prefill result");
+    cache.advance(first_result.sequence_tokens);
+
+    const std::string second_fragment =
+        "<turn|>\n<|turn>user\n<|image|>\n"
+        "¿Qué colores dominan?<turn|>\n<|turn>model\n";
+    auto second_ids = tokenizer->encode(second_fragment, false, false);
+    helios::MultimodalTurnInput second{second_ids, {image}};
+    helios::MultimodalPrefillResult second_result;
+    require(adapter->prefill(
+                second, {"_mm_adapter_test_kv", cache.position(), kContext},
+                second_result, &error),
+            "second persistent image prefill: " + error);
+    require(second_result.injected_tokens == first_result.injected_tokens,
+            "adapter must be reusable at a non-zero KV position");
+    require(engine.tensors().exists("_s.logits"),
+            "multimodal prefill must produce decoder logits");
+
+    adapter.reset();
+    cudaStreamDestroy(stream);
+    std::cout << "PASS: real persistent adapter at two KV positions" << std::endl;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     test_token_plan();
     test_scatter_rows();
+    test_generic_attachment_contract();
+    if (argc > 1) test_real_persistent_adapter(argv[1]);
     std::cout << "Gemma 4 multimodal V5 primitives: passed" << std::endl;
     return 0;
 }

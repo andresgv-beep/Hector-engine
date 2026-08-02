@@ -30,6 +30,8 @@
 #include "src/kv_cache.hpp"
 #include "src/gemma4_kv_cache.hpp"
 #include "src/chat_template.hpp"
+#include "src/model_capabilities.hpp"
+#include "src/multimodal_adapter.hpp"
 #include "kernels/kernels.hpp"
 #include <iostream>
 #include <fstream>
@@ -40,6 +42,8 @@
 #include <chrono>
 #include <thread>
 #include <algorithm>
+#include <limits>
+#include <memory>
 #include <utility>
 #include <set>
 #include <ctime>
@@ -493,6 +497,26 @@ int main(int argc, char** argv) {
             gb.allocate_scratch(engine, model_config, arch, 1, PREFILL_CHUNK);
         }
 
+        // Optional multimodal adapter resolved exclusively from HNF metadata.
+        // The chat owns the session/KV; the adapter owns modality preprocessing
+        // and the architecture-specific prefill.
+        std::unique_ptr<MultimodalAdapter> multimodal_adapter;
+        const ModelCapabilities model_capabilities =
+            inspect_model_capabilities(loader);
+        if (const auto* vision = model_capabilities.find(ModelModality::Vision);
+            vision && vision->status == AdapterStatus::RuntimeReady) {
+            std::string adapter_error;
+            multimodal_adapter = create_multimodal_adapter(
+                vision->adapter_id, engine, loader, gb, arch,
+                PREFILL_CHUNK, &adapter_error);
+            if (!multimodal_adapter) {
+                throw std::runtime_error(
+                    "No se pudo crear el adaptador multimodal: " + adapter_error);
+            }
+            std::cout << ">>> Adjuntos: " << multimodal_adapter->id()
+                      << " (RGB8 persistente)" << std::endl;
+        }
+
         Sampler sampler;
         // Parámetros de muestreo calibrables por entorno (para barridos A/B
         // sin recompilar): HELIOS_REP, HELIOS_WINDOW, HELIOS_FREQ,
@@ -551,6 +575,10 @@ int main(int argc, char** argv) {
         // palabra por palabra (una historia no podía avanzar). Con varios, la
         // conversación conserva progresión al otro lado del reset.
         std::vector<std::pair<std::string,std::string>> recent_turns;
+        std::vector<uint8_t> pending_rgb;
+        uint32_t pending_rgb_width = 0;
+        uint32_t pending_rgb_height = 0;
+        size_t pending_rgb_stride = 0;
         const float SPEAK_PACE_TOKS = 18.0f;   // ritmo de lectura humana
         auto hexos_last = std::chrono::high_resolution_clock::now();
 
@@ -1046,6 +1074,81 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            // Framing de proceso para HexOS/UI:
+            //   /adjunto-rgb8 WIDTH HEIGHT STRIDE BYTES\n
+            //   <BYTES bytes crudos>\n
+            // El payload nunca pasa por el parser de texto. Se guarda hasta el
+            // siguiente turno normal y entonces lo consume el adaptador que el
+            // HNF declaró; el chat no conoce Gemma 4 ni nombres de tensores.
+            if (line.rfind("/adjunto-rgb8 ", 0) == 0) {
+                std::istringstream header(line);
+                std::string command, extra;
+                uint64_t width = 0, height = 0, stride = 0, bytes = 0;
+                const bool parsed =
+                    (header >> command >> width >> height >> stride >> bytes) &&
+                    !(header >> extra) && command == "/adjunto-rgb8";
+                constexpr uint64_t kWireLimit = uint64_t{300} * 1024 * 1024;
+                if (!parsed || width == 0 || height == 0 || stride == 0 ||
+                    width > std::numeric_limits<uint32_t>::max() ||
+                    height > std::numeric_limits<uint32_t>::max() ||
+                    stride > std::numeric_limits<size_t>::max() ||
+                    bytes == 0 || bytes > kWireLimit ||
+                    bytes > std::numeric_limits<size_t>::max()) {
+                    throw std::runtime_error(
+                        "cabecera /adjunto-rgb8 inválida; se cierra para no "
+                        "desincronizar el flujo binario");
+                }
+                pending_rgb.resize(static_cast<size_t>(bytes));
+                std::cin.read(reinterpret_cast<char*>(pending_rgb.data()),
+                              static_cast<std::streamsize>(bytes));
+                if (static_cast<uint64_t>(std::cin.gcount()) != bytes) {
+                    throw std::runtime_error("payload RGB8 truncado");
+                }
+                char separator = 0;
+                if (!std::cin.get(separator) || separator != '\n') {
+                    throw std::runtime_error(
+                        "payload RGB8 sin separador final");
+                }
+                pending_rgb_width = static_cast<uint32_t>(width);
+                pending_rgb_height = static_cast<uint32_t>(height);
+                pending_rgb_stride = static_cast<size_t>(stride);
+
+                MultimodalTurnInput validation;
+                validation.formatted_token_ids = {0};
+                validation.attachments.push_back({
+                    AttachmentKind::ImageRgb8,
+                    pending_rgb.data(), pending_rgb.size(), "image/rgb8",
+                    pending_rgb_width, pending_rgb_height,
+                    pending_rgb_stride, 0, 0});
+                std::string attachment_error;
+                if (!multimodal_adapter ||
+                    !validate_multimodal_turn(
+                        validation,
+                        multimodal_adapter
+                            ? multimodal_adapter->limits()
+                            : MultimodalAdapterLimits{},
+                        &attachment_error)) {
+                    pending_rgb.clear();
+                    std::cout << "\033[33m(imagen rechazada: "
+                              << (multimodal_adapter
+                                      ? attachment_error
+                                      : "el modelo no tiene adaptador de visión")
+                              << ")\033[0m\n";
+                } else {
+                    std::cout << "\033[32m(imagen lista: "
+                              << pending_rgb_width << 'x' << pending_rgb_height
+                              << ")\033[0m\n";
+                }
+                continue;
+            }
+            if (line == "/adjunto-limpiar") {
+                pending_rgb.clear();
+                pending_rgb_width = pending_rgb_height = 0;
+                pending_rgb_stride = 0;
+                std::cout << "(adjunto descartado)\n";
+                continue;
+            }
+
             // MEMORIA EXPLÍCITA — determinista, sin teatro del modelo.
             // El instinto natural es la spec: cualquier fraseo de "recuerda"
             // escribe a disco DE VERDAD. El comando /recuerda guarda en
@@ -1191,6 +1294,7 @@ int main(int argc, char** argv) {
             bool user_forced = line.find("/think") != std::string::npos ||
                                line.find("/no_think") != std::string::npos;
             std::string user_msg = line;
+            const bool turn_has_attachment = !pending_rgb.empty();
             bool trivial = false;
             if (!user_forced && is_trivial_message(line)) {
                 if (!is_gemma4) user_msg += " /no_think";
@@ -1198,7 +1302,8 @@ int main(int argc, char** argv) {
             }
 
             user_turns++;
-            last_user_msg = user_msg;
+            last_user_msg = turn_has_attachment
+                ? "[Imagen adjunta] " + user_msg : user_msg;
             last_reply.clear();
 
             // El CK ajusta la temperatura al tipo de petición (charla ≠ dato)
@@ -1215,7 +1320,9 @@ int main(int argc, char** argv) {
                 turn_ids.insert(turn_ids.end(), seg.begin(), seg.end());
             };
             if (is_gemma4) {
-                turn_ids = encode_gemma_user_fragment(user_msg);
+                turn_ids = encode_gemma_user_fragment(
+                    turn_has_attachment
+                        ? "<|image|>\n" + user_msg : user_msg);
             } else {
                 turn_ids.push_back(*turn_start);
                 push_text("user\n" + user_msg);
@@ -1234,7 +1341,13 @@ int main(int argc, char** argv) {
             uint32_t room = (kv_config.max_seq_len > cache_position() + RESERVE_GEN)
                           ? kv_config.max_seq_len - cache_position() - RESERVE_GEN
                           : 0;
-            if (turn_ids.size() > room) {
+            size_t required_turn_tokens = turn_ids.size();
+            if (turn_has_attachment && loader.has_gemma4_vision_config()) {
+                // Placeholder -> BOI + visual rows + EOI.
+                required_turn_tokens +=
+                    loader.gemma4_vision_config().max_soft_tokens + 1;
+            }
+            if (required_turn_tokens > room) {
                 // 1) compactar y reintentar con el contexto recién liberado
                 std::cout << "\033[90m(turno grande — reorganizando...)\033[0m"
                           << std::endl;
@@ -1245,6 +1358,12 @@ int main(int argc, char** argv) {
                 room = (kv_config.max_seq_len > cache_position() + RESERVE_GEN)
                      ? kv_config.max_seq_len - cache_position() - RESERVE_GEN
                      : 0;
+            }
+            if (turn_has_attachment && required_turn_tokens > room) {
+                std::cout << "\033[33m(la imagen y su pregunta no caben en "
+                             "este contexto; aumenta HELIOS_CTX)\033[0m\n";
+                pending_rgb.clear();
+                continue;
             }
             if (turn_ids.size() > room && room > 64) {
                 // 2) aún no cabe: recortar el contenido conservando el cierre
@@ -1258,7 +1377,39 @@ int main(int argc, char** argv) {
             }
 
             auto t0 = std::chrono::high_resolution_clock::now();
-            int32_t next = forward_batch(turn_ids);
+            int32_t next = 0;
+            if (turn_has_attachment) {
+                MultimodalTurnInput multimodal_turn;
+                multimodal_turn.formatted_token_ids = turn_ids;
+                multimodal_turn.attachments.push_back({
+                    AttachmentKind::ImageRgb8,
+                    pending_rgb.data(), pending_rgb.size(), "image/rgb8",
+                    pending_rgb_width, pending_rgb_height,
+                    pending_rgb_stride, 0, 0});
+                MultimodalPrefillResult prefill_result;
+                std::string prefill_error;
+                const uint32_t position = cache_position();
+                if (!multimodal_adapter ||
+                    !multimodal_adapter->prefill(
+                        multimodal_turn,
+                        {kv_prefix, position, kv_config.max_seq_len},
+                        prefill_result, &prefill_error)) {
+                    std::cout << "\033[33m(no pude procesar la imagen: "
+                              << prefill_error << ")\033[0m\n";
+                    continue;
+                }
+                cache_advance(prefill_result.sequence_tokens);
+                total_tokens += prefill_result.sequence_tokens;
+                auto* logits_info = gb.get_logits(engine);
+                next = sampler.sample(
+                    static_cast<const half*>(logits_info->ptr),
+                    model_config.vocab_size(), sample_config, stream);
+                pending_rgb.clear();
+                pending_rgb_width = pending_rgb_height = 0;
+                pending_rgb_stride = 0;
+            } else {
+                next = forward_batch(turn_ids);
+            }
             auto t_prefill = std::chrono::high_resolution_clock::now();
 
             // --- Generación con governor de ritmo y presupuesto dinámico ---
@@ -1445,6 +1596,7 @@ int main(int argc, char** argv) {
                 std::string clean = user_msg;
                 size_t nt = clean.find(" /no_think");
                 if (nt != std::string::npos) clean.erase(nt, 10);
+                if (turn_has_attachment) clean = "[Imagen adjunta] " + clean;
                 session_transcript += "[" + owner_name() + "]: " + clean + "\n"
                                     + "[Helios]: " + last_reply + "\n";
                 // Ring de los últimos intercambios (sobreviven a la compactación)
