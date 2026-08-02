@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -177,7 +178,8 @@ void test_synthetic_contract() {
     std::cout << "PASS: synthetic GM4V contract and rejection" << std::endl;
 }
 
-void inspect_real_hnf(const std::string& path, bool exercise_load) {
+void inspect_real_hnf(const std::string& path, bool exercise_load,
+                      bool expect_mmap) {
     HnfLoader metadata;
     require(metadata.load_metadata(path),
             "real vision HNF metadata must load: " + metadata.last_error());
@@ -202,6 +204,8 @@ void inspect_real_hnf(const std::string& path, bool exercise_load) {
               << std::endl;
 
     if (!exercise_load) return;
+    if (expect_mmap) setenv("HELIOS_VISION_MMAP", "1", 1);
+    else unsetenv("HELIOS_VISION_MMAP");
     HnfLoader loader;
     require(loader.open(path), "real vision HNF must open: " + loader.last_error());
     Engine engine;
@@ -217,14 +221,29 @@ void inspect_real_hnf(const std::string& path, bool exercise_load) {
     require(loader.is_block_loaded(BLOCK_VISION), "vision load state");
     require(loader.block_tensor_count(BLOCK_VISION) == 659,
             "loaded vision tensor count");
-    require(loader.block_vram_usage(BLOCK_VISION) == report.weight_bytes,
-            "loaded vision byte count");
+    require(loader.block_vram_usage(BLOCK_VISION) ==
+                (expect_mmap ? 0 : report.weight_bytes),
+            "loaded vision VRAM byte count");
     require(loader.block_state(BLOCK_VISION).scratch_budget_bytes ==
                 report.scratch_upper_bound_bytes,
             "pre-allocation scratch budget must be retained");
     require(engine.tensors().count() == 659, "registry vision tensor count");
-    require(engine.tensors().owned_bytes() == report.weight_bytes,
-            "registry must account for the contiguous vision allocation");
+    if (expect_mmap) {
+        size_t mapped = 0;
+        for (const TensorEntry* entry : loader.tensors_for_block(BLOCK_VISION)) {
+            const TensorInfo* tensor = engine.tensors().get(entry->name);
+            require(tensor != nullptr, "mapped vision tensor missing");
+            if (tensor->file_mapped) ++mapped;
+        }
+        require(mapped == report.tensor_count,
+                "every visual tensor must remain file-backed");
+        require(engine.tensors().owned_bytes() >= report.weight_bytes &&
+                engine.tensors().owned_bytes() <= report.weight_bytes + 4096,
+                "registry must own one page-aligned visual mapping");
+    } else {
+        require(engine.tensors().owned_bytes() == report.weight_bytes,
+                "registry must account for the contiguous vision allocation");
+    }
     require(loader.unload_block(BLOCK_VISION, engine), "vision block unload");
     size_t free_unloaded = 0;
     require(cudaMemGetInfo(&free_unloaded, &total_vram) == cudaSuccess,
@@ -235,7 +254,9 @@ void inspect_real_hnf(const std::string& path, bool exercise_load) {
         ? free_before - free_loaded : 0;
     const size_t unrecovered = free_before > free_unloaded
         ? free_before - free_unloaded : 0;
-    std::cout << "PASS: real Gemma 4 vision load/unload" << std::endl;
+    std::cout << "PASS: real Gemma 4 vision "
+              << (expect_mmap ? "mmap" : "VRAM") << " load/unload"
+              << std::endl;
     std::cout << "  observed_vram=" << observed_load
               << " unrecovered_after_unload=" << unrecovered << std::endl;
 }
@@ -245,11 +266,17 @@ void inspect_real_hnf(const std::string& path, bool exercise_load) {
 int main(int argc, char** argv) {
     test_synthetic_contract();
     if (argc >= 2) {
-        const bool exercise_load = argc == 3 && std::string(argv[2]) == "--load";
-        inspect_real_hnf(argv[1], exercise_load);
+        const bool exercise_load = argc == 3 &&
+            (std::string(argv[2]) == "--load" ||
+             std::string(argv[2]) == "--mmap");
+        const bool expect_mmap = argc == 3 &&
+            std::string(argv[2]) == "--mmap";
+        inspect_real_hnf(argv[1], exercise_load, expect_mmap);
     }
-    if (argc > 3 || (argc == 3 && std::string(argv[2]) != "--load")) {
-        std::cerr << "Usage: test_gemma4_vision_metadata [vision.hnf] [--load]"
+    if (argc > 3 || (argc == 3 && std::string(argv[2]) != "--load" &&
+                     std::string(argv[2]) != "--mmap")) {
+        std::cerr << "Usage: test_gemma4_vision_metadata [vision.hnf]"
+                     " [--load|--mmap]"
                   << std::endl;
         return 2;
     }

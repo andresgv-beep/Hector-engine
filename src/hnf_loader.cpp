@@ -352,15 +352,19 @@ bool HnfLoader::load_block(BlockID id, Engine& engine) {
         }
         scratch_budget = static_cast<size_t>(report.scratch_upper_bound_bytes);
 
-        size_t free_bytes = 0;
-        size_t total_bytes = 0;
-        const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
-        if (status != cudaSuccess || report.weight_bytes > free_bytes) {
-            last_error_ = "insufficient VRAM for Gemma 4 vision weights (need " +
-                          std::to_string(report.weight_bytes) + ", free " +
-                          std::to_string(free_bytes) + ")";
-            std::cerr << "HnfLoader: " << last_error_ << std::endl;
-            return false;
+        const char* vision_mmap = getenv("HELIOS_VISION_MMAP");
+        const bool mmap_requested = vision_mmap && vision_mmap[0] == '1';
+        if (!mmap_requested) {
+            size_t free_bytes = 0;
+            size_t total_bytes = 0;
+            const cudaError_t status = cudaMemGetInfo(&free_bytes, &total_bytes);
+            if (status != cudaSuccess || report.weight_bytes > free_bytes) {
+                last_error_ = "insufficient VRAM for Gemma 4 vision weights (need " +
+                              std::to_string(report.weight_bytes) + ", free " +
+                              std::to_string(free_bytes) + ")";
+                std::cerr << "HnfLoader: " << last_error_ << std::endl;
+                return false;
+            }
         }
     }
 
@@ -377,6 +381,10 @@ bool HnfLoader::unload_block(BlockID id, Engine& engine) {
     if (id >= HNF_BLOCK_COUNT) return false;
     auto& s = block_states_[id];
     if (!s.loaded) return true;
+    if (!unstage_mapped_prefix(id, engine) ||
+        !release_mapped_staging(id, engine)) {
+        return false;
+    }
     // Contiguous blocks place ownership on their first registered tensor, so
     // remove in reverse order and release the backing allocation last.
     for (auto it = s.tensor_names.rbegin(); it != s.tensor_names.rend(); ++it) {
@@ -388,6 +396,119 @@ bool HnfLoader::unload_block(BlockID id, Engine& engine) {
 
 bool HnfLoader::unload_block(const std::string& name, Engine& engine) {
     return unload_block(block_id_from_name(name), engine);
+}
+
+bool HnfLoader::stage_mapped_prefix(BlockID id, Engine& engine,
+                                    const std::string& prefix,
+                                    cudaStream_t stream) {
+    if (id >= HNF_BLOCK_COUNT || !block_states_[id].loaded) {
+        last_error_ = "cannot stage an unloaded block";
+        return false;
+    }
+    auto& state = block_states_[id];
+    if (!state.staged_tensor_ptrs.empty()) {
+        last_error_ = "a mapped staging window is already active";
+        return false;
+    }
+    const std::string target = block_name(id);
+    std::vector<const TensorEntry*> selected;
+    uint64_t first_offset = std::numeric_limits<uint64_t>::max();
+    uint64_t last_offset = 0;
+    const TensorEntry* first_entry = nullptr;
+    for (const auto& entry : tensors_) {
+        if (entry.block != target || entry.name.rfind(prefix, 0) != 0) continue;
+        TensorInfo* tensor = engine.tensors().get(entry.name);
+        if (!tensor || !tensor->file_mapped || !tensor->ptr) {
+            // A normal VRAM block needs no staging at all.
+            if (selected.empty()) return true;
+            last_error_ = "mapped staging prefix mixes storage types: " + prefix;
+            return false;
+        }
+        selected.push_back(&entry);
+        if (entry.offset < first_offset) {
+            first_offset = entry.offset;
+            first_entry = &entry;
+        }
+        last_offset = std::max(last_offset, entry.offset + entry.size);
+    }
+    if (selected.empty()) return true;
+    if (!first_entry || last_offset <= first_offset ||
+        last_offset - first_offset > std::numeric_limits<size_t>::max()) {
+        last_error_ = "invalid mapped staging range for prefix: " + prefix;
+        return false;
+    }
+    const size_t bytes = static_cast<size_t>(last_offset - first_offset);
+    if (bytes > state.staging_capacity) {
+        if (state.staging_ptr) cudaFree(state.staging_ptr);
+        state.staging_ptr = nullptr;
+        state.staging_capacity = 0;
+        const cudaError_t allocation = cudaMalloc(&state.staging_ptr, bytes);
+        if (allocation != cudaSuccess) {
+            last_error_ = "cannot allocate visual staging window: " +
+                          std::string(cudaGetErrorString(allocation));
+            return false;
+        }
+        state.staging_capacity = bytes;
+    }
+    TensorInfo* first_tensor = engine.tensors().get(first_entry->name);
+    if (!first_tensor) {
+        last_error_ = "mapped staging lost its first tensor";
+        return false;
+    }
+    // Names belonging to one visual phase are contiguous in deterministic
+    // HNF layout, so hundreds of tiny tensors/clamps become one PCIe copy.
+    const cudaError_t copy = cudaMemcpyAsync(
+        state.staging_ptr, first_tensor->ptr, bytes,
+        cudaMemcpyDefault, stream);
+    if (copy != cudaSuccess) {
+        last_error_ = "cannot copy visual staging window: " +
+                      std::string(cudaGetErrorString(copy));
+        cudaGetLastError();
+        return false;
+    }
+    state.staged_tensor_ptrs.reserve(selected.size());
+    for (const TensorEntry* entry : selected) {
+        TensorInfo* tensor = engine.tensors().get(entry->name);
+        state.staged_tensor_ptrs.emplace_back(entry->name, tensor->ptr);
+        tensor->ptr = static_cast<uint8_t*>(state.staging_ptr) +
+            static_cast<size_t>(entry->offset - first_offset);
+    }
+    return true;
+}
+
+bool HnfLoader::unstage_mapped_prefix(BlockID id, Engine& engine) {
+    if (id >= HNF_BLOCK_COUNT) return false;
+    auto& state = block_states_[id];
+    for (const auto& original : state.staged_tensor_ptrs) {
+        TensorInfo* tensor = engine.tensors().get(original.first);
+        if (!tensor) {
+            last_error_ = "cannot restore staged tensor: " + original.first;
+            return false;
+        }
+        tensor->ptr = original.second;
+    }
+    state.staged_tensor_ptrs.clear();
+    return true;
+}
+
+bool HnfLoader::release_mapped_staging(BlockID id, Engine& engine) {
+    if (id >= HNF_BLOCK_COUNT) return false;
+    auto& state = block_states_[id];
+    if (!state.staged_tensor_ptrs.empty() &&
+        !unstage_mapped_prefix(id, engine)) {
+        return false;
+    }
+    if (state.staging_ptr) {
+        const cudaError_t status = cudaFree(state.staging_ptr);
+        if (status != cudaSuccess) {
+            last_error_ = "cannot release mapped staging window: " +
+                          std::string(cudaGetErrorString(status));
+            return false;
+        }
+    }
+    state.staging_ptr = nullptr;
+    state.staging_capacity = 0;
+    return true;
 }
 
 bool HnfLoader::is_block_loaded(BlockID id) const { return id < HNF_BLOCK_COUNT && block_states_[id].loaded; }
@@ -429,6 +550,144 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
     std::string target = block_name(id);
     auto& state = block_states_[id];
     state = BlockState{};
+
+    // Experimental V7 path: keep the visual block file-backed and expose its
+    // addresses through Linux HMM. Text and KV remain resident in VRAM; the
+    // runner copies only one execution phase at a time into a small reusable
+    // device window. Host-preferred advice prevents the inactive 321 MiB tower
+    // from migrating into VRAM under memory pressure.
+    const char* vision_mmap_env = getenv("HELIOS_VISION_MMAP");
+    const bool vision_mmap_requested = id == BLOCK_VISION &&
+        has_gemma4_vision_config_ && vision_mmap_env &&
+        vision_mmap_env[0] == '1';
+    if (vision_mmap_requested) {
+        int device = 0;
+        int pageable = 0;
+        int concurrent = 0;
+        if (cudaGetDevice(&device) != cudaSuccess ||
+            cudaDeviceGetAttribute(&pageable, cudaDevAttrPageableMemoryAccess,
+                                   device) != cudaSuccess ||
+            cudaDeviceGetAttribute(&concurrent,
+                                   cudaDevAttrConcurrentManagedAccess,
+                                   device) != cudaSuccess ||
+            !pageable || !concurrent) {
+            last_error_ = "HELIOS_VISION_MMAP requires pageable and concurrent managed access";
+            return false;
+        }
+
+        const BlockEntry& block = blocks_[id];
+        const long page_size_raw = sysconf(_SC_PAGESIZE);
+        if (page_size_raw <= 0 || file_path_.empty()) {
+            last_error_ = "cannot determine page geometry for visual mmap";
+            return false;
+        }
+        const uint64_t page_size = static_cast<uint64_t>(page_size_raw);
+        const uint64_t page_mask = page_size - 1;
+        const uint64_t map_offset = block.offset & ~page_mask;
+        const size_t delta = static_cast<size_t>(block.offset - map_offset);
+        if (block.size > std::numeric_limits<size_t>::max() - delta) {
+            last_error_ = "visual mmap size overflows this platform";
+            return false;
+        }
+        const size_t map_size = delta + static_cast<size_t>(block.size);
+        const int fd = ::open(file_path_.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            last_error_ = "cannot open HNF for visual mmap";
+            return false;
+        }
+        struct stat file_stat {};
+        const bool in_bounds = fstat(fd, &file_stat) == 0 &&
+            file_stat.st_size >= 0 && map_offset <= uint64_t(file_stat.st_size) &&
+            map_size <= uint64_t(file_stat.st_size) - map_offset;
+        void* mapping = MAP_FAILED;
+        if (in_bounds) {
+            mapping = mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, fd,
+                           static_cast<off_t>(map_offset));
+        }
+        ::close(fd);
+        if (mapping == MAP_FAILED) {
+            last_error_ = "cannot create file-backed visual mapping";
+            return false;
+        }
+
+        // Linux page-cache hints concern disk/RAM. CUDA advice concerns where
+        // the GPU-visible pages live; do not use ReadMostly because that would
+        // deliberately duplicate the whole tower in device memory.
+        (void)madvise(mapping, map_size, MADV_SEQUENTIAL);
+        (void)madvise(mapping, map_size, MADV_WILLNEED);
+        void* block_data = static_cast<uint8_t*>(mapping) + delta;
+        const cudaMemLocation host_location{cudaMemLocationTypeHost, 0};
+        const cudaMemLocation device_location{cudaMemLocationTypeDevice, device};
+        const cudaError_t prefer_status = cudaMemAdvise(
+            block_data, static_cast<size_t>(block.size),
+            cudaMemAdviseSetPreferredLocation, host_location);
+        const cudaError_t access_status = prefer_status == cudaSuccess
+            ? cudaMemAdvise(block_data, static_cast<size_t>(block.size),
+                            cudaMemAdviseSetAccessedBy, device_location)
+            : prefer_status;
+        if (prefer_status != cudaSuccess || access_status != cudaSuccess) {
+            const cudaError_t failure = prefer_status != cudaSuccess
+                ? prefer_status : access_status;
+            last_error_ = "cannot apply host-resident CUDA advice to visual mmap: " +
+                          std::string(cudaGetErrorString(failure));
+            cudaGetLastError();
+            munmap(mapping, map_size);
+            return false;
+        }
+
+        bool owner_registered = false;
+        auto rollback = [&]() {
+            for (auto it = state.tensor_names.rbegin();
+                 it != state.tensor_names.rend(); ++it) {
+                engine.tensors().remove(*it);
+            }
+            if (!owner_registered) munmap(mapping, map_size);
+            state = BlockState{};
+        };
+        for (const auto& entry : tensors_) {
+            if (entry.block != target) continue;
+            const DTypeID dtype = dtype_from_string(entry.dtype);
+            size_t numel = 1;
+            bool valid_shape = true;
+            for (uint32_t dimension : entry.shape) {
+                if (dimension == 0 ||
+                    numel > std::numeric_limits<size_t>::max() / dimension) {
+                    valid_shape = false;
+                    break;
+                }
+                numel *= dimension;
+            }
+            const size_t expected_size = dtype == DTYPE_INVALID
+                ? 0 : dtype_size(dtype, numel);
+            const uint64_t relative = entry.offset - block.offset;
+            if (!valid_shape || expected_size == 0 ||
+                entry.size != expected_size || entry.offset < block.offset ||
+                relative > block.size || entry.size > block.size - relative ||
+                engine.tensors().exists(entry.name)) {
+                last_error_ = "invalid tensor in mapped Gemma 4 vision block: " +
+                              entry.name;
+                rollback();
+                return false;
+            }
+            TensorInfo info;
+            info.ptr = static_cast<uint8_t*>(block_data) + relative;
+            info.shape = entry.shape;
+            info.dtype = dtype;
+            info.size_bytes = static_cast<size_t>(entry.size);
+            info.owns_memory = !owner_registered;
+            info.file_mapped = true;
+            info.allocation_ptr = info.owns_memory ? mapping : nullptr;
+            info.allocation_size = info.owns_memory ? map_size : 0;
+            engine.tensors().register_tensor(entry.name, std::move(info));
+            owner_registered = true;
+            state.tensor_names.push_back(entry.name);
+            ++state.tensor_count;
+        }
+        state.loaded = true;
+        std::cout << "  [MMAP] vision (" << block.size / (1024 * 1024)
+                  << " MB, host-preferred sequential HMM)" << std::endl;
+        return true;
+    }
 
     // Gemma 4 vision contains 448 learned scalar clamps. One cudaMalloc per
     // tensor inflated a 321 MiB block to roughly 452 MiB on the test GPU.

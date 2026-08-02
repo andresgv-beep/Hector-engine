@@ -322,14 +322,23 @@ cargar texto. Un segundo turno reutiliza el KV sin repetir visión. Héctor pasa
 18/18 y el baseline textual conserva exactamente su SHA de logits. Evidencia
 en `tools/GEMMA4_VISION_V6.md`.
 
-### V7 — Optimización posterior
+### V7 — Residencia estable y staging por fases — CERRADA
 
-Solo después de V6:
+Mantener texto y KV residentes mientras la torre visual permanece respaldada
+por el HNF/RAM. La lectura HMM directa se mide pero no se adopta: cuBLAS tarda
+~1,18 s porque relee tiles por PCIe. La solución usa una ventana CUDA de 32 MiB
+y una transferencia contigua por patch/layer/proyector.
 
-- carga bajo demanda o residencia permanente según medida;
-- cuantización selectiva comparada contra el HNF visual FP16;
-- kernels/fusiones y más tamaños de soft tokens;
-- varias imágenes y vídeo reutilizando la torre.
+**Salida:** precisión idéntica a V4, KV de 4096 residente, pico visual de
+`+336 MiB` frente a `+626 MiB`, torre caliente de ~102 ms frente a ~69 ms y
+decode dentro del 1 %. Evidencia en `tools/GEMMA4_VISION_V7.md`.
+
+### V8 — Integración de producto y optimización opcional
+
+- mover la selección por capacidades y el ciclo de vida a HexOS;
+- decidir con perfil si solapar la copia de capa N+1 ahorra los ~33 ms medidos;
+- cuantización visual solo contra el HNF FP16 y con A/B conversacional;
+- varias imágenes, vídeo y audio como contratos separados.
 
 ## Primera acción segura
 
@@ -369,8 +378,12 @@ arriesgar el HNF de producción.
   relaciones de aspecto, segundo turno y métricas de VRAM/latencia. La captura
   real identificó y leyó correctamente los archivos mostrados. Evidencia en
   `tools/GEMMA4_VISION_V6.md`.
-- **Fase activa:** V7 — optimización posterior, manteniendo el HNF visual FP16
-  y las barreras V4/V5 como referencias de calidad.
+- **Fase cerrada:** V7 — texto y KV permanecen residentes; visión vive en el
+  HNF/RAM y usa una ventana temporal de 32 MiB. Ahorra 290 MiB de pico frente
+  a V6, añade ~33 ms por imagen caliente y conserva precisión/decode. Evidencia
+  en `tools/GEMMA4_VISION_V7.md`.
+- **Fase activa:** V8 — integrar la política en HexOS y medir si merece la pena
+  solapar transferencias antes de abordar otras modalidades.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -378,11 +391,11 @@ arriesgar el HNF de producción.
   perder 1,148 % en potencia alta y 6,770 % en potencia baja. Los dos HNF se
   recertificaron con el conversor determinista `37610b3`: Qwen SHA256
   `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
-- **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
-  MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
-  Transformers `b3a36037`. Tras V6, Héctor pasa 18/18; V4 conserva sus cinco
-  fronteras y el texto mantiene exactamente el hash congelado de logits.
-- **Siguiente acción exacta:** medir por separado carga de pesos, ejecución de
-  torre y descarga para decidir con datos entre carga bajo demanda y residencia
-  permanente. Solo después se probará cuantización selectiva visual contra el
-  HNF FP16, sin mezclarla con cambios HQS del decoder.
+- **Última comprobación:** V4 coincide con las mismas métricas usando pesos en
+  VRAM o staging desde HNF; carga/descarga mmap recupera toda la memoria. Con
+  contexto 4096, prefill y decode permanecen en 85,8 ms y 136,4 tok/s. Tras V7,
+  Héctor pasa 18/18 y texto conserva sus barreras independientes.
+- **Siguiente acción exacta:** trasladar a HexOS la selección de
+  `HELIOS_VISION_MMAP` según capacidades CUDA y el proceso persistente. Antes de
+  doble buffering, perfilar por fase para comprobar cuánto de los ~33 ms de
+  transporte puede solaparse realmente.

@@ -20,7 +20,7 @@ namespace helios {
 // patch projection plus learned 2-D position embedding.
 class Gemma4VisionRunner {
 public:
-    Gemma4VisionRunner(Engine& engine, const HnfLoader& loader);
+    Gemma4VisionRunner(Engine& engine, HnfLoader& loader);
     ~Gemma4VisionRunner();
 
     Gemma4VisionRunner(const Gemma4VisionRunner&) = delete;
@@ -87,7 +87,7 @@ private:
     void release();
 
     Engine& engine_;
-    const HnfLoader& loader_;
+    HnfLoader& loader_;
     uint32_t max_patches_ = 0;
     uint32_t patch_width_ = 0;
     uint32_t hidden_size_ = 0;

@@ -151,6 +151,15 @@ int main(int argc, char** argv) {
         const std::string prompt = argv[3];
         const char* followup_env = std::getenv("HELIOS_VISION_FOLLOWUP");
         const std::string followup = followup_env ? followup_env : "";
+        const char* vision_mmap_env = std::getenv("HELIOS_VISION_MMAP");
+        const bool vision_mmap = vision_mmap_env && vision_mmap_env[0] == '1';
+        uint32_t vision_repeats = 1;
+        if (const char* repeat_env = std::getenv("HELIOS_VISION_REPEAT")) {
+            const uint64_t requested_repeats = std::stoull(repeat_env);
+            require(requested_repeats >= 1 && requested_repeats <= 16,
+                    "HELIOS_VISION_REPEAT debe estar entre 1 y 16");
+            vision_repeats = static_cast<uint32_t>(requested_repeats);
+        }
         const uint64_t requested_tokens = argc >= 5 ? std::stoull(argv[4]) : 64;
         require(requested_tokens <= std::numeric_limits<uint32_t>::max(),
                 "max_tokens desborda uint32");
@@ -191,66 +200,18 @@ int main(int argc, char** argv) {
                 "preprocesado visual: " + error);
         const auto preprocess_end = Clock::now();
 
-        CudaStreamOwner stream;
-        helios::EngineConfig engine_config;
-        engine_config.scratch_pool.auto_fraction = 0.0f;
-        engine_config.stream = stream.value;
-        helios::Engine engine(engine_config);
-        helios::kernels::register_all_kernels(engine);
-        const size_t vram_initial = used_vram();
-
-        require(loader.load_block(helios::BLOCK_VISION, engine),
-                "no se puede cargar visión: " + loader.last_error());
-        const size_t vram_vision_weights = used_vram();
-        const auto tower_start = Clock::now();
-        uint32_t visual_tokens = 0;
-        size_t vram_vision_peak = 0;
-        {
-            helios::Gemma4VisionRunner runner(engine, loader);
-            require(runner.run_patch_embedder(preprocessed, &error),
-                    "patch embedder: " + error);
-            for (uint32_t layer = 0; layer < runner.num_layers(); ++layer) {
-                require(runner.run_encoder_layer(layer, &error),
-                        "capa visual " + std::to_string(layer) + ": " + error);
-            }
-            require(runner.run_pooler(&error), "pooler visual: " + error);
-            require(runner.run_projector(&error), "proyector visual: " + error);
-            engine.sync();
-            visual_tokens = runner.soft_token_count();
-            require(visual_tokens == preprocessed.soft_tokens &&
-                    runner.projection_size() == loader.config().hidden_size(),
-                    "la salida visual no coincide con el contrato de texto");
-            void* persistent = engine.tensors().allocate_and_register(
-                "g4.v6.image", {visual_tokens, runner.projection_size()},
-                helios::dtype::FP16());
-            cuda_require(cudaMemcpyAsync(
-                persistent, runner.projected_states_device(),
-                size_t(visual_tokens) * runner.projection_size() * sizeof(half),
-                cudaMemcpyDeviceToDevice, engine.config().stream),
-                "persist visual projection");
-            engine.sync();
-            vram_vision_peak = used_vram();
-        }
-        const auto tower_end = Clock::now();
-        require(loader.unload_block(helios::BLOCK_VISION, engine),
-                "no se pudo descargar el bloque visual");
-        const size_t vram_after_vision = used_vram();
-
-        // Lookup-only embeddings default to demand-paged mmap in this V6 CLI.
-        // An explicit user value still wins, including HELIOS_EMBED_MMAP=0.
-        if (!std::getenv("HELIOS_EMBED_MMAP")) {
-            setenv("HELIOS_EMBED_MMAP", "1", 0);
-        }
-        require(loader.load_block(helios::BLOCK_TEXT_MODEL, engine),
-                "no se puede cargar texto: " + loader.last_error());
-        const size_t vram_text_weights = used_vram();
-
+        // Token geometry is known after V3, before executing the tower. This
+        // lets V7 reserve the real heterogeneous KV while vision runs, proving
+        // that no decoder state needs to be evicted for a later image.
+        const uint32_t expected_visual_tokens = preprocessed.soft_tokens;
         const std::string user_content = "<|image|>\n" + prompt;
         const std::string formatted = helios::format_gemma4_chat(
             {{"user", user_content}});
-        const std::vector<int32_t> raw_ids = tokenizer->encode(formatted, false, false);
+        const std::vector<int32_t> raw_ids = tokenizer->encode(
+            formatted, false, false);
         const auto plan = helios::make_gemma4_multimodal_token_plan(
-            raw_ids, vision_config, loader.config().vocab_size(), visual_tokens);
+            raw_ids, vision_config, loader.config().vocab_size(),
+            expected_visual_tokens);
         require(plan.canonical_ids.size() <= std::numeric_limits<uint32_t>::max(),
                 "secuencia multimodal demasiado larga");
         const uint32_t sequence = static_cast<uint32_t>(plan.canonical_ids.size());
@@ -265,14 +226,118 @@ int main(int argc, char** argv) {
                               vision_config.image_token_id) == followup_ids.end(),
                     "el segundo turno V6 no admite otra imagen");
         }
+        const auto model_config = loader.config();
+        const auto& gemma = loader.gemma4_config();
         const uint64_t cache_required = uint64_t(sequence) +
             uint64_t(max_tokens) * (followup.empty() ? 1u : 2u) +
             followup_ids.size();
-        require(cache_required <= std::numeric_limits<uint32_t>::max(),
+        uint64_t cache_capacity = cache_required;
+        if (const char* context_env = std::getenv("HELIOS_CTX")) {
+            const uint64_t requested_context = std::stoull(context_env);
+            const uint64_t model_limit = model_config.get<uint32_t>(
+                "max_position_embeddings", 0);
+            require(requested_context >= 1 &&
+                    (!model_limit || requested_context <= model_limit),
+                    "HELIOS_CTX está fuera del límite del modelo");
+            cache_capacity = std::max(cache_capacity, requested_context);
+        }
+        require(cache_capacity <= std::numeric_limits<uint32_t>::max(),
                 "contexto multimodal demasiado largo");
-        const uint32_t max_cache = static_cast<uint32_t>(cache_required);
+        const uint32_t max_cache = static_cast<uint32_t>(cache_capacity);
         require(max_cache <= static_cast<uint32_t>(std::numeric_limits<int32_t>::max()),
                 "contexto multimodal excede el contador INT32 del decode");
+
+        CudaStreamOwner stream;
+        helios::EngineConfig engine_config;
+        engine_config.scratch_pool.auto_fraction = 0.0f;
+        engine_config.stream = stream.value;
+        helios::Engine engine(engine_config);
+        helios::kernels::register_all_kernels(engine);
+        const size_t vram_initial = used_vram();
+        helios::Gemma4KVCache cache;
+        bool cache_allocated = false;
+        auto ensure_cache = [&]() {
+            if (cache_allocated) return;
+            require(cache.allocate(gemma, model_config.num_key_value_heads(),
+                                   1, max_cache),
+                    "no se pudo reservar el KV heterogéneo");
+            cache.register_tensors(engine, "_g4v6kv");
+            cache_allocated = true;
+        };
+
+        // V7 mmap proves the final residency model: text is loaded first and
+        // remains untouched while the GPU executes the file-backed tower.
+        // The legacy V6 control deliberately preserves its old ordering.
+        if (!std::getenv("HELIOS_EMBED_MMAP")) {
+            setenv("HELIOS_EMBED_MMAP", "1", 0);
+        }
+        bool text_loaded = false;
+        size_t vram_text_weights = vram_initial;
+        if (vision_mmap) {
+            require(loader.load_block(helios::BLOCK_TEXT_MODEL, engine),
+                    "no se puede cargar texto antes de visión: " +
+                    loader.last_error());
+            text_loaded = true;
+            vram_text_weights = used_vram();
+            ensure_cache();
+        }
+
+        const size_t vram_before_vision = used_vram();
+        const auto vision_load_start = Clock::now();
+        require(loader.load_block(helios::BLOCK_VISION, engine),
+                "no se puede cargar visión: " + loader.last_error());
+        const auto vision_load_end = Clock::now();
+        const size_t vram_vision_weights = used_vram();
+        uint32_t visual_tokens = 0;
+        size_t vram_vision_peak = 0;
+        std::vector<double> tower_times;
+        tower_times.reserve(vision_repeats);
+        for (uint32_t repeat = 0; repeat < vision_repeats; ++repeat) {
+            const auto tower_start = Clock::now();
+            {
+                helios::Gemma4VisionRunner runner(engine, loader);
+                require(runner.run_patch_embedder(preprocessed, &error),
+                        "patch embedder: " + error);
+                for (uint32_t layer = 0; layer < runner.num_layers(); ++layer) {
+                    require(runner.run_encoder_layer(layer, &error),
+                            "capa visual " + std::to_string(layer) + ": " + error);
+                }
+                require(runner.run_pooler(&error), "pooler visual: " + error);
+                require(runner.run_projector(&error), "proyector visual: " + error);
+                engine.sync();
+                visual_tokens = runner.soft_token_count();
+                require(visual_tokens == preprocessed.soft_tokens &&
+                        runner.projection_size() == loader.config().hidden_size(),
+                        "la salida visual no coincide con el contrato de texto");
+                if (repeat + 1 == vision_repeats) {
+                    void* persistent = engine.tensors().allocate_and_register(
+                        "g4.v6.image", {visual_tokens, runner.projection_size()},
+                        helios::dtype::FP16());
+                    cuda_require(cudaMemcpyAsync(
+                        persistent, runner.projected_states_device(),
+                        size_t(visual_tokens) * runner.projection_size() * sizeof(half),
+                        cudaMemcpyDeviceToDevice, engine.config().stream),
+                        "persist visual projection");
+                    engine.sync();
+                }
+                vram_vision_peak = std::max(vram_vision_peak, used_vram());
+            }
+            const auto tower_end = Clock::now();
+            tower_times.push_back(milliseconds(tower_start, tower_end));
+        }
+        if (!vision_mmap) {
+            require(loader.unload_block(helios::BLOCK_VISION, engine),
+                    "no se pudo descargar el bloque visual");
+        }
+        const size_t vram_after_vision = used_vram();
+
+        if (!text_loaded) {
+            require(loader.load_block(helios::BLOCK_TEXT_MODEL, engine),
+                    "no se puede cargar texto: " + loader.last_error());
+            text_loaded = true;
+            vram_text_weights = used_vram();
+        }
+        ensure_cache();
 
         upload_i32(engine, "g4.v6.embedding_tokens", plan.embedding_ids,
                    {1, sequence});
@@ -286,18 +351,12 @@ int main(int argc, char** argv) {
                        {1, static_cast<uint32_t>(followup_ids.size())});
         }
 
-        const auto model_config = loader.config();
-        const auto& gemma = loader.gemma4_config();
         helios::GraphBuilder builder;
         const auto arch = builder.detect_architecture(engine, "text", model_config);
         const uint32_t scratch_sequence = std::max(
             sequence, static_cast<uint32_t>(followup_ids.size()));
         builder.allocate_gemma4_scratch(
             engine, model_config, gemma, arch, 1, scratch_sequence);
-        helios::Gemma4KVCache cache;
-        require(cache.allocate(gemma, model_config.num_key_value_heads(), 1, max_cache),
-                "no se pudo reservar el KV heterogéneo");
-        cache.register_tensors(engine, "_g4v6kv");
         const size_t vram_ready = used_vram();
 
         const helios::Gemma4MultimodalInputNames names{
@@ -390,7 +449,9 @@ int main(int argc, char** argv) {
 
         const double generation_seconds =
             std::chrono::duration<double>(generation_end - generation_start).count();
-        std::cout << "\n=== GEMMA 4 VISION V6 ===\n"
+        std::cout << "\n=== GEMMA 4 VISION "
+                  << (vision_mmap ? "V7 MMAP/STAGING" : "V6 VRAM")
+                  << " ===\n"
                   << "Imagen: " << image.width << 'x' << image.height
                   << " -> " << preprocessed.resized_width << 'x'
                   << preprocessed.resized_height << '\n'
@@ -400,7 +461,15 @@ int main(int argc, char** argv) {
                   << "Decode PNG: " << milliseconds(decode_start, decode_end) << " ms\n"
                   << "Preprocesado: " << milliseconds(preprocess_start, preprocess_end)
                   << " ms\n"
-                  << "Torre visual: " << milliseconds(tower_start, tower_end) << " ms\n"
+                  << "Carga visión: "
+                  << milliseconds(vision_load_start, vision_load_end) << " ms\n"
+                  << "Torre visual:";
+        for (size_t i = 0; i < tower_times.size(); ++i) {
+            std::cout << (i == 0 ? " " : " · ")
+                      << (i == 0 ? "fría " : "repetición " + std::to_string(i + 1) + " ")
+                      << tower_times[i] << " ms";
+        }
+        std::cout << "\n"
                   << "Prefill: " << milliseconds(prefill_start, prefill_end) << " ms\n"
                   << "Decode: " << generated.size() << " tokens";
         if (generation_seconds > 0.0) {
@@ -415,14 +484,18 @@ int main(int argc, char** argv) {
                           << " tok/s";
             }
         }
-        std::cout << "\nVRAM base: " << mib(vram_initial)
-                  << " MiB · pesos visión: +"
-                  << delta_mib(vram_vision_weights, vram_initial)
-                  << " MiB · pico visual: +" << delta_mib(vram_vision_peak, vram_initial)
-                  << " MiB\nVRAM tras liberar visión: +"
-                  << delta_mib(vram_after_vision, vram_initial)
-                  << " MiB · pesos texto: +"
+        std::cout << "\nResidencia: texto "
+                  << (vision_mmap ? "antes de visión" : "después de visión")
+                  << " · visión " << (vision_mmap ? "HNF/RAM" : "VRAM")
+                  << "\nVRAM base: " << mib(vram_initial)
+                  << " MiB · texto: +"
                   << delta_mib(vram_text_weights, vram_initial)
+                  << " MiB · pesos visión: +"
+                  << delta_mib(vram_vision_weights, vram_before_vision)
+                  << " MiB · pico torre: +"
+                  << delta_mib(vram_vision_peak, vram_before_vision)
+                  << " MiB\nVRAM tras torre: +"
+                  << delta_mib(vram_after_vision, vram_initial)
                   << " MiB · listo: +" << delta_mib(vram_ready, vram_initial)
                   << " MiB · prefill: +" << delta_mib(vram_prefill_peak, vram_initial)
                   << " MiB\nTiempo total: " << milliseconds(total_start, Clock::now())

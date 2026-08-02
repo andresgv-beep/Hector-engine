@@ -51,6 +51,11 @@ Las medidas se tomaron con el HNF combinado FP16 visual de V1. El pico visual
 incluye pesos, scratch y workspace; la columna de decode corresponde al primer
 turno greedy.
 
+> Estas latencias son el registro histórico de V6 con `cublasHgemm`. Tras
+> `d635d2b`, la acumulación FP32 deja la primera torre en ~163 ms por la
+> inicialización perezosa de GemmEx y las siguientes en ~69 ms. V7 mide y
+> explica ambas condiciones sin cambiar los resultados funcionales.
+
 | entrada | resize | patches válidos | soft tokens | torre | prefill | decode |
 |---|---:|---:|---:|---:|---:|---:|
 | 960×672 dorada | 960×672 | 2520/2520 | 280 | ~80 ms | ~79 ms | >119 tok/s |
@@ -115,7 +120,8 @@ del decode. Así se conservan simultáneamente `HELIOS_EMBED_MMAP=1` y CUDA Grap
 
 - Héctor: **18/18** pruebas CTest.
 - V4 contra el oráculo: se mantienen las cinco fronteras dentro de tolerancia;
-  la capa 15 continúa en NRMSE `0,0080698` y la proyección en `0,0055103`.
+  tras acumular en FP32, la capa 15 queda en NRMSE `0,0059977` y la proyección
+  en `0,0041824`.
 - Texto Gemma 4: logits idénticos al baseline congelado, SHA256
   `e8490bf94b415dc125ca5c58bff2b83f45f7de220283b57dfde95a1b0384a17f`.
 - `git diff --check`: limpio.

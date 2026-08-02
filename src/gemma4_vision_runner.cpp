@@ -31,7 +31,7 @@ bool shape_is(const TensorInfo* tensor,
 } // namespace
 
 Gemma4VisionRunner::Gemma4VisionRunner(Engine& engine,
-                                       const HnfLoader& loader)
+                                       HnfLoader& loader)
     : engine_(engine), loader_(loader) {
     if (!loader_.has_gemma4_vision_config()) return;
     const Gemma4VisionConfig& vision = loader_.gemma4_vision_config();
@@ -55,6 +55,7 @@ Gemma4VisionRunner::Gemma4VisionRunner(Engine& engine,
 
 Gemma4VisionRunner::~Gemma4VisionRunner() {
     release();
+    (void)loader_.release_mapped_staging(BLOCK_VISION, engine_);
 }
 
 bool Gemma4VisionRunner::validate_contract(std::string* error) const {
@@ -204,6 +205,17 @@ bool Gemma4VisionRunner::run_patch_embedder(
     if (!reserve(error)) return false;
 
     const cudaStream_t stream = engine_.config().stream;
+    if (!loader_.stage_mapped_prefix(
+            BLOCK_VISION, engine_, "vision.patch_embed.", stream)) {
+        return fail(error, loader_.last_error());
+    }
+    struct RestoreMappedPatch {
+        HnfLoader& loader;
+        Engine& engine;
+        ~RestoreMappedPatch() {
+            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
+        }
+    } restore_mapped{loader_, engine_};
     const size_t patch_elements = size_t(max_patches_) * patch_width_;
     if (!cuda_ok(cudaMemcpyAsync(d_pixel_values_, input.pixel_values.data(),
                                  patch_elements * sizeof(float),
@@ -350,6 +362,17 @@ bool Gemma4VisionRunner::run_encoder_layer(
     const cudaStream_t stream = engine_.config().stream;
     const size_t hidden_elements = size_t(max_patches_) * hidden_size_;
 
+    if (!loader_.stage_mapped_prefix(BLOCK_VISION, engine_, prefix, stream)) {
+        return fail(error, loader_.last_error());
+    }
+    struct RestoreMappedLayer {
+        HnfLoader& loader;
+        Engine& engine;
+        ~RestoreMappedLayer() {
+            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
+        }
+    } restore_mapped{loader_, engine_};
+
     const half* attn_in = fp16_tensor(prefix + "ln_attn_in.weight", error);
     const half* q_norm = fp16_tensor(prefix + "attn.q_norm.weight", error);
     const half* k_norm = fp16_tensor(prefix + "attn.k_norm.weight", error);
@@ -474,6 +497,18 @@ bool Gemma4VisionRunner::run_projector(std::string* error) {
     if (projector_complete_) {
         return fail(error, "Gemma 4 visual projector already ran");
     }
+    const cudaStream_t stream = engine_.config().stream;
+    if (!loader_.stage_mapped_prefix(
+            BLOCK_VISION, engine_, "vision.projector.", stream)) {
+        return fail(error, loader_.last_error());
+    }
+    struct RestoreMappedProjector {
+        HnfLoader& loader;
+        Engine& engine;
+        ~RestoreMappedProjector() {
+            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
+        }
+    } restore_mapped{loader_, engine_};
     const half* weight = fp16_tensor("vision.projector.weight", error);
     const TensorInfo* info = engine_.tensors().get("vision.projector.weight");
     if (!weight || !shape_is(info, {projection_size_, hidden_size_})) {
@@ -492,7 +527,6 @@ bool Gemma4VisionRunner::run_projector(std::string* error) {
             return false;
         }
     }
-    const cudaStream_t stream = engine_.config().stream;
     // std_bias=0 and std_scale=1 are fixed non-persistent upstream buffers for
     // this checkpoint. Casting after the FP32 pool therefore is sufficient.
     kernels::launch_fp32_to_fp16(

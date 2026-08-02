@@ -15,8 +15,11 @@
 #include <unordered_map>
 #include <cstdint>
 #include <fstream>
+#include <utility>
 
 namespace helios {
+
+class Gemma4VisionRunner;
 
 // ============================================================================
 // HNF CONSTANTS
@@ -529,6 +532,9 @@ struct BlockState {
     size_t tensor_count = 0;
     size_t scratch_budget_bytes = 0;
     std::vector<std::string> tensor_names;  // For unloading
+    void* staging_ptr = nullptr;            // Transient device window for HMM
+    size_t staging_capacity = 0;
+    std::vector<std::pair<std::string, void*>> staged_tensor_ptrs;
 };
 
 // ============================================================================
@@ -566,7 +572,7 @@ public:
     // CK calls this before loading a different modality
     bool unload_block(BlockID block_id, Engine& engine);
     bool unload_block(const std::string& block_name, Engine& engine);
-    
+
     // Query block state
     bool is_block_loaded(BlockID block_id) const;
     size_t block_vram_usage(BlockID block_id) const;
@@ -659,6 +665,8 @@ public:
     void print_loaded_blocks() const;
     
 private:
+    friend class Gemma4VisionRunner;
+
     // File handle (kept open for block loading)
     std::string file_path_;
     mutable std::ifstream file_;
@@ -719,6 +727,14 @@ private:
 
     bool load_tensor(std::ifstream& f, const TensorEntry& entry, 
                      TensorRegistry& registry);
+
+    // Internal V7 window: mapped vision stays in RAM and only the weights for
+    // the current patch/layer/projector phase occupy transient VRAM.
+    bool stage_mapped_prefix(BlockID block_id, Engine& engine,
+                             const std::string& prefix,
+                             cudaStream_t stream = nullptr);
+    bool unstage_mapped_prefix(BlockID block_id, Engine& engine);
+    bool release_mapped_staging(BlockID block_id, Engine& engine);
     
     // Load single block's tensors
     bool load_block_tensors(BlockID block_id, Engine& engine);

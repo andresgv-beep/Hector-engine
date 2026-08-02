@@ -43,15 +43,19 @@ Oráculo FP32:
 
 | Frontera | NRMSE | Límite | Correlación | Mínimo |
 |---|---:|---:|---:|---:|
-| patch embedder | 0,000997790 | 0,005 | 0,999999502 | 0,99999 |
-| capa 0 | 0,000708972 | 0,015 | 0,999999753 | 0,9998 |
-| capa 15 | 0,008069804 | 0,030 | 0,999967422 | 0,9990 |
-| pooler | 0,004224601 | 0,030 | 0,999991091 | 0,9990 |
-| proyección | 0,005510285 | 0,030 | 0,999984822 | 0,9990 |
+| patch embedder | 0,000255030 | 0,005 | 0,999999968 | 0,99999 |
+| capa 0 | 0,000445495 | 0,015 | 0,999999905 | 0,9998 |
+| capa 15 | 0,005997680 | 0,030 | 0,999982024 | 0,9990 |
+| pooler | 0,003254457 | 0,030 | 0,999994747 | 0,9990 |
+| proyección | 0,004182350 | 0,030 | 0,999991278 | 0,9990 |
 
 Todas las formas coinciden y todos los valores son finitos. El mismo test
 también pasó cargando únicamente el bloque visual del HNF combinado
 `gemma4-e2b-text-compact-vision-fp16.hnf`.
+
+La tabla fue recertificada después de `d635d2b`, que sustituyó la acumulación
+FP16 de `cublasHgemm` por acumulación FP32. Los valores anteriores permanecían
+dentro de las barreras, pero los actuales se acercan más al oráculo.
 
 ## Memoria
 
