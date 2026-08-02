@@ -1442,10 +1442,11 @@ int main(int argc, char** argv) {
                           line, load_profile_facts(1600))
                     : std::string();
             const bool recall_has_evidence = !authoritative_context.empty();
+            const bool inject_contract = ck::contract_needed(turn_frame);
             const std::string turn_contract = ck::response_contract(
                 turn_frame, registro_name(registro));
-            const bool carry_contract_in_user = is_gemma4 ||
-                turn_frame.act == ck::ResponseAct::Recall;
+            const bool carry_contract_in_user = inject_contract &&
+                (is_gemma4 || turn_frame.act == ck::ResponseAct::Recall);
             std::string model_user_msg = carry_contract_in_user
                 ? ck::frame_user_message(
                       user_msg, turn_frame, registro_name(registro),
@@ -1483,7 +1484,8 @@ int main(int argc, char** argv) {
                 // Recall ya lleva contrato + evidencia dentro de su turno;
                 // duplicarlo como system confunde a Qwen en conversaciones
                 // largas y hace que ignore precisamente el dato recuperado.
-                if (turn_frame.act != ck::ResponseAct::Recall) {
+                if (inject_contract &&
+                    turn_frame.act != ck::ResponseAct::Recall) {
                     turn_ids.push_back(*turn_start);
                     push_text("system\n" + turn_contract);
                     turn_ids.push_back(*turn_end);

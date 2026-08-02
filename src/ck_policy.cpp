@@ -103,6 +103,18 @@ const char* response_act_name(ResponseAct act) {
     return "conversar";
 }
 
+bool contract_needed(const TurnFrame& frame) {
+    switch (frame.act) {
+        case ResponseAct::Greet:
+        case ResponseAct::Acknowledge:
+        case ResponseAct::CheckIn:
+        case ResponseAct::Converse:
+            return false;
+        default:
+            return true;
+    }
+}
+
 TurnFrame classify_turn(std::string_view message,
                         bool trivial,
                         bool artifact_active,

@@ -40,6 +40,16 @@ struct TurnFrame {
 
 const char* response_act_name(ResponseAct act);
 
+// Los actos sociales NO llevan contrato inyectado: los gobiernan el registro
+// y los ejemplos de voz del prefijo. Meterles meta-texto invita a recitarlo
+// — observado en vivo: "Voy a seguir la conversación de forma natural y sin
+// inventar experiencias propias" + "(Nota: esta pregunta está diseñada
+// para...)" son el contrato parafraseado en la boca del modelo. Cuando el
+// acto es charlar y no hay tarea concreta, el contrato es lo único que el
+// modelo tiene delante... y lo comenta. Presupuestos y pensamiento siguen
+// aplicando: son deterministas y no pasan por la boca del modelo.
+bool contract_needed(const TurnFrame& frame);
+
 // Clasificador deliberadamente conservador y determinista. No pretende
 // entender toda la lengua: fija el acto cuando hay una señal clara y deja el
 // resto como conversación/colaboración acotada.
