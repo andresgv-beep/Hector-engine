@@ -22,6 +22,19 @@ contra el modelo oficial. No es pérdida de cuantización: llama.cpp implementa
 Gemma 4 de otra manera. Cualquier medida que lo use de árbitro arrastra esos
 12,4 puntos.
 
+**En Qwen3 sí es exacto: 100,0% (243/243).** O sea que la desviación es
+específica de su Gemma 4, no una imprecisión general — razón de más para
+verificar modelo por modelo en vez de generalizar. Con el árbitro oficial en
+ambos:
+
+| modelo | HELIOS compacto | Ollama Q4_K_M |
+|---|---:|---:|
+| Qwen3-4B | 86,8% | 74,5% |
+| Gemma 4 E2B | 85,4% | 68,9% |
+
+**HQS rinde igual en las dos arquitecturas.** Gemma 4 nunca castigó al formato:
+el hueco que parecía haber era, íntegro, el error del árbitro.
+
 Cómo se descubrió, porque el patrón se va a repetir: había **dos referencias
 que no coincidían entre sí** —Héctor en fp16 daba 98,3% contra nuestra numpy y
 ~87% contra el bf16 de Ollama—. Cuando dos referencias discrepan, una está mal;
