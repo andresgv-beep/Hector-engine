@@ -2,6 +2,7 @@
 // passing a real HNF optionally exercises the 659-tensor load/unload cycle.
 
 #include "gemma4_vision_validator.hpp"
+#include "model_capabilities.hpp"
 
 #include <array>
 #include <cmath>
@@ -165,6 +166,12 @@ void test_synthetic_contract() {
     require(config.projection_dim == 1536, "GM4V projection width");
     require(std::fabs(config.rope_theta - 100.0f) < 1.0e-6f,
             "GM4V RoPE theta");
+    const ModelCapabilities capabilities = inspect_model_capabilities(loader);
+    const auto* vision = capabilities.find(ModelModality::Vision);
+    require(vision && vision->present && vision->configured,
+            "generic descriptor must expose configured vision");
+    require(vision->status == AdapterStatus::MetadataReady,
+            "vision-only fixture has no compatible text adapter");
     std::remove(valid_path.c_str());
 
     const std::string invalid_path =
@@ -191,6 +198,12 @@ void inspect_real_hnf(const std::string& path, bool exercise_load,
         }
     }
     require(report.ok(), "real Gemma 4 vision contract must validate");
+    const ModelCapabilities capabilities = inspect_model_capabilities(metadata);
+    const auto* vision = capabilities.find(ModelModality::Vision);
+    require(vision && vision->status == AdapterStatus::RuntimeReady,
+            "combined Gemma 4 must resolve the generic vision adapter");
+    require(vision->adapter_id == "helios.gemma4.vision.v1",
+            "combined Gemma 4 adapter id");
     require(report.tensor_count == 659, "real vision tensor count");
     require(report.clamp_count == 448, "real learned clamp count");
     require(report.weight_bytes == 337089408, "real vision weight bytes");

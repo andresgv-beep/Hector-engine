@@ -4,6 +4,7 @@
 // ============================================================================
 
 #include "hnf_loader.hpp"
+#include "model_capabilities.hpp"
 #include <iostream>
 #include <fstream>
 #include <cassert>
@@ -427,6 +428,35 @@ void test_print_info() {
     std::cout << "PASSED" << std::endl;
 }
 
+void test_model_capabilities() {
+    std::cout << "Test: Generic model capabilities... ";
+
+    HnfLoader loader;
+    assert(loader.load_metadata("/tmp/test_model.hnf"));
+    const ModelCapabilities model = inspect_model_capabilities(loader);
+    assert(model.schema_version == 1);
+    assert(model.text_architecture == "mock_test");
+    assert(!model.multimodal);
+    const auto* text = model.find(ModelModality::Text);
+    const auto* vision = model.find(ModelModality::Vision);
+    assert(text && text->present && text->configured);
+    assert(text->status == AdapterStatus::MetadataReady);
+    assert(vision && vision->status == AdapterStatus::Absent);
+
+    const auto* gemma4 = resolve_modality_adapter(
+        "gemma4", ModelModality::Vision, "gemma4");
+    assert(gemma4);
+    assert(std::string(gemma4->adapter_id) == "helios.gemma4.vision.v1");
+    assert(!resolve_modality_adapter(
+        "qwen2", ModelModality::Vision, "gemma4"));
+    const auto* qwen_text = resolve_modality_adapter(
+        "qwen2", ModelModality::Text, "qwen2");
+    assert(qwen_text);
+    assert(std::string(qwen_text->adapter_id) == "helios.text.chat.v1");
+
+    std::cout << "PASSED" << std::endl;
+}
+
 int main() {
     std::cout << "==================================" << std::endl;
     std::cout << "HELIOS ENGINE - HNF Loader Test" << std::endl;
@@ -454,6 +484,7 @@ int main() {
     test_tensor_size_validation();
     test_tensor_loading();
     test_tensor_values();
+    test_model_capabilities();
     test_print_info();
     
     // Cleanup

@@ -62,6 +62,7 @@ set(ENGINE_SOURCES
     src/command.cpp
     src/engine.cpp
     src/hnf_loader.cpp
+    src/model_capabilities.cpp
     src/mapped_weight_pipeline.cpp
     src/gemma4_ple.cpp
     src/gemma4_multimodal.cpp
@@ -209,6 +210,11 @@ target_link_libraries(test_chat_template PRIVATE helios-engine)
 # Real HNF inspector (with block loading test)
 add_executable(inspect_hnf test_real_hnf.cpp)
 target_link_libraries(inspect_hnf PRIVATE helios-engine)
+
+# Stable metadata-only boundary consumed by HexOS. It does not create a CUDA
+# context or load model weights.
+add_executable(helios_model_probe tools/helios_model_probe.cpp)
+target_link_libraries(helios_model_probe PRIVATE helios-engine)
 
 # Enable testing
 enable_testing()
