@@ -32,6 +32,7 @@
 #include "src/chat_template.hpp"
 #include "src/model_capabilities.hpp"
 #include "src/multimodal_adapter.hpp"
+#include "src/ck_policy.hpp"
 #include "kernels/kernels.hpp"
 #include <iostream>
 #include <fstream>
@@ -96,20 +97,24 @@ static void register_kv_cache(Engine& engine, KVCache& cache, const std::string&
 // Al arrancar, los recuerdos entran al system prompt (prefijo en KV).
 // Recencia pura por ahora; la búsqueda semántica es el siguiente nivel.
 
-// El dueño vive en ~/.helios/owner (una línea), NUNCA en el código fuente:
-// el código es publicable; la identidad de quién lo usa es capa personal.
+// El perfil vive fuera del codigo. `profile_name` es el nombre nuevo;
+// `owner` se mantiene como lectura legacy para no romper perfiles existentes.
+// HELIOS_HOME selecciona la persona actual: el binario y la identidad base de
+// Helios nunca contienen datos de una persona concreta.
 static std::string helios_dir();   // definida abajo (respeta HELIOS_HOME)
 
-static std::string owner_name() {
-    std::ifstream f(helios_dir() + "/owner");
+static std::string profile_name() {
     std::string name;
-    if (f && std::getline(f, name) && !name.empty()) return name;
-    return "su dueño";
+    for (const char* filename : {"profile_name", "owner"}) {
+        std::ifstream f(helios_dir() + "/" + filename);
+        if (f && std::getline(f, name) && !name.empty()) return name;
+    }
+    return "la persona actual";
 }
 
 // DOS NIVELES (la jerarquía de HERA, nivel 1):
-//   facts.md    — hechos duraderos sobre el dueño y su proyecto. Se cargan
-//                 SIEMPRE y enteros: son quién es él.
+//   facts.md    — hechos duraderos sobre la persona y sus proyectos. Se cargan
+//                 SIEMPRE y enteros: describen su perfil, no a Helios.
 //   episodic.md — resúmenes de sesión. Solo las últimas: son qué pasó.
 // Sin esta separación, el chismorreo episódico ("me pidió que le explique
 // un compilador") saturaba el prefijo y secuestraba las respuestas.
@@ -131,6 +136,20 @@ static std::string facts_path()  { return helios_dir() + "/facts.md"; }
 static std::string memory_path() { return helios_dir() + "/episodic.md"; }
 static std::string candidates_path() { return helios_dir() + "/candidates.md"; }
 
+static std::string load_profile_facts(size_t max_chars) {
+    std::ifstream f(facts_path());
+    if (!f) return "";
+    std::stringstream ss;
+    ss << f.rdbuf();
+    std::string facts = ss.str();
+    if (facts.size() > max_chars) {
+        facts.resize(max_chars);
+        const size_t boundary = facts.find_last_of('\n');
+        if (boundary != std::string::npos) facts.resize(boundary + 1);
+    }
+    return facts;
+}
+
 // Carga jerárquica: TODOS los hechos + las últimas N sesiones
 static std::string load_memories(size_t max_chars) {
     std::string out;
@@ -143,8 +162,8 @@ static std::string load_memories(size_t max_chars) {
         if (!facts.empty()) {
             if (facts.size() > max_chars * 2 / 3)          // tope de seguridad
                 facts = facts.substr(facts.size() - max_chars * 2 / 3);
-            out += "FICHA DE TU USUARIO (datos de la persona con la que hablas; "
-                   "NO son datos tuyos, tú eres Helios):\n" + facts + "\n";
+            out += "PERFIL DE LA PERSONA ACTUAL (datos sobre ella; no son "
+                   "datos tuyos ni cambian tu identidad):\n" + facts + "\n";
         }
     }
 
@@ -249,16 +268,16 @@ static void append_memory(const std::string& summary) {
     f << "\n## Sesión " << datebuf << "\n" << summary << "\n";
 }
 
-// Hecho duradero → facts.md (lo que define al dueño, no lo que pasó un día).
-// `quoted` = son palabras textuales del dueño ("apunta esto: mi perro...").
+// Hecho duradero → facts.md (perfil de la persona, no lo que pasó un día).
+// `quoted` = son sus palabras textuales ("apunta esto: mi perro...").
 // Guardarlas tal cual es veneno: al releer "mi perro se llama X" el modelo
-// lo repite en primera persona y se cree que es él. Con atribución explícita
+// lo repite en primera persona y se cree que es la persona. Con atribución
 // queda claro de quién son las palabras sin perder el dato literal.
 static void append_fact(const std::string& fact, bool quoted = false) {
     if (memory_is_duplicate(fact, facts_path())) return;
     std::ofstream f(facts_path(), std::ios::app);
     if (!f) return;
-    if (quoted) f << "- Él dijo textualmente: \"" << fact << "\"\n";
+    if (quoted) f << "- La persona dijo textualmente: \"" << fact << "\"\n";
     else        f << "- " << fact << "\n";
 }
 
@@ -368,14 +387,6 @@ static float temperature_for(const std::string& msg, bool trivial, float base,
     return base;
 }
 
-// ============================================================================
-// PRESUPUESTO DE RESPUESTA — nivel 1 de salida dinámica
-// ============================================================================
-// La longitud permitida depende de lo que se pide, no de un techo fijo:
-//   trivial (saludo/ack)          → 80 tokens
-//   conversacional normal          → 350
-//   petición larga explícita       → 1500 (escribe/explica/código/detalla...)
-
 // ¿Es una petición de continuar lo cortado? ("sigue", "continúa"...)
 static bool is_continuation(const std::string& msg) {
     std::string lower = msg;
@@ -385,25 +396,6 @@ static bool is_continuation(const std::string& msg) {
         if (lower.rfind(kw, 0) == 0) return true;
     }
     return false;
-}
-
-static int response_budget(const std::string& msg, bool trivial) {
-    // La continuación manda sobre todo: aunque sea un mensaje cortísimo
-    if (is_continuation(msg)) return 1500;
-    if (trivial) return 120;
-    std::string lower = msg;
-    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-    // Peticiones que legítimamente necesitan desarrollo
-    for (const char* kw : {"escribe", "explica", "detalla", "codigo", "código",
-                           "code", "historia", "cuento", "lista completa",
-                           "largo", "redacta", "informe", "programa", "diseña",
-                           "diseñar", "propon", "propón", "arquitectura",
-                           "pasos", "plan ", "estructura", "ejemplo", "tutorial",
-                           "cómo se", "como se", "cómo hago", "como hago",
-                           "ui", "interfaz", "compara", "analiza"}) {
-        if (lower.find(kw) != std::string::npos) return 1200;
-    }
-    return 600;  // conversación normal (era 350: cortaba respuestas útiles)
 }
 
 // ============================================================================
@@ -760,40 +752,53 @@ int main(int argc, char** argv) {
                 auto seg = tokenizer->encode(s, false, false);
                 sys_ids.insert(sys_ids.end(), seg.begin(), seg.end());
             };
-            std::string owner = owner_name();
+            std::string person = profile_name();
+            const bool named_profile = person != "la persona actual";
             // BREVE A PROPÓSITO. Cada corrección de comportamiento que se
             // añadía como texto ("prohibido X", "recuerda Y") empeoraba las
             // cosas: un 4B con 400 palabras de meta-instrucciones se ahoga,
             // las recita y confunde los papeles (dice ser el dueño). La
             // disciplina la ponen los mecanismos deterministas (presupuestos,
             // rienda de thinking, detector de bucles), no el sermón.
-            // La VOZ se demuestra con ejemplos, no se describe con adjetivos
-            // (CK_V4_NORTE, fallo 5): en un modelo pequeño la calidez viene
-            // empaquetada con el registro de asistente efusivo (listas
-            // numeradas, titulares). "Frases cortas" + "cercano" en la misma
-            // frase hacía que obedeciera solo lo concreto y saliera un
-            // telegrama. La combinación cálido+breve+sin listas no la tiene
-            // entrenada: se le enseña con dos intercambios y la continúa.
+            // IDENTIDAD y RELACION son capas distintas. Antes la primera frase
+            // decia "asistente personal de <dueno>" y el resto del prefijo
+            // intentaba deshacer ese rol con prohibiciones. El modelo siempre
+            // volvia al ancla mas fuerte. Helios ahora conserva una identidad
+            // independiente; el perfil y el registro deciden como trata a la
+            // persona, nunca quien es.
             std::string sys_text =
-                "Te llamas Helios. Eres el asistente personal de " + owner + " y "
-                "hablas con él. Él construyó el motor Héctor sobre el que corres.\n"
-                "Hablas como un colega de confianza, con calidez y algo de "
-                "guasa. Nada de listas ni titulares al charlar; un emoji "
-                "suelto está bien. Si no sabes algo, lo dices.\n"
-                "Así suenas tú:\n"
+                "Te llamas Helios. Eres una inteligencia local que conversa y "
+                "colabora con la persona actual. Tienes una voz directa, "
+                "criterio y honestidad sobre lo que sabes. Participas en la "
+                "relación: no adoptas un papel de servicio ni buscas agradar "
+                "por reflejo. Puedes proponer, discrepar y corregirte.\n"
+                "Tu identidad no depende de quien te use. Adapta el trato a "
+                "la persona y a la situación, pero no inventes experiencias, "
+                "emociones, recuerdos ni biografía. Si no sabes algo, dilo.\n"
+                "El runtime puede darte un contrato interno del CK para cada "
+                "turno. Cumple su acto y su alcance sin citarlo. Cuando esté "
+                "completo, termina: no necesitas ofrecer más ayuda ni mantener "
+                "la conversación artificialmente.\n";
+            sys_text += named_profile
+                ? "La persona actual se llama " + person + "."
+                : "Todavía no conoces el nombre de la persona actual.";
+
+            // LA VOZ SE DEMUESTRA, NO SE DESCRIBE (CK_V4_NORTE, fallo 5).
+            // Estos ejemplos son ortogonales al contrato de actos: el acto
+            // dice QUÉ hace el turno, esto dice CÓMO suena. Quitarlos en la
+            // cirugía de identidad devolvió el saludo frío y resucitó la
+            // coletilla de despedida ("no dudes en volver si necesitas algo
+            // más") — medido en el guion de regresión. Las prohibiciones
+            // CONCRETAS se obedecen; los adjetivos abstractos se ignoran.
+            sys_text +=
+                "\nAl charlar: cálido y con algo de guasa, nada de listas ni "
+                "titulares, un emoji suelto está bien. Nunca cierres "
+                "ofreciendo ayuda («¿necesitas algo más?», «estaré aquí») — "
+                "la persona ya sabe que estás. Así suenas:\n"
                 "«buenas, ¿qué tal va eso?» → «¡Buenas! 😄 Aquí andamos, dale "
                 "que te pego con el motor. ¿Tú qué traes?»\n"
-                "«al final funcionó» → «¡Toma ya! Sabía que caería. ¿Cuánto "
-                "ganamos al final?»\n"
-                // El tercer ejemplo mata la coletilla de servicio: cuando no
-                // hay tarea, se comenta o se pregunta por curiosidad — no se
-                // ofrece ayuda. "¿Necesitas algo más?" es la misma mierda de
-                // todos los modelos locales (palabras de Andrés).
                 "«todo genial por ahora» → «¡Eso es lo que hay que oír! 😎 "
                 "¿Y ahora qué toca, más kernels o descanso?»\n"
-                // Y la despedida, que es donde el reflejo de servicio más
-                // aprieta ("si necesitas algo, estaré aquí"): un colega se
-                // despide y punto.
                 "«nada más por hoy, me voy» → «Venga, descansa que está "
                 "ganado. 🤙 Mañana más.»";
 
@@ -811,14 +816,12 @@ int main(int argc, char** argv) {
             std::string memories = load_memories(
                 std::min<size_t>(3000, (size_t)kv_config.max_seq_len * 3 / 4));
             if (!memories.empty()) {
-                sys_text += "\n\nTU MEMORIA de sesiones anteriores. Es real y es "
-                            "tuya: la escribiste tú al final de cada sesión. La "
-                            "persona con quien hablas es " + owner + " salvo que se "
-                            "presente otra. Cuando te pregunten quién es el "
-                            "usuario o qué recuerdas, responde CON tu memoria, "
-                            "con naturalidad y seguridad — jamás digas que no "
-                            "tienes acceso a información personal: la tienes, "
-                            "está aquí:\n" + memories;
+                sys_text += "\n\nMEMORIA DE ESTA RELACIÓN. Son registros sobre "
+                            "la persona actual y sesiones compartidas con " + person +
+                            ". Úsalos solo cuando sean relevantes. Distingue "
+                            "siempre sus datos de los tuyos y no recites esta "
+                            "sección. Si te preguntan qué recuerdas, responde "
+                            "con naturalidad desde estos registros:\n" + memories;
             }
             // COMPACTACIÓN: la sesión en curso continúa tras el reset del KV
             if (!session_notes.empty()) {
@@ -827,21 +830,12 @@ int main(int argc, char** argv) {
                             "una sesión nueva):\n" + session_notes;
             }
 
-            // RECORDATORIO FINAL: lo último que lee el modelo pesa más que lo
-            // primero. Sin esto, tras los informes de memoria volvía al registro
-            // de asistente comercial ("¿en qué puedo ayudarte?") y saludaba
-            // como a un desconocido después de cada compactación.
-            // Cierre mínimo: la última línea pesa, pero una sola frase
-            // La última línea es la que más pesa. La prohibición es CONCRETA
-            // a propósito: "sin listas" funcionó a la primera y "sé cercano"
-            // no hizo nada — los adjetivos abstractos se ignoran, las
-            // prohibiciones concretas se obedecen.
-            sys_text += "\n\nEres Helios y hablas con " + owner +
-                        ". Responde como un amigo, no como un servicio: nunca "
-                        "cierres con «¿necesitas algo más?», «estoy aquí para "
-                        "ayudarte» ni ofertas parecidas — él ya sabe que "
-                        "estás. Si no hay tarea, comenta o pregunta por "
-                        "curiosidad, como haría un colega.";
+            // Recordatorio final tras memoria/compactacion: identidad estable,
+            // perfil separado y regla positiva de parada.
+            sys_text += "\n\nSigues siendo Helios. Ajusta el registro sin "
+                        "asumir una familiaridad que "
+                        "el perfil o la conversación no demuestren. Cumple el "
+                        "acto actual y termina al completarlo.";
             std::vector<ChatMessage> gemma_messages;
             if (is_gemma4) {
                 gemma_messages.push_back({"system", sys_text});
@@ -915,10 +909,10 @@ int main(int argc, char** argv) {
             };
             // Few-shot: un 4B extrae mucho mejor con ejemplos que con reglas
             const std::string reflection_prompt =
-                "Eres un extractor de datos. Te doy un mensaje del usuario "
+                "Eres un extractor de datos. Te doy un mensaje de una persona "
                 "y respondes SOLO con una de estas dos cosas:\n"
                 "- 'DATO: <hecho en una frase>' si el mensaje contiene un hecho "
-                "duradero sobre él (nombre, trabajo, gustos, familia, "
+                "duradero sobre esa persona (nombre, trabajo, gustos, familia, "
                 "preferencias, decisiones del proyecto).\n"
                 "- 'NADA' si es una pregunta, charla, cortesía u opinión pasajera.\n\n"
                 "Ejemplos:\n"
@@ -932,7 +926,7 @@ int main(int argc, char** argv) {
                 "decidido usar React para la interfaz.\n"
                 "Mensaje: 'cuéntame un chiste' → NADA\n"
                 "Mensaje: 'explícame qué es un compilador' → NADA (es una "
-                "pregunta de conocimiento general, no un dato sobre él)\n"
+                "pregunta de conocimiento general, no un dato sobre la persona)\n"
                 "Mensaje: '¿cómo funciona la fotosíntesis?' → NADA\n\n"
                 "Mensaje: '" + user_msg.substr(0, 400) + "' →" +
                 (is_gemma4 ? "" : " /no_think");
@@ -1024,17 +1018,17 @@ int main(int argc, char** argv) {
                 auto seg = tokenizer->encode(s, false, false);
                 d_ids.insert(d_ids.end(), seg.begin(), seg.end());
             };
-            // EN PRIMERA PERSONA: si el resumen habla de "el usuario" en
+            // EN PRIMERA PERSONA: si el resumen habla de "la persona" en
             // tercera, al releerlo el modelo se coloca como observador
             // externo y llega a saludarse a sí mismo. Escrito como recuerdo
             // propio ("me contó", "decidimos"), se reconoce dentro de la
             // escena.
             const std::string distill_prompt =
                 "Estas son las notas de una conversación entre tú (Helios) "
-                "y " + owner_name() + ". Escribe 3 a 6 frases de recuerdo "
+                "y " + profile_name() + ". Escribe 3 a 6 frases de recuerdo "
                 "personal en PRIMERA PERSONA, como notas tuyas: 'me contó "
                 "que...', 'decidimos...', 'me pidió...'. Nunca digas 'el "
-                "usuario' ni te presentes ni saludes.\n\n"
+                "usuario' ni 'la persona', ni te presentes ni saludes.\n\n"
                 "IMPORTANTE: son NOTAS SOBRE lo que pasó, nunca una copia del "
                 "contenido. Si contaste una historia, escribe 'le conté un "
                 "relato sobre X' — jamás reproduzcas el relato. Si explicaste "
@@ -1079,8 +1073,9 @@ int main(int argc, char** argv) {
             // o filtra plantilla. Se comprueba, no se confía.
             std::string low = summary;
             std::transform(low.begin(), low.end(), low.begin(), ::tolower);
-            std::string own = owner_name();
-            std::transform(own.begin(), own.end(), own.begin(), ::tolower);
+            std::string person_name = profile_name();
+            std::transform(person_name.begin(), person_name.end(),
+                           person_name.begin(), ::tolower);
             // Guardia contra COPIA de contenido: unas notas de 3-6 frases no
             // pasan de ~700 caracteres. Más largo = el modelo ha copiado el
             // contenido (una historia, una explicación) en vez de resumirlo, y
@@ -1095,7 +1090,7 @@ int main(int argc, char** argv) {
             for (const char* b : {"el usuario", "assistant", "<|im_start|>",
                                   "<|turn>", "<think>"})
                 if (low.find(b) != std::string::npos) bad = true;
-            if (low.find("soy " + own) != std::string::npos) bad = true;
+            if (low.find("soy " + person_name) != std::string::npos) bad = true;
             if (bad) {
                 if (getenv("HELIOS_DEBUG"))
                     std::cerr << "\n[debug] destilación rechazada: "
@@ -1128,11 +1123,11 @@ int main(int argc, char** argv) {
                 // parrafadas del modelo (que solo meten ruido en el diario)
                 std::string raw, ln;
                 std::stringstream ts(session_transcript);
-                std::string own_tag = "[" + owner_name() + "]:";
+                std::string person_tag = "[" + profile_name() + "]:";
                 while (std::getline(ts, ln))
-                    if (ln.rfind(own_tag, 0) == 0) raw += ln + "\n";
+                    if (ln.rfind(person_tag, 0) == 0) raw += ln + "\n";
                 if (raw.size() > 1200) raw = raw.substr(raw.size() - 1200);
-                notes = "(notas sin destilar — lo que dijo él)\n" +
+                notes = "(notas sin destilar — lo que dijo la persona)\n" +
                         (raw.empty() ? transcript_tail(600) : raw);
             }
             append_memory(notes);   // NUNCA se pierde la sesión
@@ -1425,6 +1420,7 @@ int main(int argc, char** argv) {
             // pegar 192 líneas de HQS es continuación técnica, no un saludo.
             const bool trae_artefacto =
                 line.rfind("Te paso un texto", 0) == 0 ||
+                line.rfind("Te paso un documento", 0) == 0 ||
                 line.find("```") != std::string::npos || line.size() > 1500;
 
             // --- Thinking adaptativo (el usuario puede forzar con /think, /no_think) ---
@@ -1432,11 +1428,30 @@ int main(int argc, char** argv) {
                                line.find("/no_think") != std::string::npos;
             std::string user_msg = line;
             const bool turn_has_attachment = !pending_rgb.empty();
+            const bool artifact_active = trae_artefacto || artefacto_turnos > 0 ||
+                                         turn_has_attachment;
             bool trivial = !user_forced && is_trivial_message(line);
             if (trivial && artefacto_turnos > 0 && !senal_colega(line)) {
                 trivial = false;   // hereda la faena del turno anterior
             }
-            if (trivial && !is_gemma4) user_msg += " /no_think";
+            const ck::TurnFrame turn_frame = ck::classify_turn(
+                line, trivial, artifact_active, turn_has_attachment);
+            const std::string authoritative_context =
+                turn_frame.act == ck::ResponseAct::Recall
+                    ? ck::prepare_recall_context(
+                          line, load_profile_facts(1600))
+                    : std::string();
+            const bool recall_has_evidence = !authoritative_context.empty();
+            const std::string turn_contract = ck::response_contract(
+                turn_frame, registro_name(registro));
+            const bool carry_contract_in_user = is_gemma4 ||
+                turn_frame.act == ck::ResponseAct::Recall;
+            std::string model_user_msg = carry_contract_in_user
+                ? ck::frame_user_message(
+                      user_msg, turn_frame, registro_name(registro),
+                      authoritative_context)
+                : user_msg;
+            if (trivial && !is_gemma4) model_user_msg += " /no_think";
             artefacto_turnos = trae_artefacto ? 3
                              : (artefacto_turnos > 0 ? artefacto_turnos - 1 : 0);
 
@@ -1461,10 +1476,21 @@ int main(int argc, char** argv) {
             if (is_gemma4) {
                 turn_ids = encode_gemma_user_fragment(
                     turn_has_attachment
-                        ? "<|image|>\n" + user_msg : user_msg);
+                        ? "<|image|>\n" + model_user_msg : model_user_msg);
             } else {
+                // ChatML acepta un system entre turnos: el contrato queda en
+                // su rol correcto y no se mezcla con lo dicho por la persona.
+                // Recall ya lleva contrato + evidencia dentro de su turno;
+                // duplicarlo como system confunde a Qwen en conversaciones
+                // largas y hace que ignore precisamente el dato recuperado.
+                if (turn_frame.act != ck::ResponseAct::Recall) {
+                    turn_ids.push_back(*turn_start);
+                    push_text("system\n" + turn_contract);
+                    turn_ids.push_back(*turn_end);
+                    push_text("\n");
+                }
                 turn_ids.push_back(*turn_start);
-                push_text("user\n" + user_msg);
+                push_text("user\n" + model_user_msg);
                 turn_ids.push_back(*turn_end);
                 push_text("\n");
                 turn_ids.push_back(*turn_start);
@@ -1554,9 +1580,10 @@ int main(int argc, char** argv) {
             // --- Generación con governor de ritmo y presupuesto dinámico ---
             std::cout << "\033[1;35mhelios>\033[0m " << std::flush;
             int gen_count = 0, think_count = 0, visible_count = 0;
-            bool in_think = false, budget_cut = false, think_cut = false, loop_cut = false;
+            bool in_think = false, budget_cut = false, think_cut = false;
+            bool loop_cut = false, contract_stop = false;
             int loop_grace = 0;   // margen para cerrar la frase tras ver el bucle
-            const int budget = response_budget(line, trivial);  // tokens VISIBLES
+            const int budget = ck::visible_token_budget(turn_frame);  // tokens VISIBLES
             const int HARD_CAP = 2500;                          // techo absoluto
             // RIENDA DEL PENSAMIENTO: si el modelo se pierde en su cabeza,
             // se le inyecta </think> y que responda con lo que lleve pensado.
@@ -1566,9 +1593,37 @@ int main(int argc, char** argv) {
             // medido 2 de 30 turnos en el guion fijo).
             // Rienda proporcional: un mensaje corto no merece 500 tokens de
             // cavilación ("ya empiezas?" gastaba 500 pensando para nada)
-            const int think_cap = trivial ? 48
-                                : (line.size() < 45 ? 150
-                                : (budget >= 1500 ? 1000 : 400));
+            const int think_cap = ck::thinking_token_budget(
+                turn_frame, line.size());
+
+            // Algunos actos necesitan una forma verificable: CLARIFY empieza
+            // por pregunta y TELL por relato/curiosidad, nunca por un preámbulo
+            // de servicio ni por una falsa vivencia de Helios. El contenido lo
+            // sigue generando el modelo a partir de ese arranque mínimo.
+            std::string forced_prefix;
+            if (turn_frame.act == ck::ResponseAct::Clarify) {
+                forced_prefix = "¿";
+            } else if (turn_frame.act == ck::ResponseAct::Tell) {
+                std::string lower_line = line;
+                std::transform(lower_line.begin(), lower_line.end(),
+                               lower_line.begin(), ::tolower);
+                forced_prefix =
+                    (lower_line.find("historia") != std::string::npos ||
+                     lower_line.find("cuento") != std::string::npos)
+                    ? "Érase una vez " : "Dato curioso: ";
+            }
+            if (!forced_prefix.empty()) {
+                auto prefix_ids = tokenizer->encode(forced_prefix, false, false);
+                for (int32_t id : prefix_ids) {
+                    next = forward_one(id);
+                    if (is_gemma4 || id < 151643) sampler.add_context(id);
+                    std::string forced_piece = tokenizer->decode({id});
+                    std::cout << forced_piece << std::flush;
+                    last_reply += forced_piece;
+                    gen_count++;
+                    visible_count++;
+                }
+            }
 
             std::string think_tail;  // buffer para detectar </think> troceado
             bool natural_stop = false;
@@ -1620,6 +1675,33 @@ int main(int argc, char** argv) {
                     std::cout << piece << std::flush;
                     last_reply += piece;
                     visible_count++;
+
+                    if (turn_frame.act == ck::ResponseAct::Clarify &&
+                        piece.find('?') != std::string::npos) {
+                        contract_stop = true;
+                    }
+                    if (turn_frame.act == ck::ResponseAct::CheckIn &&
+                        (piece.find('.') != std::string::npos ||
+                         piece.find('!') != std::string::npos ||
+                         piece.find('?') != std::string::npos)) {
+                        contract_stop = true;
+                    }
+                    if (turn_frame.act == ck::ResponseAct::Recall) {
+                        const size_t content_start =
+                            last_reply.find_first_not_of(" \t\r\n");
+                        if (content_start != std::string::npos &&
+                            last_reply.size() > content_start + 20 &&
+                            last_reply.find("\n\n", content_start + 1) !=
+                                std::string::npos) {
+                            contract_stop = true;
+                        }
+                        if (!recall_has_evidence &&
+                            (piece.find('.') != std::string::npos ||
+                             piece.find('!') != std::string::npos ||
+                             piece.find('?') != std::string::npos)) {
+                            contract_stop = true;
+                        }
+                    }
 
                     // DETECTOR DE BUCLE: si el modelo entra en la espiral de
                     // repetir un párrafo, el penalty no siempre lo salva (con
@@ -1696,6 +1778,7 @@ int main(int argc, char** argv) {
                 // Hacerlo después desplaza la ventana una posición: el sampler
                 // no ve el token recién emitido cuando calcula sus logits.
                 gen_count++;
+                if (contract_stop) break;
                 next = forward_one(next);
                 if (cache_position() >= kv_config.max_seq_len - 2) break;
             }
@@ -1705,7 +1788,7 @@ int main(int argc, char** argv) {
             // usuario; ChatML conserva su comportamiento previo y solo fuerza
             // el cierre cuando el runtime corta la respuesta.
             const bool forced_stop = budget_cut || loop_cut || think_cut ||
-                                     gen_count >= HARD_CAP;
+                                     contract_stop || gen_count >= HARD_CAP;
             if ((is_gemma4 && natural_stop) || forced_stop) {
                 (void)forward_one(*turn_end);
                 auto nl2 = tokenizer->encode("\n", false, false);
@@ -1729,6 +1812,7 @@ int main(int argc, char** argv) {
                       << (registro != Registro::NEUTRAL
                               ? std::string(" · registro ") + registro_name(registro)
                               : std::string())
+                      << " · acto " << ck::response_act_name(turn_frame.act)
                       << (budget_cut ? (" · presupuesto " + std::to_string(budget) + " agotado") : "")
                       << (think_cut ? " · pensamiento cortado" : "")
                       << " · prefill " << (int)prefill_ms << "ms"
@@ -1742,7 +1826,7 @@ int main(int argc, char** argv) {
                 size_t nt = clean.find(" /no_think");
                 if (nt != std::string::npos) clean.erase(nt, 10);
                 if (turn_has_attachment) clean = "[Imagen adjunta] " + clean;
-                session_transcript += "[" + owner_name() + "]: " + clean + "\n"
+                session_transcript += "[" + profile_name() + "]: " + clean + "\n"
                                     + "[Helios]: " + last_reply + "\n";
                 // Ring de los últimos intercambios (sobreviven a la compactación)
                 recent_turns.push_back({clean, last_reply});

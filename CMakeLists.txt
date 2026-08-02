@@ -76,6 +76,7 @@ set(ENGINE_SOURCES
     src/htf_tokenizer.cpp
     src/chat_template.cpp
     src/hexos_bridge.cpp
+    src/ck_policy.cpp
 )
 
 # CUDA kernels
@@ -212,6 +213,10 @@ target_link_libraries(test_gemma4_tokenizer PRIVATE helios-engine)
 add_executable(test_chat_template tests/test_chat_template.cpp)
 target_link_libraries(test_chat_template PRIVATE helios-engine)
 
+# CK turn framing is deterministic and model/GPU independent.
+add_executable(test_ck_policy tests/test_ck_policy.cpp)
+target_link_libraries(test_ck_policy PRIVATE helios-engine)
+
 # Real HNF inspector (with block loading test)
 add_executable(inspect_hnf test_real_hnf.cpp)
 target_link_libraries(inspect_hnf PRIVATE helios-engine)
@@ -242,6 +247,7 @@ add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)
 add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
+add_test(NAME CkPolicyTest COMMAND test_ck_policy)
 
 # GraphBuilder test
 add_executable(test_graph_builder test_graph_builder.cpp)

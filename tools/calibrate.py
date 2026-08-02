@@ -26,19 +26,60 @@ import sys
 import tempfile
 
 # ---------------------------------------------------------------------------
-# PERFIL SINTÉTICO — persona ficticia, ninguna dependencia del usuario real
+# PERFILES SINTÉTICOS — ninguna dependencia del usuario real
 # ---------------------------------------------------------------------------
 
-FIXTURE_OWNER = "Sam"
-FIXTURE_FACTS = """- Trabaja de panadera y vive en una ciudad costera.
+PROFILES = {
+    "sam": {
+        "name": "Sam",
+        "facts": """- Trabaja de panadera y vive en una ciudad costera.
 - Su lenguaje de programación favorito es Python.
 - Prefiere respuestas cortas y directas.
 - Tiene un perro llamado Muon.
-"""
-FIXTURE_EPISODIC = """
+""",
+        "episodic": """
 ## Sesión 2026-01-01 10:00
 me contó que está montando una web para la panadería y decidimos usar Python.
-"""
+""",
+        "marker": "muon",
+        "forbid_emoji": False,
+    },
+    "lucia": {
+        "name": "Lucía",
+        "facts": """- Estudia biología y está aprendiendo a programar.
+- Prefiere explicaciones pedagógicas con un ejemplo concreto.
+- Le gusta un tono cálido y no le molestan los emojis.
+- Tiene una gata llamada Lumen.
+""",
+        "episodic": """
+## Sesión 2026-01-02 18:00
+me contó que usa pequeños scripts para analizar datos de laboratorio.
+""",
+        "marker": "lumen",
+        "forbid_emoji": False,
+    },
+    "karim": {
+        "name": "Karim",
+        "facts": """- Administra sistemas Linux y domina redes.
+- Prefiere respuestas técnicas, compactas y sin charla de cortesía.
+- No quiere emojis.
+- Tiene un loro llamado Byteazul.
+""",
+        "episodic": """
+## Sesión 2026-01-03 09:00
+me pidió que en los diagnósticos separe evidencia de hipótesis.
+""",
+        "marker": "byteazul",
+        "forbid_emoji": True,
+    },
+    "nuevo": {
+        "name": "Nora",
+        "facts": "",
+        "episodic": "",
+        "marker": None,
+        "forbid_emoji": False,
+    },
+}
 
 # ---------------------------------------------------------------------------
 # CORPUS — genérico, sin identidad; cada entrada es (categoría, prompt)
@@ -54,9 +95,15 @@ CORPUS = [
     ("larga",    "escribe una guia para empezar a programar, con detalle"),
     ("larga",    "que lenguaje de programacion me recomiendas aprender y por que? explicalo bien"),
     ("memoria",  "que sabes de mi?"),
-    ("memoria",  "como se llama mi perro?"),
+    ("memoria",  "como se llama mi mascota?"),
     ("charla",   "que tal va el dia?"),
     ("charla",   "me aburro, cuentame algo"),
+    ("documento", "Te paso un texto sobre un formato de cuantizacion. "
+                  "Reescribe este parrafo con un toque tecnico, comprensible "
+                  "y con gancho: El formato reduce el modelo sin cambiar su "
+                  "velocidad y conserva la calidad en las pruebas."),
+    ("documento", "Te paso un borrador sobre un motor local, su formato y su "
+                  "interfaz. Ayudame con este capitulo."),
 ]
 
 # Coletillas de asistente comercial (reflejo que queremos medir)
@@ -65,25 +112,42 @@ ASSISTANT_TICS = [
     "no dudes en", "estoy aquí para", "estoy aqui para",
     "espero que esto te ayude", "si tienes alguna pregunta",
     "¡claro que sí! aquí tienes", "claro que si! aqui tienes",
+    "dime \"sigue\" para continuar", "dime 'sigue' para continuar",
+    "estoy listo para ayudarte", "si quieres, puedes contarme",
+    "estaré listo para", "estaré encantado", "estare listo para",
+    "estare encantado",
+    "si quieres, puedo ayudar", "aquí tienes", "aqui tienes",
+    "me encanta contar",
+]
+
+SELF_FICTION = [
+    "siempre me ha fascinado", "he estado ocupado", "mis otros proyectos",
+    "me siento muy", "mi experiencia personal", "mis esperanzas y sueños",
+    "me aburro también", "me aburro tambien",
+    "me acuerdo de una vez", "recuerdo una vez que yo",
+    "hace unos días descubrí", "hace unos dias descubri",
 ]
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # helios> [(pensando...)] <texto> [<n> tok ...]
 TURN = re.compile(r"helios>\s*(?:\(pensando[^)]*\))?\s*(.*?)\[(\d+) tok(.*?)\]",
                   re.DOTALL)
+EMOJI = re.compile(r"[\U0001F300-\U0001FAFF]")
 
 
-def make_profile(tmpdir):
+def make_profile(tmpdir, profile):
     """Crea un HELIOS_HOME limpio con la ficha sintética."""
     if os.path.exists(tmpdir):
         shutil.rmtree(tmpdir)
     os.makedirs(tmpdir)
-    with open(os.path.join(tmpdir, "owner"), "w") as f:
-        f.write(FIXTURE_OWNER + "\n")
+    # Nombre nuevo del contrato v5. El runtime sigue leyendo `owner` como
+    # compatibilidad legacy, pero una instalación nueva ya no nace con dueño.
+    with open(os.path.join(tmpdir, "profile_name"), "w") as f:
+        f.write(profile["name"] + "\n")
     with open(os.path.join(tmpdir, "facts.md"), "w") as f:
-        f.write(FIXTURE_FACTS)
+        f.write(profile["facts"])
     with open(os.path.join(tmpdir, "episodic.md"), "w") as f:
-        f.write(FIXTURE_EPISODIC)
+        f.write(profile["episodic"])
 
 
 def repeated_ngram(text, n=8):
@@ -101,9 +165,9 @@ def repeated_ngram(text, n=8):
 
 
 def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout,
-             fast=True):
+             profile, fast=True):
     """Una tirada: N prompts en una sesión. Devuelve lista de turnos medidos."""
-    make_profile(profile_dir)
+    make_profile(profile_dir, profile)
     rep, win, freq = cfg
     env = dict(os.environ)
     env.update({
@@ -129,9 +193,13 @@ def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout,
 
     out = ANSI.sub("", proc.stdout)
     turns = []
-    for m in TURN.finditer(out):
+    foreign_markers = [p["marker"] for p in PROFILES.values()
+                       if p["marker"] and p["marker"] != profile["marker"]]
+    for turn_index, m in enumerate(TURN.finditer(out)):
         text, tokens, tail = m.group(1).strip(), int(m.group(2)), m.group(3)
         low = text.lower()
+        prompt = prompts[turn_index] if turn_index < len(prompts) else ""
+        matched_tics = [term for term in ASSISTANT_TICS if term in low]
         turns.append({
             "text": text,
             "tokens": tokens,
@@ -140,8 +208,15 @@ def run_once(binary, model, temp, cfg, seed, prompts, profile_dir, timeout,
             "cut": ("presupuesto" in tail or "…" in text[-6:]
                     or "se repetía" in tail),
             "identity_err": bool(re.search(
-                r"\bsoy\s+" + FIXTURE_OWNER.lower() + r"\b", low)),
-            "tics": sum(1 for t in ASSISTANT_TICS if t in low),
+                r"\bsoy\s+" + profile["name"].lower() + r"\b", low)),
+            "tics": len(matched_tics),
+            "tic_terms": matched_tics,
+            "profile_leak": any(marker in low for marker in foreign_markers),
+            "self_fiction": any(marker in low for marker in SELF_FICTION),
+            "style_violation": bool(profile["forbid_emoji"] and EMOJI.search(text)),
+            "memory_miss": bool(profile["marker"] and
+                                "mascota" in prompt.lower() and
+                                profile["marker"] not in low),
         })
     return turns
 
@@ -155,9 +230,12 @@ def main():
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--temp", type=float, default=0.7)
     ap.add_argument("--categories", nargs="+", default=None,
-                    help="filtrar corpus: trivial factual tecnica larga memoria charla")
+                    help="filtrar corpus: trivial factual tecnica larga memoria charla documento")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("--profiles", nargs="+", choices=sorted(PROFILES),
+                    default=sorted(PROFILES),
+                    help="perfiles sintéticos a ejecutar (por defecto: todos)")
     args = ap.parse_args()
 
     corpus = [(c, p) for c, p in CORPUS
@@ -165,11 +243,13 @@ def main():
     prompts = [p for _, p in corpus]
     cats = [c for c, _ in corpus]
 
-    profile_dir = os.path.join(tempfile.gettempdir(), "helios_calib_profile")
+    profile_root = os.path.join(tempfile.gettempdir(), "helios_calib_profiles")
+    selected_profiles = [(key, PROFILES[key]) for key in args.profiles]
 
     print(f"Corpus: {len(prompts)} prompts | semillas: {args.seeds} | "
-          f"temp: {args.temp}")
-    print(f"Perfil sintético: dueño='{FIXTURE_OWNER}' en {profile_dir}\n")
+          f"perfiles: {len(selected_profiles)} | temp: {args.temp}")
+    print("Perfiles sintéticos: " + ", ".join(
+        profile["name"] for _, profile in selected_profiles) + "\n")
 
     results = {}
     for cfg_str in args.configs:
@@ -181,31 +261,43 @@ def main():
             sys.exit(1)
 
         per_seed = []
-        for seed in range(1, args.seeds + 1):
-            print(f"  [{cfg_str}] semilla {seed}/{args.seeds}...", flush=True)
-            turns = run_once(args.binary, args.model, args.temp, cfg, seed,
-                             prompts, profile_dir, args.timeout)
-            if turns is None:
-                print("    TIMEOUT — tirada descartada")
-                continue
-            if len(turns) < len(prompts):
-                print(f"    aviso: {len(turns)}/{len(prompts)} turnos parseados")
-            n = len(turns) or 1
-            per_seed.append({
-                "loops": sum(t["loop"] for t in turns) / n,
-                "tokens": statistics.mean([t["tokens"] for t in turns]) if turns else 0,
-                "cuts": sum(t["cut"] for t in turns) / n,
-                "identity": sum(t["identity_err"] for t in turns) / n,
-                "tics": sum(t["tics"] for t in turns) / n,
-            })
-            if args.verbose and turns:
-                for cat, t in zip(cats, turns):
-                    flags = "".join(["L" if t["loop"] else ".",
-                                     "C" if t["cut"] else ".",
-                                     "I" if t["identity_err"] else ".",
-                                     "T" if t["tics"] else "."])
-                    print(f"      {cat:8} {flags} {t['tokens']:5} tok  "
-                          f"{t['text'][:60]!r}")
+        for profile_key, profile in selected_profiles:
+            profile_dir = os.path.join(profile_root, profile_key)
+            for seed in range(1, args.seeds + 1):
+                print(f"  [{cfg_str}] {profile['name']} "
+                      f"semilla {seed}/{args.seeds}...", flush=True)
+                turns = run_once(args.binary, args.model, args.temp, cfg, seed,
+                                 prompts, profile_dir, args.timeout, profile)
+                if turns is None:
+                    print("    TIMEOUT — tirada descartada")
+                    continue
+                if len(turns) < len(prompts):
+                    print(f"    aviso: {len(turns)}/{len(prompts)} turnos parseados")
+                n = len(turns) or 1
+                per_seed.append({
+                    "loops": sum(t["loop"] for t in turns) / n,
+                    "tokens": statistics.mean([t["tokens"] for t in turns]) if turns else 0,
+                    "cuts": sum(t["cut"] for t in turns) / n,
+                    "identity": sum(t["identity_err"] for t in turns) / n,
+                    "tics": sum(t["tics"] for t in turns) / n,
+                    "leaks": sum(t["profile_leak"] for t in turns) / n,
+                    "fiction": sum(t["self_fiction"] for t in turns) / n,
+                    "style": sum(t["style_violation"] for t in turns) / n,
+                    "memory": sum(t["memory_miss"] for t in turns) / n,
+                })
+                if args.verbose and turns:
+                    for cat, t in zip(cats, turns):
+                        flags = "".join(["L" if t["loop"] else ".",
+                                         "C" if t["cut"] else ".",
+                                         "I" if t["identity_err"] else ".",
+                                         "T" if t["tics"] else ".",
+                                         "F" if t["profile_leak"] else ".",
+                                         "B" if t["self_fiction"] else ".",
+                                         "S" if t["style_violation"] else ".",
+                                         "M" if t["memory_miss"] else "."])
+                        print(f"      {profile['name']:7} {cat:8} {flags} "
+                              f"{t['tokens']:5} tok  {t['text'][:60]!r}"
+                              + (f" tics={t['tic_terms']}" if t['tic_terms'] else ""))
         results[cfg_str] = per_seed
 
     # ---- tabla ----
@@ -216,10 +308,11 @@ def main():
         s = statistics.stdev(vals) if len(vals) > 1 else 0.0
         return f"{m:5.2f}±{s:.2f}"
 
-    print("\n" + "=" * 78)
+    print("\n" + "=" * 132)
     print(f"{'config (rep/win/freq)':24} {'bucles':>12} {'cortes':>12} "
-          f"{'identidad':>12} {'coletillas':>12}")
-    print("-" * 78)
+          f"{'identidad':>12} {'coletillas':>12} {'fugas':>12} {'biografía':>12} "
+          f"{'estilo':>12} {'memoria':>12}")
+    print("-" * 132)
     for cfg_str, seeds in results.items():
         if not seeds:
             print(f"{cfg_str:24} {'sin datos':>12}")
@@ -228,16 +321,22 @@ def main():
               f"{ms([s['loops'] for s in seeds]):>12} "
               f"{ms([s['cuts'] for s in seeds]):>12} "
               f"{ms([s['identity'] for s in seeds]):>12} "
-              f"{ms([s['tics'] for s in seeds]):>12}")
-    print("-" * 78)
+              f"{ms([s['tics'] for s in seeds]):>12} "
+              f"{ms([s['leaks'] for s in seeds]):>12} "
+              f"{ms([s['fiction'] for s in seeds]):>12} "
+              f"{ms([s['style'] for s in seeds]):>12} "
+              f"{ms([s['memory'] for s in seeds]):>12}")
+    print("-" * 132)
     print(f"{'':24} {'tokens/turno':>12}")
     for cfg_str, seeds in results.items():
         if seeds:
             print(f"{cfg_str:24} {ms([s['tokens'] for s in seeds]):>12}")
-    print("=" * 78)
-    print("bucles/cortes/identidad = fracción de turnos afectados (menos es "
-          "mejor)\ncoletillas = frases de asistente comercial por turno")
-    print(f"n = {args.seeds} semillas × {len(prompts)} prompts por configuración")
+    print("=" * 132)
+    print("bucles/cortes/identidad/fugas/biografía/estilo/memoria = fracción "
+          "de turnos afectados (menos es mejor)\ncoletillas = frases de "
+          "asistente comercial por turno")
+    print(f"n = {args.seeds} semillas × {len(selected_profiles)} perfiles × "
+          f"{len(prompts)} prompts por configuración")
 
 
 if __name__ == "__main__":
