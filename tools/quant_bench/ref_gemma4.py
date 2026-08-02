@@ -111,8 +111,14 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
 
     shared = {}                       # KV de la ultima capa fisica de cada tipo
     first_shared = L - cfg['num_kv_shared_layers']
+    # REF_FP16_ALL=1 simula el motor de verdad: pesos e intermedios en fp16, no
+    # solo el residual. Sirve para saber si el hueco entre Hector y la
+    # referencia es precision o es implementacion.
+    todo16 = os.environ.get('REF_FP16_ALL') == '1'
+    r16 = (lambda x: x.astype(np.float16).astype(np.float32)) if todo16 else (lambda x: x)
+
     for i in range(L):
-        w = lambda s: st.f32(f'{P}layers.{i}.{s}')
+        w = lambda s: r16(st.f32(f'{P}layers.{i}.{s}'))
         t = types[i]; glob = (t == 'full_attention')
         hd = cfg['global_head_dim'] if glob else cfg['head_dim']
         rp = ropep[t]
@@ -121,7 +127,7 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
 
         q = (x @ w('self_attn.q_proj.weight').T).reshape(S, H, hd)
         q = rmsnorm(q, w('self_attn.q_norm.weight'), eps)
-        q = rope(q, pos, inv_freq(hd, rp['rope_theta'], rp['rope_type'], rp.get('partial_rotary_factor', 1.0)))
+        q = r16(rope(q, pos, inv_freq(hd, rp['rope_theta'], rp['rope_type'], rp.get('partial_rotary_factor', 1.0))))
 
         if i < first_shared:
             k = (x @ w('self_attn.k_proj.weight').T).reshape(S, 1, hd)
@@ -129,6 +135,7 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
             k = rope(k, pos, inv_freq(hd, rp['rope_theta'], rp['rope_type'], rp.get('partial_rotary_factor', 1.0)))
             v = (x @ w('self_attn.v_proj.weight').T).reshape(S, 1, hd)
             v = rmsnorm(v, None, eps)          # v_norm lleva with_scale=False
+            k = r16(k); v = r16(v)
             shared[t] = (k, v)                 # la ultima de cada tipo gana
         else:
             k, v = shared[t]                   # capas 15-34 releen 13 (local) / 14 (global)
@@ -142,20 +149,25 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
         sc -= sc.max(-1, keepdims=True)
         p = np.exp(sc); p /= p.sum(-1, keepdims=True)
         a = (p @ v[:, 0, :]).transpose(1, 0, 2).reshape(S, H * hd)
-        a = a @ w('self_attn.o_proj.weight').T
+        a = r16(a @ w('self_attn.o_proj.weight').T)
 
         h = res + rmsnorm(a, w('post_attention_layernorm.weight'), eps)
         res = h
         x = rmsnorm(h, w('pre_feedforward_layernorm.weight'), eps)
         x = gelu_tanh(x @ w('mlp.gate_proj.weight').T) * (x @ w('mlp.up_proj.weight').T)
-        x = x @ w('mlp.down_proj.weight').T
+        x = r16(x @ w('mlp.down_proj.weight').T)
         h = res + rmsnorm(x, w('post_feedforward_layernorm.weight'), eps)
 
         res = h                                 # inyeccion del PLE de esta capa
         g = gelu_tanh(h @ w('per_layer_input_gate.weight').T) * ple[:, i, :]
-        g = g @ w('per_layer_projection.weight').T
+        g = r16(g @ w('per_layer_projection.weight').T)
         h = res + rmsnorm(g, w('post_per_layer_input_norm.weight'), eps)
         h = h * w('layer_scalar')
+        if os.environ.get('REF_FP16_RESIDUAL') == '1':
+            # Hector guarda el residual en fp16 entre capas; la referencia va en
+            # fp32. Redondear aqui aisla cuanto del hueco es precision del flujo
+            # y cuanto es diferencia de implementacion del motor.
+            h = h.astype(np.float16).astype(np.float32)
         print(f'\r[ref] capa {i+1}/{L}', end='', file=sys.stderr)
 
     print(file=sys.stderr)
