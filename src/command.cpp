@@ -193,6 +193,12 @@ void CommandBuffer::add_embedding(const std::string& dst, const std::string& ind
     add_op(op::EMBEDDING(), dst).in({indices, table});
 }
 
+void CommandBuffer::add_scatter_rows(const std::string& dst,
+                                     const std::string& rows,
+                                     const std::string& indices) {
+    add_op(op::SCATTER_ROWS(), dst).in({rows, indices});
+}
+
 void CommandBuffer::add_ple_slice(const std::string& dst,
                                   const std::string& packed,
                                   uint32_t layer, uint32_t layers,

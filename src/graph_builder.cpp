@@ -516,6 +516,67 @@ CommandBuffer GraphBuilder::build_gemma4_input(
     return cb;
 }
 
+CommandBuffer GraphBuilder::build_gemma4_multimodal_input(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    const Gemma4MultimodalInputNames& names,
+    uint32_t batch_size,
+    uint32_t seq_len
+) {
+    if (!scratch_allocated_) {
+        throw std::runtime_error("GraphBuilder: call allocate_gemma4_scratch() first");
+    }
+    if (batch_size != 1 || seq_len == 0 || seq_len > alloc_seq_) {
+        throw std::invalid_argument(
+            "GraphBuilder: Gemma 4 V5 supports one multimodal sequence");
+    }
+
+    const TensorInfo* embedding_tokens = engine.tensors().get(names.embedding_tokens);
+    const TensorInfo* ple_tokens = engine.tensors().get(names.ple_identity_tokens);
+    const TensorInfo* image_embeddings = engine.tensors().get(names.image_embeddings);
+    const TensorInfo* image_positions = engine.tensors().get(names.image_positions);
+    auto valid_tokens = [&](const TensorInfo* tensor) {
+        return tensor && tensor->dtype == dtype::INT32() &&
+               tensor->shape.size() == 2 && tensor->shape[0] == batch_size &&
+               tensor->shape[1] == seq_len;
+    };
+    if (!valid_tokens(embedding_tokens) || !valid_tokens(ple_tokens)) {
+        throw std::invalid_argument(
+            "GraphBuilder: Gemma 4 multimodal token shape/dtype mismatch");
+    }
+    if (!image_embeddings || image_embeddings->dtype != dtype::FP16() ||
+        image_embeddings->shape.size() != 2 ||
+        image_embeddings->shape[0] == 0 ||
+        image_embeddings->shape[1] != config.hidden_size() ||
+        !image_positions || image_positions->dtype != dtype::INT32() ||
+        image_positions->shape.size() != 1 ||
+        image_positions->shape[0] != image_embeddings->shape[0] ||
+        image_positions->shape[0] > seq_len) {
+        throw std::invalid_argument(
+            "GraphBuilder: Gemma 4 visual embedding contract mismatch");
+    }
+    set_active_scratch_shape(engine, batch_size, seq_len);
+
+    CommandBuffer cb;
+    cb.reserve(11);
+    cb.add_embedding(S("hidden"), names.embedding_tokens,
+                     WG(arch, arch.embedding_name));
+    cb.add_scale(S("hidden"), S("hidden"),
+                 std::sqrt(static_cast<float>(config.hidden_size())));
+    cb.add_scatter_rows(S("hidden"), names.image_embeddings,
+                        names.image_positions);
+
+    Gemma4PlePreparationNames ple_names;
+    ple_names.input_tokens = names.ple_identity_tokens;
+    ple_names.main_embeddings = S("hidden");
+    ple_names.ple = S("g4.ple");
+    ple_names.context = S("g4.ple_context");
+    append_gemma4_ple_preparation(cb, config, gemma, ple_names);
+    return cb;
+}
+
 CommandBuffer GraphBuilder::build_gemma4_single_layer(
     Engine& engine,
     const ModelConfig& config,
@@ -763,6 +824,51 @@ CommandBuffer GraphBuilder::build_gemma4_forward_cached(
         logits.set("seq_len", seq_len);
     }
 
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_LOGIT_SOFTCAP)) {
+        const float cap = config.get<float>("final_logit_softcapping", 30.0f);
+        if (!(cap > 0.0f)) {
+            throw std::invalid_argument("GraphBuilder: invalid Gemma 4 logit softcap");
+        }
+        cb.add_softcap(S("logits"), S("logits"), cap);
+    }
+    return cb;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_multimodal_forward_cached(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    const Gemma4MultimodalInputNames& names,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    const KVCacheParams& cache
+) {
+    if (config.arch() != "gemma4" || gemma.layers.size() != arch.num_layers ||
+        arch.num_layers != config.num_hidden_layers()) {
+        throw std::invalid_argument("GraphBuilder: invalid complete Gemma 4 contract");
+    }
+
+    CommandBuffer cb = build_gemma4_multimodal_input(
+        engine, config, gemma, arch, names, batch_size, seq_len);
+    cb.reserve(cb.size() + arch.num_layers * 30 + 4);
+    for (uint32_t layer = 0; layer < arch.num_layers; ++layer) {
+        cb.append(build_gemma4_layer_cached(
+            engine, config, gemma, arch, layer, batch_size, seq_len, cache));
+    }
+
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   WG(arch, arch.final_norm_name), config.rms_norm_eps());
+    const std::string& lm_head = arch.lm_head_name.empty()
+        ? arch.embedding_name : arch.lm_head_name;
+    cb.add_matmul(S("logits"), S("normed"), WG(arch, lm_head));
+    auto& logits = cb.commands().back();
+    if (seq_len > 1) {
+        logits.set("seq_len", uint32_t{1});
+        logits.set("row_offset", seq_len - 1);
+    } else {
+        logits.set("seq_len", seq_len);
+    }
     if (gemma.has_flag(GEMMA4_EXT_FLAG_LOGIT_SOFTCAP)) {
         const float cap = config.get<float>("final_logit_softcapping", 30.0f);
         if (!(cap > 0.0f)) {

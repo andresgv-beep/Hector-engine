@@ -63,6 +63,7 @@ set(ENGINE_SOURCES
     src/engine.cpp
     src/hnf_loader.cpp
     src/gemma4_ple.cpp
+    src/gemma4_multimodal.cpp
     src/gemma4_validator.cpp
     src/gemma4_vision_validator.cpp
     src/gemma4_vision_preprocess.cpp
@@ -172,6 +173,9 @@ target_link_libraries(test_gemma4_vision_preprocess PRIVATE helios-engine)
 add_executable(test_gemma4_vision_runner tests/test_gemma4_vision_runner.cu)
 target_link_libraries(test_gemma4_vision_runner PRIVATE helios-engine)
 
+add_executable(test_gemma4_multimodal tests/test_gemma4_multimodal.cu)
+target_link_libraries(test_gemma4_multimodal PRIVATE helios-engine)
+
 # Gemma 4 numerical primitives, isolated from graph construction
 add_executable(test_gemma4_primitives tests/test_gemma4_primitives.cu)
 target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
@@ -213,6 +217,7 @@ add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4VisionPreprocessTest COMMAND test_gemma4_vision_preprocess)
 add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
+add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
@@ -247,6 +252,9 @@ target_link_libraries(test_gemma4_generate PRIVATE helios-engine)
 # Gemma 4 raw-logit dump for converter quantization experiments
 add_executable(gemma4_dump_logits tools/gemma4_dump_logits.cu)
 target_link_libraries(gemma4_dump_logits PRIVATE helios-engine)
+
+add_executable(gemma4_multimodal_dump tools/gemma4_multimodal_dump.cu)
+target_link_libraries(gemma4_multimodal_dump PRIVATE helios-engine)
 
 # Gemma 4 token-by-token quality calibration (NLL/entropy/top-1)
 add_executable(gemma4_calibrate tools/gemma4_calibrate.cu)

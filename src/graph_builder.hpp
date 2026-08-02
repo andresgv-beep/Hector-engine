@@ -69,6 +69,16 @@ struct KVCacheParams {
     uint32_t max_cache_len;      // Maximum cache length
 };
 
+// External tensors required only by Gemma 4 multimodal prefill. Token tensors
+// are INT32 [batch, sequence], image embeddings are FP16 [soft_tokens, hidden]
+// and image_positions is INT32 [soft_tokens].
+struct Gemma4MultimodalInputNames {
+    std::string embedding_tokens;
+    std::string ple_identity_tokens;
+    std::string image_embeddings;
+    std::string image_positions;
+};
+
 // ============================================================================
 // ARCHITECTURE DESCRIPTOR
 // ============================================================================
@@ -263,6 +273,20 @@ public:
         uint32_t seq_len
     );
 
+    // Multimodal prefill input. The main embedding lookup uses PAD at image
+    // slots, scales normal text embeddings, then replaces only those rows with
+    // projected visual embeddings. PLE identity uses its own PAD-rewritten IDs
+    // while PLE context consumes the already-substituted main embeddings.
+    CommandBuffer build_gemma4_multimodal_input(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        const Gemma4MultimodalInputNames& names,
+        uint32_t batch_size,
+        uint32_t seq_len
+    );
+
     // One exact non-shared Gemma 4 layer. Local attention is valid here only
     // while the supplied sequence does not exceed its sliding window; the
     // long-context mask and shared KV semantics belong to Phase 6.
@@ -299,6 +323,17 @@ public:
         const Gemma4Config& gemma,
         const ArchDescriptor& arch,
         const std::string& input_tokens,
+        uint32_t batch_size,
+        uint32_t seq_len,
+        const KVCacheParams& cache
+    );
+
+    CommandBuffer build_gemma4_multimodal_forward_cached(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        const Gemma4MultimodalInputNames& names,
         uint32_t batch_size,
         uint32_t seq_len,
         const KVCacheParams& cache

@@ -218,6 +218,8 @@ public:
     // Memory
     void add_embedding(const std::string& dst, const std::string& indices,
                        const std::string& table);
+    void add_scatter_rows(const std::string& dst, const std::string& rows,
+                          const std::string& indices);
     void add_ple_slice(const std::string& dst, const std::string& packed,
                        uint32_t layer, uint32_t layers, uint32_t dim);
     void add_concat(const std::string& dst, 

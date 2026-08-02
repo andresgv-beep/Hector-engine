@@ -56,6 +56,9 @@ public:
     uint32_t completed_layers() const { return completed_layers_; }
     uint32_t soft_token_count() const { return soft_token_count_; }
     uint32_t projection_size() const { return projection_size_; }
+    const half* projected_states_device() const {
+        return projector_complete_ ? d_projected_ : nullptr;
+    }
 
     // Numerical-test/debug boundary. Converts the FP16 device output to FP32
     // on the host and synchronizes the runner stream.

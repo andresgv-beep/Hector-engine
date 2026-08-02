@@ -256,6 +256,40 @@ void launch_copy_fp16(
     );
 }
 
+__global__ void scatter_rows_fp16_kernel(
+    const half* __restrict__ rows,
+    const int32_t* __restrict__ indices,
+    half* __restrict__ output,
+    int row_count,
+    int row_width,
+    int output_rows
+) {
+    const int element = blockIdx.x * blockDim.x + threadIdx.x;
+    const int total = row_count * row_width;
+    if (element >= total) return;
+
+    const int source_row = element / row_width;
+    const int column = element - source_row * row_width;
+    const int destination_row = indices[source_row];
+    if (destination_row < 0 || destination_row >= output_rows) return;
+    output[destination_row * row_width + column] = rows[element];
+}
+
+void launch_scatter_rows_fp16(
+    const half* rows,
+    const int32_t* indices,
+    half* output,
+    int row_count,
+    int row_width,
+    int output_rows,
+    cudaStream_t stream
+) {
+    const int total = row_count * row_width;
+    if (total <= 0) return;
+    scatter_rows_fp16_kernel<<<(total + 255) / 256, 256, 0, stream>>>(
+        rows, indices, output, row_count, row_width, output_rows);
+}
+
 } // namespace kernels
 } // namespace helios
 

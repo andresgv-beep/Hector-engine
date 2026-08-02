@@ -1381,8 +1381,17 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     const bool offload_requested = (off && *off == '1') || mmap_requested;
     const bool embedding_candidate =
         entry.name.find("token_embedding") != std::string::npos;
-    bool to_host = offload_requested && embedding_candidate &&
-                   detail::embedding_is_lookup_only(entry, tensors_);
+    // Verifier-only escape hatch: the all-FP16 Gemma 4 control otherwise
+    // misses an 8 GiB card by its distinct 768 MiB output head. Reading that
+    // full matrix through HMM is intentionally slow and never enabled by the
+    // production offload flag alone.
+    const char* verify_head_env = getenv("HELIOS_VERIFY_LM_HEAD_MMAP");
+    const bool verify_head_mmap = mmap_requested && verify_head_env &&
+        *verify_head_env == '1' && entry.name.size() >= 14 &&
+        entry.name.compare(entry.name.size() - 14, 14, "lm_head.weight") == 0;
+    bool to_host = verify_head_mmap ||
+        (offload_requested && embedding_candidate &&
+         detail::embedding_is_lookup_only(entry, tensors_));
     if (offload_requested && embedding_candidate && !to_host &&
         entry.name.find(".ple.") == std::string::npos) {
         std::cout << "  [VRAM] " << entry.name

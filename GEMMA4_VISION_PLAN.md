@@ -292,7 +292,7 @@ peor desviación es NRMSE 0,00807 en capa 15 frente al límite 0,030. Pesos y
 scratch/workspace medidos ocupan 337.641.472 y 318.767.104 bytes. Evidencia en
 `tools/GEMMA4_VISION_V4.md`.
 
-### V5 — Puente multimodal al decoder
+### V5 — Puente multimodal al decoder — CERRADA
 
 - Expandir `<image_soft_token>` al número real de salidas visuales.
 - Sustituir embeddings principales en las posiciones de imagen.
@@ -352,8 +352,13 @@ arriesgar el HNF de producción.
 - **Fase cerrada:** V4 — runner FP16 visual independiente verificado contra
   las cinco fronteras del oráculo V0, tanto con HNF visual como combinado.
   Evidencia en `tools/GEMMA4_VISION_V4.md`.
-- **Fase activa:** V5 — puente de soft tokens visuales al decoder y comparación
-  de logits/pasos greedy contra upstream.
+- **Fase cerrada:** V5 — expansión dinámica BOI/IMAGE/EOI, sustitución de
+  embeddings, separación correcta de identidad/contexto PLE y continuidad KV.
+  Texto puro permanece idéntico byte a byte; el control FP16 coincide en los
+  cuatro argmax y 10/10 del top-10 contra la referencia externa. Evidencia en
+  `tools/GEMMA4_VISION_V5.md`.
+- **Fase activa:** V6 — camino mínimo RGB a chat, robustez y medición de
+  VRAM/latencia con una imagen.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -365,6 +370,7 @@ arriesgar el HNF de producción.
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
   Transformers `b3a36037`. Tras V4, Héctor pasa 17/17; el conversor permanece
   sin cambios en esta fase.
-- **Siguiente acción exacta:** definir la secuencia canónica de IDs para una
-  imagen y separar las dos entradas de PLE antes de sustituir embeddings. El
-  primer test V5 será texto puro bit a bit, antes de medir logits multimodales.
+- **Siguiente acción exacta:** añadir una entrada CLI mínima que decodifique una
+  imagen a RGB, ejecute V3+V4 una sola vez, registre la salida V5 y continúe el
+  decode textual con el KV existente. Después medir pico de VRAM, torre,
+  prefill y tok/s sin cuantizar visión.

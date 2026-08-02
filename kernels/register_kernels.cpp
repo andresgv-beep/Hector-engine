@@ -10,6 +10,7 @@
 #include "optype.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 
 namespace helios {
 namespace kernels {
@@ -482,6 +483,35 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("EMBEDDING: unsupported table dtype " +
                                      std::string(dtype_name(table->dtype)));
         }
+    });
+
+    engine.register_kernel(op::SCATTER_ROWS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* rows = ctx.in(0);
+        TensorInfo* indices = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        if (!rows || !indices || !output || rows->shape.size() != 2 ||
+            indices->shape.size() != 1 || output->shape.empty()) {
+            throw std::runtime_error("SCATTER_ROWS: invalid tensor contract");
+        }
+        if (indices->dtype != dtype::INT32()) {
+            throw std::runtime_error("SCATTER_ROWS: indices must be INT32");
+        }
+        const uint32_t row_count = rows->shape[0];
+        const uint32_t row_width = rows->shape[1];
+        if (indices->numel() != row_count || output->shape.back() != row_width ||
+            output->numel() % row_width != 0 ||
+            row_count > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            row_width > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+            output->numel() / row_width >
+                static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            size_t(row_count) * row_width >
+                static_cast<size_t>(std::numeric_limits<int>::max())) {
+            throw std::runtime_error("SCATTER_ROWS: incompatible shapes");
+        }
+        launch_scatter_rows_fp16(
+            as_fp16_const(rows), as_i32(indices), as_fp16(output),
+            static_cast<int>(row_count), static_cast<int>(row_width),
+            static_cast<int>(output->numel() / row_width), ctx.stream);
     });
 
     engine.register_kernel(op::PLE_SLICE(), [](ExecContext& ctx, const Command& cmd) {

@@ -166,6 +166,7 @@ namespace op {
     inline OpTypeID SPLIT_QKV() { return OpTypeRegistry::instance().get_id("split_qkv"); }
     inline OpTypeID SPLIT_HALF() { return OpTypeRegistry::instance().get_id("split_half"); }
     inline OpTypeID EMBEDDING() { return OpTypeRegistry::instance().get_id("embedding"); }
+    inline OpTypeID SCATTER_ROWS() { return OpTypeRegistry::instance().get_id("scatter_rows"); }
     inline OpTypeID PLE_SLICE() { return OpTypeRegistry::instance().get_id("ple_slice"); }
 }
 

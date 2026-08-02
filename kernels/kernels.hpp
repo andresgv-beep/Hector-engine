@@ -492,6 +492,16 @@ void launch_copy_fp16(
     cudaStream_t stream = nullptr
 );
 
+void launch_scatter_rows_fp16(
+    const half* rows,
+    const int32_t* indices,
+    half* output,
+    int row_count,
+    int row_width,
+    int output_rows,
+    cudaStream_t stream = nullptr
+);
+
 void launch_embedding_fp16(
     const int32_t* indices, // [batch, seq]
     const half* table,      // [vocab, dim]

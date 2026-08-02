@@ -319,6 +319,10 @@ void test_real_frontier(const std::string& hnf_path,
                 "pooler boundary download failed: " + error);
         require(runner.run_projector(&error),
                 "visual projector failed: " + error);
+        require(runner.projected_states_device() != nullptr &&
+                runner.soft_token_count() == 280 &&
+                runner.projection_size() == 1536,
+                "visual projector must expose the V5 device boundary");
         require(runner.copy_projected_states(actual_projected, &error),
                 "projected boundary download failed: " + error);
         cuda_require(cudaMemGetInfo(&free_runner_peak, &total_vram),

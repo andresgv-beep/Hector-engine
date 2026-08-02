@@ -5,7 +5,7 @@ No comparte una linea de codigo con Hector. Las formulas salen de
 transformers/models/gemma4/modeling_gemma4.py y modeling_rope_utils.py.
 Emite los logits de la ultima posicion para comparar contra el motor.
 """
-import json, struct, sys, math
+import json, os, struct, sys, math
 import numpy as np
 
 class Safetensors:
@@ -70,7 +70,8 @@ def rope(x, pos, ivf):
     x1, x2 = np.split(x, 2, axis=-1)
     return np.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
 
-def main(model_dir, tokens, out_path):
+def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880,
+         pad_token_id=0):
     cfg = json.load(open(f'{model_dir}/config.json'))['text_config']
     st = Safetensors(f'{model_dir}/model.safetensors')
     P = 'model.language_model.'
@@ -82,10 +83,27 @@ def main(model_dir, tokens, out_path):
     pos = np.arange(S, dtype=np.float32)
     print(f'[ref] {S} tokens, {L} capas', file=sys.stderr)
 
-    h = st.rows(P + 'embed_tokens.weight', ids) * math.sqrt(D)
+    lookup_ids = ids.copy()
+    image_mask = ids == image_token_id
+    visual = None
+    if projected_path is not None:
+        visual = np.load(projected_path)
+        assert visual.ndim == 2 and visual.shape[1] == D, visual.shape
+        assert int(image_mask.sum()) == visual.shape[0], (
+            int(image_mask.sum()), visual.shape[0])
+        # Hector's bridge receives the visual projector output as FP16. Match
+        # that boundary here so this comparison isolates the decoder bridge.
+        visual = visual.astype(np.float16).astype(np.float32)
+        lookup_ids[image_mask] = pad_token_id
+    elif image_mask.any():
+        raise ValueError('IMAGE tokens require projected visual embeddings')
+
+    h = st.rows(P + 'embed_tokens.weight', lookup_ids) * math.sqrt(D)
+    if visual is not None:
+        h[image_mask] = visual
 
     # --- PLE: identidad del token + contexto proyectado, combinados a 1/sqrt(2)
-    ident = st.rows(P + 'embed_tokens_per_layer.weight', ids) * math.sqrt(PLE)
+    ident = st.rows(P + 'embed_tokens_per_layer.weight', lookup_ids) * math.sqrt(PLE)
     ident = ident.reshape(S, L, PLE)
     ctx = (h @ st.f32(P + 'per_layer_model_projection.weight').T) / math.sqrt(D)
     ctx = rmsnorm(ctx.reshape(S, L, PLE), st.f32(P + 'per_layer_projection_norm.weight'), eps)
@@ -143,6 +161,23 @@ def main(model_dir, tokens, out_path):
     print(file=sys.stderr)
     h = rmsnorm(h, st.f32(P + 'norm.weight'), eps)
     emb = st.f32(P + 'embed_tokens.weight')     # tie_word_embeddings
+    cap0 = cfg['final_logit_softcapping']
+    if os.environ.get('REF_ALL_POSITIONS') == '1':
+        # Un argmax int32 por posicion, en el mismo formato que
+        # argmax_all_positions_gemma4.cu, para comparar posicion a posicion.
+        # Por trozos: [S, 262144] en float32 no cabe de una pieza.
+        salida = np.empty(h.shape[0], np.int32)
+        TROZO = 64
+        for a in range(0, h.shape[0], TROZO):
+            b = min(a + TROZO, h.shape[0])
+            l = h[a:b] @ emb.T
+            # el softcap es monotono, no altera el argmax, pero se aplica igual
+            salida[a:b] = np.argmax(cap0 * np.tanh(l / cap0), axis=1)
+            print(f'\r[ref] argmax {b}/{h.shape[0]}', end='', file=sys.stderr)
+        salida.tofile(out_path)
+        print(f'\n[ref] argmax de {salida.size} posiciones -> {out_path}',
+              file=sys.stderr)
+        return
     lg = h[-1] @ emb.T
     cap = cfg['final_logit_softcapping']
     lg = cap * np.tanh(lg / cap)
@@ -153,5 +188,9 @@ def main(model_dir, tokens, out_path):
           ' '.join(f'{t}({lg[t]:.2f})' for t in top), file=sys.stderr)
 
 if __name__ == '__main__':
+    if len(sys.argv) not in (4, 5):
+        raise SystemExit(
+            'usage: ref_gemma4.py MODEL_DIR IDS OUTPUT [PROJECTED_NPY]')
     toks = [int(x) for x in sys.argv[2].split(',')]
-    main(sys.argv[1], toks, sys.argv[3])
+    projected = sys.argv[4] if len(sys.argv) == 5 else None
+    main(sys.argv[1], toks, sys.argv[3], projected)

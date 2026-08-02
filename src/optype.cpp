@@ -165,6 +165,13 @@ void OpTypeRegistry::register_builtins() {
     info.min_inputs = 2; info.max_inputs = 2;
     register_op(info);
 
+    // Replaces complete rows in an existing activation tensor. The source
+    // rows and their INT32 destination indices are separate inputs so the op
+    // remains capturable by CUDA Graphs.
+    info = OpTypeInfo{}; info.name = "scatter_rows"; info.category = "memory";
+    info.min_inputs = 2; info.max_inputs = 2; info.is_inplace = true;
+    register_op(info);
+
     info = OpTypeInfo{}; info.name = "ple_slice"; info.category = "memory";
     info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);

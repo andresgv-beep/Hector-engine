@@ -215,6 +215,38 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
             input_commands[1].op == helios::op::SCALE(),
             "Gemma 4 main embedding order");
 
+    void* mm_tokens = engine.tensors().allocate_and_register(
+        "graph.mm_tokens", {1, 3}, helios::dtype::INT32());
+    void* mm_ple_tokens = engine.tensors().allocate_and_register(
+        "graph.mm_ple_tokens", {1, 3}, helios::dtype::INT32());
+    engine.tensors().allocate_and_register(
+        "graph.mm_image", {1, 1536}, helios::dtype::FP16());
+    void* mm_positions = engine.tensors().allocate_and_register(
+        "graph.mm_positions", {1}, helios::dtype::INT32());
+    const std::vector<int32_t> mm_ids{2, 0, 7};
+    const int32_t mm_position = 1;
+    cuda_require(cudaMemcpy(mm_tokens, mm_ids.data(), mm_ids.size() * sizeof(int32_t),
+                            cudaMemcpyHostToDevice), "copy multimodal tokens");
+    cuda_require(cudaMemcpy(mm_ple_tokens, mm_ids.data(),
+                            mm_ids.size() * sizeof(int32_t),
+                            cudaMemcpyHostToDevice), "copy multimodal PLE tokens");
+    cuda_require(cudaMemcpy(mm_positions, &mm_position, sizeof(mm_position),
+                            cudaMemcpyHostToDevice), "copy multimodal position");
+    const helios::Gemma4MultimodalInputNames mm_names{
+        "graph.mm_tokens", "graph.mm_ple_tokens",
+        "graph.mm_image", "graph.mm_positions"};
+    const auto mm_commands = builder.build_gemma4_multimodal_input(
+        engine, config, gemma, arch, mm_names, 1, 3);
+    require(mm_commands.size() == 10 &&
+            mm_commands[0].op == helios::op::EMBEDDING() &&
+            mm_commands[1].op == helios::op::SCALE() &&
+            mm_commands[2].op == helios::op::SCATTER_ROWS() &&
+            mm_commands[3].op == helios::op::EMBEDDING(),
+            "Gemma 4 multimodal embedding/scatter/PLE order");
+    require(mm_commands[3].inputs[0] == "graph.mm_ple_tokens" &&
+            mm_commands[5].inputs[0] == "_s.hidden",
+            "Gemma 4 PLE identity/context must use separate sources");
+
     const auto layer = builder.build_gemma4_single_layer(
         engine, config, gemma, arch, 0, 2, 3, 7);
     require(layer.size() == 29, "Gemma 4 explicit layer command count");
@@ -247,6 +279,10 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
     }
     require(rejected_shared, "Phase 5 must reject shared-KV layers explicitly");
     builder.free_scratch(engine);
+    engine.tensors().remove("graph.mm_positions");
+    engine.tensors().remove("graph.mm_image");
+    engine.tensors().remove("graph.mm_ple_tokens");
+    engine.tensors().remove("graph.mm_tokens");
     for (const std::string& name : detection_names) engine.tensors().remove(name);
     cudaFree(dummy);
     std::cout << "PASS: heterogeneous Gemma 4 scratch and first local layer graph"
