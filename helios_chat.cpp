@@ -172,15 +172,47 @@ static std::string load_memories(size_t max_chars) {
         std::stringstream ss;
         ss << f.rdbuf();
         std::string all = ss.str();
-        // Solo las 3 últimas sesiones: lo demás es ruido episódico
-        const int KEEP = 3;
-        size_t pos = all.size();
-        for (int i = 0; i < KEEP && pos != std::string::npos && pos > 0; i++) {
-            size_t p = all.rfind("\n## ", pos - 1);
-            if (p == std::string::npos) { pos = 0; break; }
-            pos = p;
+
+        // CUARENTENA AL LEER. El destilador ya valida su salida, pero el
+        // diario en disco puede traer entradas viejas que son una respuesta
+        // copiada en crudo en vez de un recuerdo. Una entrada con una oferta
+        // abierta ("¿te gustaría que empezáramos por el título?") se lee
+        // mañana como tarea pendiente y el modelo la ejecuta al primer turno
+        // ambiguo — bastó un "hola cara pan" para que soltara el título de un
+        // capítulo. No se borra nada del fichero: simplemente no entra al
+        // prefijo.
+        auto entrada_toxica = [](const std::string& e) {
+            std::string low = e;
+            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+            for (const char* bad : {"¿te gustaría", "¿te gustaria",
+                                    "¿quieres que", "¿empezamos",
+                                    "me encantaría ayudarte",
+                                    "me encantaria ayudarte",
+                                    "estoy aquí para", "estoy aqui para",
+                                    "[helios]:"}) {
+                if (low.find(bad) != std::string::npos) return true;
+            }
+            return false;
+        };
+
+        // Trocear por sesiones y quedarse con las 3 últimas SANAS.
+        std::vector<std::string> entradas;
+        size_t ini = all.find("## ");
+        while (ini != std::string::npos) {
+            size_t sig = all.find("\n## ", ini);
+            entradas.push_back(all.substr(
+                ini, sig == std::string::npos ? std::string::npos : sig - ini));
+            ini = (sig == std::string::npos) ? std::string::npos : sig + 1;
         }
-        std::string recent = (pos == 0) ? all : all.substr(pos);
+        const size_t KEEP = 3;
+        std::vector<std::string> buenas;
+        for (auto it = entradas.rbegin();
+             it != entradas.rend() && buenas.size() < KEEP; ++it) {
+            if (!entrada_toxica(*it)) buenas.push_back(*it);
+        }
+        std::string recent;
+        for (auto it = buenas.rbegin(); it != buenas.rend(); ++it)
+            recent += *it + "\n";
         size_t budget = max_chars - std::min(out.size(), max_chars);
         if (recent.size() > budget) recent = recent.substr(recent.size() - budget);
         if (!recent.empty()) out += "Últimas sesiones:\n" + recent;
@@ -1109,12 +1141,51 @@ int main(int argc, char** argv) {
             return session_transcript.substr(nl == std::string::npos ? start : nl + 1);
         };
 
+        // ¿Esto es un RECUERDO o es una respuesta que se coló?
+        //
+        // El prompt de destilación pide notas en primera persona, pero nadie
+        // comprobaba la salida: cuando el modelo devolvía su propia respuesta
+        // ("¡Claro socio! 📝 Me encantaría ayudarte... ¿empezamos por el
+        // título?"), eso entraba al diario como recuerdo. Al arrancar la
+        // sesión siguiente lo leía como una tarea pendiente y soltaba el
+        // título al primer turno ambiguo — con un "hola cara pan" bastaba.
+        // Es el bug de memoria envenenada (8b782f9) por otra vía: entonces
+        // copiaba el CONTENIDO, ahora copia la OFERTA.
+        auto looks_like_memory = [](const std::string& n) -> bool {
+            if (n.size() < 20) return false;
+            std::string low = n;
+            std::transform(low.begin(), low.end(), low.begin(), ::tolower);
+            // Positivo: el prompt pide explícitamente estos marcadores.
+            bool has_marker = false;
+            for (const char* m : {"me contó", "me conto", "le expliqué",
+                                  "le explique", "decidimos", "me pidió",
+                                  "me pidio", "hablamos", "le conté",
+                                  "le conte", "quedamos", "me dijo"}) {
+                if (low.find(m) != std::string::npos) { has_marker = true; break; }
+            }
+            if (!has_marker) return false;
+            // Negativo: interpelar al usuario o dejarle una oferta abierta
+            // convierte el recuerdo en una tarea fantasma para mañana.
+            for (const char* bad : {"¿te gustaría", "¿quieres que", "¿empezamos",
+                                    "¿por dónde", "me encantaría ayudarte",
+                                    "¿necesitas", "estoy aquí para"}) {
+                if (low.find(bad) != std::string::npos) return false;
+            }
+            return true;
+        };
+
         // Destilar SIEMPRE deja rastro: si el modelo falla, va la cola cruda
         auto consolidate = [&](const char* momento) -> std::string {
             if (session_transcript.empty()) return "";
             std::string notes = distill_from_transcript(session_transcript);
+            if (!notes.empty() && !looks_like_memory(notes)) {
+                std::cout << "\033[33m(la destilación salió como respuesta, "
+                             "no como recuerdo — reintentando)\033[0m" << std::endl;
+                notes.clear();
+            }
             if (notes.empty()) {
                 notes = distill_from_transcript(session_transcript);  // 1 reintento
+                if (!notes.empty() && !looks_like_memory(notes)) notes.clear();
             }
             if (notes.empty()) {
                 std::cout << "\033[33m(destilación vacía en " << momento
