@@ -53,6 +53,7 @@ public:
     const half* hidden_states_device() const { return d_hidden_; }
     uint32_t patch_count() const { return patch_count_; }
     uint32_t hidden_size() const { return hidden_size_; }
+    uint32_t num_layers() const { return num_layers_; }
     uint32_t completed_layers() const { return completed_layers_; }
     uint32_t soft_token_count() const { return soft_token_count_; }
     uint32_t projection_size() const { return projection_size_; }

@@ -256,6 +256,16 @@ target_link_libraries(gemma4_dump_logits PRIVATE helios-engine)
 add_executable(gemma4_multimodal_dump tools/gemma4_multimodal_dump.cu)
 target_link_libraries(gemma4_multimodal_dump PRIVATE helios-engine)
 
+# V6 product probe: PNG decoding remains a CLI dependency; the engine API
+# continues to consume dependency-free RGB8 buffers supplied by HexOS/UI.
+find_package(PNG QUIET)
+if(PNG_FOUND)
+    add_executable(gemma4_vision_chat tools/gemma4_vision_chat.cu)
+    target_link_libraries(gemma4_vision_chat PRIVATE helios-engine PNG::PNG)
+else()
+    message(STATUS "libpng not found: gemma4_vision_chat V6 will not be built")
+endif()
+
 # Gemma 4 token-by-token quality calibration (NLL/entropy/top-1)
 add_executable(gemma4_calibrate tools/gemma4_calibrate.cu)
 target_link_libraries(gemma4_calibrate PRIVATE helios-engine)

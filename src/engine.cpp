@@ -149,28 +149,36 @@ void Engine::update_device_cache_pos(int32_t cache_pos, int32_t seq_len) {
 // ============================================================================
 
 void Engine::execute_graph_replay(const CommandBuffer& commands) {
+    // CUDA Graph cannot capture a kernel that dereferences Linux pageable HMM
+    // (`mmap` embeddings). Execute only those tiny row lookups before the
+    // graph; their outputs feed the captured scale/PLE/decoder commands on the
+    // same stream. Zero-copy splits are CPU pointer mutations and belong to
+    // the same non-capturable prefix.
+    auto is_noncapturable = [&](const Command& cmd) {
+        const std::string name(op_name(cmd.op));
+        if (name == "split_qkv" || name == "split_half") return true;
+        if (cmd.op == op::EMBEDDING() && cmd.inputs.size() >= 2) {
+            const TensorInfo* table = tensors_.get(cmd.inputs[1]);
+            return table && table->file_mapped;
+        }
+        return false;
+    };
+    auto run_noncapturable = [&](const Command& cmd) {
+        auto it = kernels_.find(cmd.op);
+        if (it == kernels_.end()) return false;
+        ExecContext ctx{tensors_, scratch_, config_.stream, &tensors_, nullptr, {}};
+        resolve_tensors(ctx, cmd);
+        it->second(ctx, cmd);
+        return true;
+    };
+
     if (graph_valid_ && graph_exec_) {
         // ============================================================
         // REPLAY PATH: execute non-capturable ops, then replay graph
         // ============================================================
         
-        // Zero-copy splits mutate TensorInfo pointers in CPU.
-        // These aren't kernel launches, so they aren't in the graph.
-        // We must re-execute them before each replay so downstream
-        // kernels see correct pointers. However, since the pointers
-        // don't actually change between decode tokens (same fused tensor
-        // address), this is just a safety measure.
         for (const auto& cmd : commands.commands()) {
-            // SPLIT_QKV and SPLIT_HALF with batch_seq=1 do zero-copy (no kernel)
-            auto name = std::string(op_name(cmd.op));
-            if (name == "split_qkv" || name == "split_half") {
-                auto it = kernels_.find(cmd.op);
-                if (it != kernels_.end()) {
-                    ExecContext ctx{tensors_, scratch_, config_.stream, &tensors_, nullptr, {}};
-                    resolve_tensors(ctx, cmd);
-                    it->second(ctx, cmd);
-                }
-            }
+            if (is_noncapturable(cmd)) (void)run_noncapturable(cmd);
         }
         
         // Replay the captured graph
@@ -182,16 +190,11 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
     // CAPTURE PATH: first decode token — build the graph
     // ============================================================
     
-    // Step 1: Execute non-capturable ops (zero-copy splits) BEFORE capture
+    // Step 1: Execute non-capturable ops BEFORE capture.
     for (const auto& cmd : commands.commands()) {
-        auto name = std::string(op_name(cmd.op));
-        if (name == "split_qkv" || name == "split_half") {
-            auto it = kernels_.find(cmd.op);
-            if (it != kernels_.end()) {
-                ExecContext ctx{tensors_, scratch_, config_.stream, &tensors_, nullptr, {}};
-                resolve_tensors(ctx, cmd);
-                it->second(ctx, cmd);
-            }
+        if (is_noncapturable(cmd) && !run_noncapturable(cmd)) {
+            execute(commands);
+            return;
         }
     }
     
@@ -205,15 +208,14 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
     cudaError_t cap_err = cudaStreamBeginCapture(config_.stream, cudaStreamCaptureModeGlobal);
     if (cap_err != cudaSuccess) {
         // Can't capture — fall back to normal execution
+        cudaGetLastError();
         execute(commands);
         return;
     }
     
     bool capture_ok = true;
     for (const auto& cmd : commands.commands()) {
-        auto name = std::string(op_name(cmd.op));
-        // Skip splits — already executed above
-        if (name == "split_qkv" || name == "split_half") continue;
+        if (is_noncapturable(cmd)) continue;
         
         auto it = kernels_.find(cmd.op);
         if (it == kernels_.end()) {
@@ -237,6 +239,9 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
             warned = true;
         }
         if (new_graph) cudaGraphDestroy(new_graph);
+        // cudaStreamEndCapture reports the capture error through the sticky
+        // last-error slot. Clear it before the normal per-token fallback.
+        cudaGetLastError();
         // Fall back to normal execution for this token
         execute(commands);
         return;

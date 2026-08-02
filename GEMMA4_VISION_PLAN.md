@@ -305,7 +305,7 @@ scratch/workspace medidos ocupan 337.641.472 y 318.767.104 bytes. Evidencia en
 **Pruebas:** prompt solo texto idéntico bit a bit; prompt con imagen compara
 logits prefill y varios pasos greedy contra la referencia.
 
-### V6 — Producto mínimo y robustez
+### V6 — Producto mínimo y robustez — CERRADA
 
 - Una imagen desde CLI con error claro de formato/tamaño.
 - Probar imágenes cuadradas, verticales y panorámicas.
@@ -313,6 +313,14 @@ logits prefill y varios pasos greedy contra la referencia.
 - Verificar carga repetida, dos turnos y liberación de memoria.
 
 **Salida:** descripción coherente de imágenes y cero regresiones de texto.
+
+Resultado: `gemma4_vision_chat` conecta PNG→RGB, V3, V4, V5 y decode textual.
+Las pruebas cuadrada, vertical y panorámica producen 256/252/266 soft tokens;
+la captura real lee correctamente cinco nombres de archivo. La torre tarda
+aproximadamente 80–85 ms y su pico es `+626 MiB`; después se descarga antes de
+cargar texto. Un segundo turno reutiliza el KV sin repetir visión. Héctor pasa
+18/18 y el baseline textual conserva exactamente su SHA de logits. Evidencia
+en `tools/GEMMA4_VISION_V6.md`.
 
 ### V7 — Optimización posterior
 
@@ -357,8 +365,12 @@ arriesgar el HNF de producción.
   Texto puro permanece idéntico byte a byte; el control FP16 coincide en los
   cuatro argmax y 10/10 del top-10 contra la referencia externa. Evidencia en
   `tools/GEMMA4_VISION_V5.md`.
-- **Fase activa:** V6 — camino mínimo RGB a chat, robustez y medición de
-  VRAM/latencia con una imagen.
+- **Fase cerrada:** V6 — CLI PNG a conversación con torre descargable, tres
+  relaciones de aspecto, segundo turno y métricas de VRAM/latencia. La captura
+  real identificó y leyó correctamente los archivos mostrados. Evidencia en
+  `tools/GEMMA4_VISION_V6.md`.
+- **Fase activa:** V7 — optimización posterior, manteniendo el HNF visual FP16
+  y las barreras V4/V5 como referencias de calidad.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -368,9 +380,9 @@ arriesgar el HNF de producción.
   `5aec0eba…269105` y Gemma SHA256 `b67df381…b79660`.
 - **Última comprobación:** checkpoint local con 659 tensores visuales y 321,47
   MiB BF16; todos los límites de clipping son finitos. Contrato contrastado con
-  Transformers `b3a36037`. Tras V4, Héctor pasa 17/17; el conversor permanece
-  sin cambios en esta fase.
-- **Siguiente acción exacta:** añadir una entrada CLI mínima que decodifique una
-  imagen a RGB, ejecute V3+V4 una sola vez, registre la salida V5 y continúe el
-  decode textual con el KV existente. Después medir pico de VRAM, torre,
-  prefill y tok/s sin cuantizar visión.
+  Transformers `b3a36037`. Tras V6, Héctor pasa 18/18; V4 conserva sus cinco
+  fronteras y el texto mantiene exactamente el hash congelado de logits.
+- **Siguiente acción exacta:** medir por separado carga de pesos, ejecución de
+  torre y descarga para decidir con datos entre carga bajo demanda y residencia
+  permanente. Solo después se probará cuantización selectiva visual contra el
+  HNF FP16, sin mezclarla con cambios HQS del decoder.
