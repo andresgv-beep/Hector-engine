@@ -58,109 +58,6 @@ static void ensure_dequant_buffer(size_t num_elements, cudaStream_t stream) {
 }
 
 // ============================================================================
-// DEQUANT KERNELS — HQ4K/HQ5K → FP16
-// ============================================================================
-// Each thread dequantizes one group (8 elements) of one row.
-// Grid: (num_groups_per_row, N)  — one thread per group per row
-// Block: 256 threads (8 groups handled by 8 threads in a warp-ish pattern)
-//
-// Output layout: [N, K] in FP16 (row-major, same layout as weight matrix)
-
-__global__ void dequant_hq4k_kernel(
-    const uint8_t* __restrict__ weights,  // [N, K] in HQ4K superblocks
-    half* __restrict__ output,            // [N, K] in FP16
-    int K, int N
-) {
-    using namespace hqs;
-    
-    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
-    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
-    
-    const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
-    const int total_groups = num_superblocks * NUM_GROUPS;
-    
-    if (row >= N || group_global >= total_groups) return;
-    
-    const int sb = group_global / NUM_GROUPS;
-    const int group_in_sb = group_global % NUM_GROUPS;
-    
-    const int sb_base_k = sb * SUPER_BLOCK_SIZE;
-    const int weight_sb_idx = row * num_superblocks + sb;
-    const uint8_t* block_ptr = weights + weight_sb_idx * HQ4K_BLOCK_SIZE;
-    
-    // Vectorized header load
-    const uint32_t* header32 = reinterpret_cast<const uint32_t*>(block_ptr);
-    uint32_t hdr = header32[group_in_sb];
-    float min_f = __half2float(__ushort_as_half(hdr & 0xFFFF));
-    float scale_over_qmax = __half2float(__ushort_as_half(hdr >> 16)) * (1.0f / HQ4K_Q_MAX);
-    
-    // Vectorized payload load  
-    const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(block_ptr + HEADER_SIZE);
-    uint32_t packed = payload32[group_in_sb];
-    
-    const int k_base = sb_base_k + group_in_sb * GROUP_SIZE;
-    half* out_ptr = output + row * K + k_base;
-    
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
-        float w0 = min_f + float((byte_val >> 4) & 0x0F) * scale_over_qmax;
-        float w1 = min_f + float(byte_val & 0x0F) * scale_over_qmax;
-        
-        const int k0 = k_base + i * 2;
-        const int k1 = k0 + 1;
-        if (k0 < K) out_ptr[i * 2] = __float2half(w0);
-        if (k1 < K) out_ptr[i * 2 + 1] = __float2half(w1);
-    }
-}
-
-__global__ void dequant_hq5k_kernel(
-    const uint8_t* __restrict__ weights,
-    half* __restrict__ output,
-    int K, int N
-) {
-    using namespace hqs;
-    
-    const int row = blockIdx.x;  /* filas en x: sin limite 65535 (lm_head: 152k filas) */
-    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
-    
-    const int num_superblocks = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
-    const int total_groups = num_superblocks * NUM_GROUPS;
-    
-    if (row >= N || group_global >= total_groups) return;
-    
-    const int sb = group_global / NUM_GROUPS;
-    const int group_in_sb = group_global % NUM_GROUPS;
-    
-    const int sb_base_k = sb * SUPER_BLOCK_SIZE;
-    const int weight_sb_idx = row * num_superblocks + sb;
-    const uint8_t* block_ptr = weights + weight_sb_idx * HQ5K_BLOCK_SIZE;
-    
-    const uint32_t* header32 = reinterpret_cast<const uint32_t*>(block_ptr);
-    uint32_t hdr = header32[group_in_sb];
-    float min_f = __half2float(__ushort_as_half(hdr & 0xFFFF));
-    float scale_over_qmax = __half2float(__ushort_as_half(hdr >> 16)) * (1.0f / HQ5K_Q_MAX);
-    
-    const uint8_t* payload = block_ptr + HEADER_SIZE + group_in_sb * 5;
-    uint64_t bits = uint64_t(payload[0])
-                  | (uint64_t(payload[1]) << 8)
-                  | (uint64_t(payload[2]) << 16)
-                  | (uint64_t(payload[3]) << 24)
-                  | (uint64_t(payload[4]) << 32);
-    
-    const int k_base = sb_base_k + group_in_sb * GROUP_SIZE;
-    half* out_ptr = output + row * K + k_base;
-    
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        uint8_t q = (bits >> (i * 5)) & 0x1F;
-        float w = min_f + float(q) * scale_over_qmax;
-        const int k_idx = k_base + i;
-        if (k_idx < K) out_ptr[i] = __float2half(w);
-    }
-}
-
-// ============================================================================
 // DEQUANT KERNELS — HQ4.1K/HQ5.1K (header compacto de 40B) → FP16
 // ============================================================================
 
@@ -262,78 +159,6 @@ __global__ void dequant_hq51k_kernel(
 //   and C_output being [M, N] row-major = [N, M] column-major
 //
 
-void launch_matmul_hq4k_cublas(
-    const half* input,
-    const uint8_t* weights,
-    half* output,
-    int M, int K, int N,
-    cudaStream_t stream
-) {
-    ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);  // ALWAYS set (even NULL = default stream)
-    
-    // Ensure buffer fits [N, K]
-    ensure_dequant_buffer((size_t)N * K, stream);
-    
-    // Step 1: Dequant HQ4K → FP16 buffer
-    const int num_superblocks = (K + 255) / 256;
-    const int total_groups = num_superblocks * 32;
-    dim3 grid_dq(N, (total_groups + 255) / 256);
-    dim3 block_dq(256);
-    dequant_hq4k_kernel<<<grid_dq, block_dq, 0, stream>>>(
-        weights, g_dequant_buffer, K, N
-    );
-    
-    // Step 2: cuBLAS HGEMM — FP16 (faster than GemmEx for GEMV on Ada)
-    __half alpha_h = __float2half(1.0f);
-    __half beta_h = __float2half(0.0f);
-    
-    cublasHgemm(g_cublas_handle,
-        CUBLAS_OP_T,    // B^T (dequanted weights)
-        CUBLAS_OP_N,    // A (input)
-        N, M, K,        // dims
-        &alpha_h,
-        g_dequant_buffer, K,
-        input, K,
-        &beta_h,
-        output, N
-    );
-}
-
-void launch_matmul_hq5k_cublas(
-    const half* input,
-    const uint8_t* weights,
-    half* output,
-    int M, int K, int N,
-    cudaStream_t stream
-) {
-    ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);  // ALWAYS set (even NULL = default stream)
-    
-    ensure_dequant_buffer((size_t)N * K, stream);
-    
-    const int num_superblocks = (K + 255) / 256;
-    const int total_groups = num_superblocks * 32;
-    dim3 grid_dq(N, (total_groups + 255) / 256);
-    dim3 block_dq(256);
-    dequant_hq5k_kernel<<<grid_dq, block_dq, 0, stream>>>(
-        weights, g_dequant_buffer, K, N
-    );
-    
-    __half alpha_h = __float2half(1.0f);
-    __half beta_h = __float2half(0.0f);
-    
-    cublasHgemm(g_cublas_handle,
-        CUBLAS_OP_T, CUBLAS_OP_N,
-        N, M, K,
-        &alpha_h,
-        g_dequant_buffer, K,
-        input, K,
-        &beta_h,
-        output, N
-    );
-}
-
 void launch_matmul_hq41k_cublas(
     const half* input,
     const uint8_t* weights,
@@ -421,12 +246,20 @@ void launch_matmul_fp16_cublas(
     cublasSetStream(g_cublas_handle, stream);  // ALWAYS set
 
     // GemmEx con CUBLAS_COMPUTE_32F, no Hgemm: entradas y salida en fp16 pero
-    // ACUMULACION en fp32. Hgemm acumula en fp16 y con K de miles y las
-    // activaciones grandes de Gemma 4 (normas de +236) ese redondeo por paso
-    // era la fuente principal del desvio del motor frente a la implementacion
-    // oficial con el modelo SIN cuantizar. Los kernels propios de este repo
-    // (gemv_fp16_v3, matmul_fp16_kernel, y todos los HQS) ya acumulaban en
-    // fp32; cublas era el unico camino que no.
+    // ACUMULACION en fp32. Con K de miles, acumular en fp16 redondea en cada
+    // paso y se nota.
+    //
+    // Este camino solo lo toma un MATMUL cuyos PESOS sean fp16. Auditado con
+    // tools/quant_bench/audit_matmul_dtypes.cu sobre los tres modelos de
+    // produccion: 0 de 253 (Qwen3-4B), 0 de 253 (Qwen3-8B) y 0 de 277
+    // (Gemma 4 E2B) — todos usan pesos cuantizados y van por los kernels HQS.
+    // O sea que aqui solo entran conversiones hechas con --quant FP16. Se deja
+    // en fp32 porque no cuesta nada en produccion y esas conversiones son
+    // justamente las que se usan como referencia.
+    //
+    // El coste del fp32 esta en el PREFILL cuantizado (dequant + GEMM), que va
+    // por launch_matmul_hq41k/hq51k_cublas y usa Hgemm a proposito: ver el
+    // comentario de ahi y el commit ece66b2.
     float alpha = 1.0f;
     float beta = 0.0f;
 
@@ -443,13 +276,6 @@ void launch_matmul_fp16_cublas(
     );
 }
 
-// ============================================================================
-// DEBUG: Access dequant buffer
-// ============================================================================
-
-half* get_dequant_buffer() {
-    return g_dequant_buffer;
-}
 
 // ============================================================================
 // CLEANUP

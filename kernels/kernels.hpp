@@ -538,7 +538,6 @@ void launch_matmul_fp16_cublas(
 
 // Call on shutdown to free cuBLAS handle and dequant buffer
 void cleanup_cublas();
-half* get_dequant_buffer();  // DEBUG
 
 // ============================================================================
 // SAMPLING KERNELS
