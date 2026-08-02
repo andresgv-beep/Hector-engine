@@ -4,6 +4,45 @@ Aparato para responder con números a **"¿cuánta calidad pierde nuestro format
 y cómo estamos frente a los demás?"**. Montado el 2026-07-31; los resultados de
 esa sesión están al final.
 
+## ⚠ ELEGIR BIEN LA REFERENCIA — leer antes de comparar contra nadie
+
+**Ollama/llama.cpp NO sirve como referencia para Gemma 4.** Medido el
+2026-08-02 contra `transformers` 5.15 en fp32, la implementación oficial:
+
+| candidato | acuerdo con la implementación oficial |
+|---|---:|
+| nuestra referencia numpy (`ref_gemma4.py`) | **100,0%** (267/267) |
+| HELIOS con las lineales en fp16 | 95,9% |
+| HELIOS compacto | 85,4% |
+| **Ollama bf16 — *sin cuantizar*** | **87,6%** |
+| Ollama Q4_K_M | 68,9% |
+
+El bf16 de Ollama **no está cuantizado** y aun así falla 1 de cada 8 posiciones
+contra el modelo oficial. No es pérdida de cuantización: llama.cpp implementa
+Gemma 4 de otra manera. Cualquier medida que lo use de árbitro arrastra esos
+12,4 puntos.
+
+Cómo se descubrió, porque el patrón se va a repetir: había **dos referencias
+que no coincidían entre sí** —Héctor en fp16 daba 98,3% contra nuestra numpy y
+~87% contra el bf16 de Ollama—. Cuando dos referencias discrepan, una está mal;
+no se elige la más cómoda, se trae un tercero. El tercero fue ejecutar
+`transformers` de verdad (`ref_transformers.py`), y dio la razón a la numpy
+**posición por posición, en los dos corpus**.
+
+**Reglas que salen de esto:**
+
+1. Antes de comparar contra un motor ajeno, **verifica su versión sin cuantizar
+   contra la implementación oficial**. Si no está cerca del 99%, no es un
+   árbitro, es otro candidato.
+2. Las comparaciones **HELIOS contra HELIOS** (ablaciones) son inmunes: el
+   árbitro se cancela en los dos lados. Por eso las refutaciones del PLE, el KV
+   compartido, la ventana y los bloques de capas siguen siendo válidas aunque
+   se midieran contra Ollama.
+3. **Gemma exige `<bos>`** y Ollama lo antepone siempre, incluso en `raw`. Si el
+   lado de Héctor no lo lleva, los dos motores ven contextos distintos y la
+   medida no vale nada. `BOS_EXTRA=1` en `ollama_next_token.py` lo controla; el
+   síntoma de no hacerlo es el 100% de posiciones descartadas por desalineación.
+
 ## La métrica
 
 **% de posiciones donde el modelo elige el mismo token que una referencia fp32.**
@@ -70,7 +109,10 @@ A/B. Por encima, el A/B manda.
 | Fichero | Qué hace |
 |---|---|
 | `ref_qwen3.py` | Referencia fp32 de Qwen3 en numpy, leyendo el safetensors de HF. No comparte código con el motor. |
-| `ref_gemma4.py` | Lo mismo para Gemma 4 (PLE, ventana deslizante, KV compartido, RoPE proporcional). Fórmulas portadas de `modeling_gemma4.py` de transformers. |
+| `ref_gemma4.py` | Lo mismo para Gemma 4 (PLE, ventana deslizante, KV compartido, RoPE proporcional). Fórmulas portadas de `modeling_gemma4.py` de transformers. **Verificado exacto** contra la implementación oficial. Con `REF_ALL_POSITIONS=1` vuelca un argmax int32 por posición en vez de los logits de la última. |
+| `ref_transformers.py` | Ejecuta la implementación **oficial** (transformers 5.15, fp32) y vuelca argmax por posición. Es el árbitro cuando dos referencias discrepan. Necesita `torch`; el venv `~/.cache/helios/venvs/gemma4-transformers-b3a36037-py314` ya trae lo demás. |
+| `mcnemar_argmax.py` | Compara dos candidatos contra una referencia común sobre las posiciones comunes, con McNemar exacto (binomial de dos colas). Sin numpy ni scipy. |
+| `dist_compare.py` | Compara lo difícil que es cuantizar dos checkpoints: NRMSE del formato, peaje por cuantizar las escalas a 4 bits y dispersión de escalas por superbloque. Gemma 4 y Qwen3 salen **iguales** — los pesos nunca fueron el problema. |
 | `hqs_sim.py` | Simulador de HQ4.1K/HQ5.1K portado de `src/hqs/{compact,common}.rs`. Permite probar variantes del formato sin escribir Rust ni CUDA. |
 | `argmax_all_positions.cu` | Argmax de Héctor en cada posición, ruta genérica (Qwen y demás). |
 | `argmax_all_positions_gemma4.cu` | Ídem por la ruta explícita de Gemma 4. |
@@ -319,3 +361,46 @@ Lo que queda, por orden de relación beneficio/riesgo:
 
 2. **Repetir el banco en Qwen3-8B** antes de afirmar nada en público. Todo lo
    medido hasta ahora es un modelo de 4B.
+
+## Sesión del 2026-08-02 — Gemma 4 E2B
+
+Arrancó con una alarma: el compacto invertía una decisión que el bf16 daba
+clara. Terminó con la alarma desmontada y el metro arreglado.
+
+**Contra la implementación oficial** (267 posiciones, dos corpus): HELIOS
+compacto **85,4%**, Ollama Q4_K_M **68,9%**. Le sacamos 16,5 puntos. HELIOS
+compacto **empata** con el bf16 sin cuantizar de Ollama (87,6%; McNemar p=0,50)
+— empata, no gana; se dijo lo segundo por mirar un solo corpus.
+
+**Nuestra deuda real:** con las lineales en fp16 estamos en 95,9%, no en 100%.
+Ese 4,1% —redondeo fp16 más el PLE cuantizado— es la única cifra de la sesión
+que mide margen de mejora auténtico de Héctor.
+
+**Ganancia práctica:** `token_embedding` de fp16 a HQ5.1K son **−469 MB**
+(4055 → 3586) con la calidad intacta: técnico idéntico posición a posición,
+narrativa 100 → 101 con un solo par discordante. Lo disparó un volcado GGUF —
+llama.cpp pone las dos tablas de embeddings en Q6_K y nosotros gastábamos fp16.
+Para hacerlo por defecto, una línea en `helios_convert_v9.1/src/mapping/gemma4.rs`
+(`QuantHint::FP16` → `QuantHint::HQ5K` en `token_embedding.weight`).
+
+**Cinco hipótesis muertas**, todas medidas con `HELIOS_FORCE_QUANT` del
+conversor (fuerza formato por patrón de nombre sin tocar el mapper):
+
+| hipótesis | prueba | veredicto |
+|---|---|---|
+| la tabla PLE es el cuello de botella | PLE a fp16 | +1,1 puntos por 2,9 GB — **no** |
+| los pesos de Gemma son más duros | NRMSE de los dos checkpoints | idénticos — **no** |
+| las escalas a 4 bits penalizan más | peaje de escala por modelo | 20% vs 19% — **no** |
+| la ventana deslizante de 512 | partir por posición <512 / ≥512 | el hueco ya está entero por debajo — **no** |
+| el KV compartido de las capas 13/14 | restaurarlas a fp16, con controles en 12/15 y 11/16 | cero cambio, y los controles igual — **no** |
+
+Y los tres tercios del modelo (capas 0-11, 12-23, 24-34) dan +2,2, +3,0 y +3,4:
+**el error está repartido por igual**, no hay región culpable. Como el problema
+es difuso, cualquier reparto selectivo de bits está muerto; la única palanca es
+bajar la magnitud del error en todas partes — el ajuste por mínimos cuadrados
+ponderado de `make_qkx2_quants`, ya simulado (+2,3 puntos, p=0,006) y todavía
+sin implementar.
+
+**Los controles no son opcionales.** La prueba del KV compartido habría
+"funcionado" sin ellos: restaurar cualquier par de capas mueve algo. Fueron los
+controles en capas vecinas los que enseñaron que ese algo era ruido.
