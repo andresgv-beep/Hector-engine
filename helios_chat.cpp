@@ -273,20 +273,95 @@ static void append_candidate(const std::string& fact) {
 }
 
 // ============================================================================
+// REGISTRO SOCIAL — primer eje real del CK (CK_V4_NORTE, fallo 4)
+// ============================================================================
+// Estado PEGAJOSO entre turnos: hasta ahora las tres funciones que deciden un
+// turno recibían solo el mensaje, así que para el modelo cada mensaje era el
+// turno 1 y el tono no se podía mover. El registro persiste y gobierna a la
+// vez el suelo de temperatura (y en el futuro presupuesto/ejemplos), en vez
+// de tres heurísticas independientes tirando cada una por su lado.
+//
+// Histéresis de DOS señales seguidas: una broma suelta en mitad de un debug
+// no descarrila la sesión, y un dato en mitad de la charla tampoco. Se puede
+// forzar con /colega, /trabajo y /normal — si el usuario lo pide, eso ES la
+// spec, no una pista a inferir.
+
+enum class Registro { TRABAJO, NEUTRAL, COLEGA };
+
+static const char* registro_name(Registro r) {
+    switch (r) {
+        case Registro::TRABAJO: return "trabajo";
+        case Registro::COLEGA:  return "colega";
+        default:                return "neutral";
+    }
+}
+
+// Señal de charla: risas, coloquialismos, emojis. Deliberadamente NO incluye
+// saludos: "hola" es social pero no significa que la sesión sea de cachondeo.
+static bool senal_colega(const std::string& msg) {
+    if (msg.size() > 200) return false;   // un pegote nunca es charla
+    std::string lower = msg;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (const char* kw : {"jaja", "jeje", "jiji", "xd", "socio", "tio ",
+                           "tío ", "bro ", "colega", "crack", "brutal",
+                           "mola", "guay", "flipa", "hostia", "ostia",
+                           "cojones", "de puta madre", "madre mia",
+                           "madre mía", "vaya tela", "me parto"}) {
+        if (lower.find(kw) != std::string::npos) return true;
+    }
+    // Emoji (cualquier U+1FXXX: F0 9F en UTF-8)
+    for (size_t i = 0; i + 1 < msg.size(); i++) {
+        if ((unsigned char)msg[i] == 0xF0 && (unsigned char)msg[i + 1] == 0x9F)
+            return true;
+    }
+    return false;
+}
+
+// Señal de faena: documentos, código, densidad de vocabulario técnico.
+static bool senal_trabajo(const std::string& msg) {
+    if (msg.find("```") != std::string::npos) return true;
+    if (msg.rfind("Te paso un texto", 0) == 0) return true;   // /pegar y ficheros
+    if (msg.rfind("Archivo: ", 0) == 0) return true;
+    std::string lower = msg.substr(0, 400);
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    int hits = 0;
+    for (const char* kw : {"kernel", "código", "codigo", "compila", "bug",
+                           "error", "implementa", "commit", "benchmark",
+                           "tensor", "vram", "cuantiza", "prefill", "latencia",
+                           "función", "funcion", "script", "endpoint"}) {
+        if (lower.find(kw) != std::string::npos && ++hits >= 2) return true;
+    }
+    return false;
+}
+
+// ============================================================================
 // TEMPERATURA ADAPTATIVA — el CK modula el muestreo según lo que se pide
 // ============================================================================
 // Charla → más alta (variedad, naturalidad). Datos/código/memoria → más baja
 // (precisión, menos deriva). La base la fija el usuario al arrancar.
 
-static float temperature_for(const std::string& msg, bool trivial, float base) {
-    std::string lower = msg;
+static float temperature_for(const std::string& msg, bool trivial, float base,
+                             Registro reg) {
+    // Solo el ARRANQUE del mensaje: el tono lo pone lo que el usuario teclea,
+    // no el documento que adjunta. Un spec pegado casi siempre contiene
+    // "error" o "dato" en alguna tabla, y bajaba TODOS los turnos con
+    // documento a 0.35 aplanando la voz (visto con HQ6_LAB.md, que disparaba
+    // por una columna llamada "Error máximo").
+    std::string lower = msg.substr(0, 160);
     std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
 
-    // Precisión: hechos, memoria, código, números
+    // Precisión: hechos, memoria, código, números. El SUELO depende del
+    // registro: la precisión vive en el contexto, no en congelar el sampler
+    // — a 0.35 la voz muere, porque la personalidad vive en la cola de la
+    // distribución. Justo cuando pregunta "¿te acuerdas de...?" (el momento
+    // más personal que hay) era cuando más plano se ponía.
+    float suelo = (reg == Registro::TRABAJO) ? 0.45f
+                : (reg == Registro::COLEGA)  ? 0.60f
+                                             : 0.50f;
     for (const char* kw : {"codigo", "código", "code", "error", "cuanto", "cuánto",
                            "calcula", "recuerdas", "recuerda", "cuál era", "cual era",
                            "dato", "exacto", "traduce", "define", "comando"}) {
-        if (lower.find(kw) != std::string::npos) return std::min(base, 0.35f);
+        if (lower.find(kw) != std::string::npos) return std::min(base, suelo);
     }
     // Charla informal: un poco por encima de la base, tope 0.95
     if (trivial) return std::min(0.95f, base + 0.2f);
@@ -569,6 +644,10 @@ int main(int argc, char** argv) {
         uint64_t total_tokens = 0;
         int user_turns = 0;
         bool fast_mode = false;
+        // Registro social pegajoso (eje 1 del CK) + continuidad de artefacto
+        Registro registro = Registro::NEUTRAL;
+        int senales_col = 0, senales_tra = 0;    // histéresis: 2 seguidas
+        int artefacto_turnos = 0;   // documento/código reciente en contexto
         std::string last_user_msg, last_reply;  // para el puente de compactación
         // Últimos intercambios literales: con UNO solo, tras compactar el
         // modelo veía siempre el mismo contexto y repetía la misma respuesta
@@ -688,11 +767,24 @@ int main(int argc, char** argv) {
             // las recita y confunde los papeles (dice ser el dueño). La
             // disciplina la ponen los mecanismos deterministas (presupuestos,
             // rienda de thinking, detector de bucles), no el sermón.
+            // La VOZ se demuestra con ejemplos, no se describe con adjetivos
+            // (CK_V4_NORTE, fallo 5): en un modelo pequeño la calidez viene
+            // empaquetada con el registro de asistente efusivo (listas
+            // numeradas, titulares). "Frases cortas" + "cercano" en la misma
+            // frase hacía que obedeciera solo lo concreto y saliera un
+            // telegrama. La combinación cálido+breve+sin listas no la tiene
+            // entrenada: se le enseña con dos intercambios y la continúa.
             std::string sys_text =
                 "Te llamas Helios. Eres el asistente personal de " + owner + " y "
                 "hablas con él. Él construyó el motor Héctor sobre el que corres.\n"
-                "Hablas como un colega de confianza: cercano, directo, frases "
-                "cortas, sin listas ni titulares. Si no sabes algo, lo dices.";
+                "Hablas como un colega de confianza, con calidez y algo de "
+                "guasa. Nada de listas ni titulares al charlar; un emoji "
+                "suelto está bien. Si no sabes algo, lo dices.\n"
+                "Así suenas tú:\n"
+                "«buenas, ¿qué tal va eso?» → «¡Buenas! 😄 Aquí andamos, dale "
+                "que te pego con el motor. ¿Tú qué traes?»\n"
+                "«al final funcionó» → «¡Toma ya! Sabía que caería. ¿Cuánto "
+                "ganamos al final?»";
 
             // MEMORIA: los recuerdos de sesiones anteriores entran al prefijo.
             // El framing importa: sin la instrucción explícita de confianza,
@@ -1028,7 +1120,7 @@ int main(int argc, char** argv) {
             return notes;
         };
 
-        std::cout << "\nComandos: /fast · /memoria · /recuerda <nota> · /lee <archivo> · /pegar · /salir" << std::endl;
+        std::cout << "\nComandos: /fast · /colega · /trabajo · /normal · /memoria · /recuerda <nota> · /lee <archivo> · /pegar · /salir" << std::endl;
         std::cout << "          (\"guarda en memoria: X\" también escribe a disco de verdad)" << std::endl;
         std::cout << "Contexto: " << kv_config.max_seq_len << " posiciones\n" << std::endl;
 
@@ -1071,6 +1163,16 @@ int main(int argc, char** argv) {
             if (line == "/fast") {
                 fast_mode = !fast_mode;
                 std::cout << "(velocidad " << (fast_mode ? "PLENA" : "tranquila") << ")\n";
+                continue;
+            }
+            // Registro a mano: "relájate" ES la spec, no una pista a inferir
+            if (line == "/colega" || line == "/trabajo" || line == "/normal") {
+                registro = line == "/colega"  ? Registro::COLEGA
+                         : line == "/trabajo" ? Registro::TRABAJO
+                                              : Registro::NEUTRAL;
+                senales_col = senales_tra = 0;
+                std::cout << "(registro " << registro_name(registro)
+                          << " fijado a mano)\n";
                 continue;
             }
 
@@ -1290,16 +1392,34 @@ int main(int argc, char** argv) {
                           << "/" << kv_config.max_seq_len << ")\033[0m" << std::endl;
             }
 
+            // --- REGISTRO: histéresis de dos señales seguidas ---
+            if (senal_colega(line)) {
+                senales_tra = 0;
+                if (++senales_col >= 2) registro = Registro::COLEGA;
+            } else if (senal_trabajo(line)) {
+                senales_col = 0;
+                if (++senales_tra >= 2) registro = Registro::TRABAJO;
+            }
+
+            // CONTINUIDAD de artefacto (CK_V4_NORTE, fallo 1): un documento o
+            // código pegado sigue "activo" unos turnos. "velocidad" después de
+            // pegar 192 líneas de HQS es continuación técnica, no un saludo.
+            const bool trae_artefacto =
+                line.rfind("Te paso un texto", 0) == 0 ||
+                line.find("```") != std::string::npos || line.size() > 1500;
+
             // --- Thinking adaptativo (el usuario puede forzar con /think, /no_think) ---
             bool user_forced = line.find("/think") != std::string::npos ||
                                line.find("/no_think") != std::string::npos;
             std::string user_msg = line;
             const bool turn_has_attachment = !pending_rgb.empty();
-            bool trivial = false;
-            if (!user_forced && is_trivial_message(line)) {
-                if (!is_gemma4) user_msg += " /no_think";
-                trivial = true;
+            bool trivial = !user_forced && is_trivial_message(line);
+            if (trivial && artefacto_turnos > 0 && !senal_colega(line)) {
+                trivial = false;   // hereda la faena del turno anterior
             }
+            if (trivial && !is_gemma4) user_msg += " /no_think";
+            artefacto_turnos = trae_artefacto ? 3
+                             : (artefacto_turnos > 0 ? artefacto_turnos - 1 : 0);
 
             user_turns++;
             last_user_msg = turn_has_attachment
@@ -1309,7 +1429,7 @@ int main(int argc, char** argv) {
             // El CK ajusta la temperatura al tipo de petición (charla ≠ dato)
             float turn_temp = base_temp;
             if (base_temp >= 0.01f) {
-                turn_temp = temperature_for(line, trivial, base_temp);
+                turn_temp = temperature_for(line, trivial, base_temp, registro);
                 sample_config.temperature = turn_temp;
             }
 
@@ -1421,10 +1541,13 @@ int main(int argc, char** argv) {
             const int HARD_CAP = 2500;                          // techo absoluto
             // RIENDA DEL PENSAMIENTO: si el modelo se pierde en su cabeza,
             // se le inyecta </think> y que responda con lo que lleve pensado.
-            // Trivial debería ni pensar (20 = margen si ignora /no_think).
+            // Trivial debería ni pensar (48 = margen si ignora /no_think; con
+            // 20 se agotaba a los 14-21 tokens y salían turnos MUDOS: la
+            // rienda cerraba el think y el modelo emitía EOS sin hablar —
+            // medido 2 de 30 turnos en el guion fijo).
             // Rienda proporcional: un mensaje corto no merece 500 tokens de
             // cavilación ("ya empiezas?" gastaba 500 pensando para nada)
-            const int think_cap = trivial ? 20
+            const int think_cap = trivial ? 48
                                 : (line.size() < 45 ? 150
                                 : (budget >= 1500 ? 1000 : 400));
 
@@ -1584,6 +1707,9 @@ int main(int argc, char** argv) {
                       << (think_count ? (" (" + std::to_string(think_count) + " pensando)") : "")
                       << (trivial ? " · trivial→sin think" : "")
                       << " · temp " << std::fixed << std::setprecision(2) << turn_temp
+                      << (registro != Registro::NEUTRAL
+                              ? std::string(" · registro ") + registro_name(registro)
+                              : std::string())
                       << (budget_cut ? (" · presupuesto " + std::to_string(budget) + " agotado") : "")
                       << (think_cut ? " · pensamiento cortado" : "")
                       << " · prefill " << (int)prefill_ms << "ms"
