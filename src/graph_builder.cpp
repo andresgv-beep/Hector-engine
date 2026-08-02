@@ -289,7 +289,7 @@ ArchDescriptor GraphBuilder::detect_architecture(
     // Config "dtype" describes the ORIGINAL model precision (before quantization).
     // Actual compute dtype comes from the real tensors loaded in GPU.
     // Detected dtype (from norm weights) takes priority because:
-    //   - Quantized weights (HQ4K/HQ5K) dequantize to FP16
+    //   - Quantized weights (HQ4.1K/HQ5.1K) dequantize to FP16
     //   - Norm weights are stored in compute precision (FP16)
     //   - Config saying "bf16" just means the source model was BF16
     // Only use config dtype if we couldn't detect from tensors.
@@ -1580,7 +1580,7 @@ void GraphBuilder::fuse_weights(Engine& engine, ArchDescriptor& arch, const Mode
         
         if (all_same_dtype && qkv_dtype != 0) {
             // CRITICAL: Cannot fuse quantized tensors by simple byte concatenation!
-            // HQ4K/HQ5K data is organized in superblocks per-row. Concatenating
+            // HQ4.1K/HQ5.1K data is organized in superblocks per-row. Concatenating
             // Q_blob + K_blob + V_blob does NOT produce a valid [Q+K+V, K] quantized tensor.
             // The dequant kernel would index into wrong rows.
             // Only fuse FP16/FP32 tensors where rows are simple contiguous memory.

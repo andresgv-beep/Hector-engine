@@ -3,7 +3,7 @@
 // HNF v9 LOADER - Carga modelos HELIOS Neural Format
 // ============================================================================
 // Lee HNF v9, carga tensores a GPU, registra en TensorRegistry.
-// Los pesos HQ4K/HQ5K se cargan SIN dequantizar (fused en kernel).
+// Los pesos HQ4.1K/HQ5.1K se cargan SIN dequantizar (fused en kernel).
 //
 
 #pragma once

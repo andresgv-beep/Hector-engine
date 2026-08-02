@@ -62,7 +62,7 @@ __global__ void gemv_hq31k_kernel(
         uint8_t q_s = (lane & 1) ? (sp & 0x0F) : (sp >> 4);
         uint8_t q_m = (lane & 1) ? (mp & 0x0F) : (mp >> 4);
         float scoeff = d_scale * float(q_s) * (1.0f / 15.0f) *
-                       (1.0f / HQ3K_Q_MAX);
+                       (1.0f / Q_MAX_3BIT);
         float min_f = fmaf(d_min, float(q_m) * (1.0f / 15.0f), min_base);
 
         // Un grupo natural: 8 índices de 3 bits = 24 bits, LSB-first.

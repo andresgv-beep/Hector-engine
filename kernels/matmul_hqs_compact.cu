@@ -4,7 +4,7 @@
 // ============================================================================
 //
 // Separated from matmul_hqs.cu to prevent nvcc register pressure spillover
-// that degrades HQ4K/HQ5K kernel performance.
+// that degrades HQ4.1K/HQ5.1K kernel performance.
 //
 
 #include "hqs_common.cuh"
@@ -97,7 +97,7 @@ __global__ void gemv_hq41k_kernel(
         uint8_t m_packed = sb8[24 + (lane_id >> 1)];
         uint8_t q_m = (lane_id & 1) ? (m_packed & 0x0F) : (m_packed >> 4);
 
-        float scoeff = d_scale * float(q_s) * (1.0f / 15.0f) * (1.0f / HQ4K_Q_MAX);
+        float scoeff = d_scale * float(q_s) * (1.0f / 15.0f) * (1.0f / Q_MAX_4BIT);
         float min_f  = fmaf(d_min, float(q_m) * (1.0f / 15.0f), min_base);
 
         // Payload: word 10 + lane (bytes 40..168)
@@ -205,7 +205,7 @@ __global__ void gemv_hq51k_kernel(
         uint8_t m_packed = sb8[24 + (lane_id >> 1)];
         uint8_t q_m = (lane_id & 1) ? (m_packed & 0x0F) : (m_packed >> 4);
 
-        float scoeff = d_scale * float(q_s) * (1.0f / 15.0f) * (1.0f / HQ5K_Q_MAX);
+        float scoeff = d_scale * float(q_s) * (1.0f / 15.0f) * (1.0f / Q_MAX_5BIT);
         float min_f  = fmaf(d_min, float(q_m) * (1.0f / 15.0f), min_base);
 
         // 5 bytes del lane: payload empieza en byte 40 → offset 40 + 5*lane

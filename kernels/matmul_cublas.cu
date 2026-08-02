@@ -1,10 +1,10 @@
 // kernels/matmul_cublas.cu
 // ============================================================================
-// MATMUL via cuBLAS — Dequant HQ4K/HQ5K → FP16 buffer → cuBLAS HGEMM
+// MATMUL via cuBLAS — Dequant HQ4.1K/HQ5.1K → FP16 buffer → cuBLAS HGEMM
 // ============================================================================
 //
 // Strategy:
-//   1. Dequant kernel: HQ4K/HQ5K → FP16 (bandwidth-bound, fast)
+//   1. Dequant kernel: HQ4.1K/HQ5.1K → FP16 (bandwidth-bound, fast)
 //   2. cuBLAS cublasHgemm: FP16 × FP16 with tensor cores
 //
 // The dequant is cheap (~0.25ms for 50MB) because it's pure memory I/O.
@@ -83,7 +83,7 @@ __global__ void dequant_hq41k_kernel(
         ((size_t)row * num_superblocks + sb) * HQ41K_BLOCK_SIZE;
 
     float min_f, scoeff;
-    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / HQ4K_Q_MAX);
+    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / Q_MAX_4BIT);
 
     const uint32_t* payload32 = reinterpret_cast<const uint32_t*>(
         block_ptr + COMPACT_HEADER_SIZE);
@@ -125,7 +125,7 @@ __global__ void dequant_hq51k_kernel(
         ((size_t)row * num_superblocks + sb) * HQ51K_BLOCK_SIZE;
 
     float min_f, scoeff;
-    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / HQ5K_Q_MAX);
+    decode_compact_group(block_ptr, group_in_sb, min_f, scoeff, 1.0f / Q_MAX_5BIT);
 
     const uint8_t* payload = block_ptr + COMPACT_HEADER_SIZE + group_in_sb * 5;
     uint64_t bits = uint64_t(payload[0])

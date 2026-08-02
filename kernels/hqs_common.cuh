@@ -23,17 +23,14 @@ constexpr int SUPER_BLOCK_SIZE = 256;
 constexpr int GROUP_SIZE = 8;
 constexpr int NUM_GROUPS = 32;
 
-constexpr int HEADER_SIZE = 128;       // HQ4K/HQ5K: 32 groups × 4 bytes
 
-constexpr int HQ4K_PAYLOAD = 128;
-constexpr int HQ4K_BLOCK_SIZE = 256;
+constexpr int PAYLOAD_4BIT = 128;
 
-constexpr int HQ5K_PAYLOAD = 160;
-constexpr int HQ5K_BLOCK_SIZE = 288;
+constexpr int PAYLOAD_5BIT = 160;
 
-constexpr float HQ4K_Q_MAX = 15.0f;
-constexpr float HQ5K_Q_MAX = 31.0f;
-constexpr float HQ3K_Q_MAX = 7.0f;
+constexpr float Q_MAX_4BIT = 15.0f;
+constexpr float Q_MAX_5BIT = 31.0f;
+constexpr float Q_MAX_3BIT = 7.0f;
 
 constexpr float EPS = 1e-7f;
 
@@ -52,38 +49,8 @@ constexpr int COMPACT_HEADER_SIZE = 40;
 
 constexpr int HQ31K_PAYLOAD = 96;
 constexpr int HQ31K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ31K_PAYLOAD;  // 136
-constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ4K_PAYLOAD;  // 168
-constexpr int HQ51K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ5K_PAYLOAD;  // 200
-
-// ============================================================================
-// GROUP PARAMS (in registers)
-// ============================================================================
-
-struct __align__(4) GroupParams {
-    half min;
-    half scale;
-};
-
-// ============================================================================
-// DEVICE FUNCTIONS - HQ4K/HQ5K Header decoding (128-byte)
-// ============================================================================
-
-__device__ __forceinline__ 
-GroupParams decode_group(const uint8_t* header, int group_idx) {
-    const uint8_t* ptr = header + group_idx * 4;
-    GroupParams gp;
-    gp.min = __ushort_as_half(ptr[0] | (ptr[1] << 8));
-    gp.scale = __ushort_as_half(ptr[2] | (ptr[3] << 8));
-    return gp;
-}
-
-__device__ __forceinline__
-void decode_all_groups(const uint8_t* header, GroupParams* params) {
-    #pragma unroll
-    for (int g = 0; g < NUM_GROUPS; g++) {
-        params[g] = decode_group(header, g);
-    }
-}
+constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_4BIT;  // 168
+constexpr int HQ51K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_5BIT;  // 200
 
 // ============================================================================
 // DEVICE FUNCTIONS - Compact Header decoding (40-byte)
@@ -115,75 +82,6 @@ void decode_compact_group(
     float scale = d_scale * (float(q_s) * (1.0f / 15.0f));
     min_f = min_base + d_min * (float(q_m) * (1.0f / 15.0f));
     scoeff = scale * q_max_inv;
-}
-
-// ============================================================================
-// DEVICE FUNCTIONS - HQ4K dequantization
-// ============================================================================
-
-__device__ __forceinline__
-void unpack_hq4k_byte(uint8_t packed, uint8_t& q0, uint8_t& q1) {
-    q0 = (packed >> 4) & 0x0F;
-    q1 = packed & 0x0F;
-}
-
-__device__ __forceinline__
-float dequant_hq4k_element(uint8_t q, GroupParams gp) {
-    float min_f = __half2float(gp.min);
-    float scale_f = __half2float(gp.scale);
-    return min_f + (float(q) / HQ4K_Q_MAX) * scale_f;
-}
-
-__device__ __forceinline__
-void dequant_hq4k_group(
-    const uint8_t* payload, int group_idx, GroupParams gp, float* out
-) {
-    int byte_offset = group_idx * 4;
-    #pragma unroll
-    for (int i = 0; i < 4; i++) {
-        uint8_t packed = payload[byte_offset + i];
-        uint8_t q0, q1;
-        unpack_hq4k_byte(packed, q0, q1);
-        out[i * 2] = dequant_hq4k_element(q0, gp);
-        out[i * 2 + 1] = dequant_hq4k_element(q1, gp);
-    }
-}
-
-// ============================================================================
-// DEVICE FUNCTIONS - HQ5K dequantization
-// ============================================================================
-
-__device__ __forceinline__
-void unpack_hq5k_chunk(const uint8_t* bytes, uint8_t* q) {
-    uint64_t bits = uint64_t(bytes[0]) 
-                  | (uint64_t(bytes[1]) << 8)
-                  | (uint64_t(bytes[2]) << 16)
-                  | (uint64_t(bytes[3]) << 24)
-                  | (uint64_t(bytes[4]) << 32);
-    #pragma unroll
-    for (int k = 0; k < 8; k++) {
-        q[k] = (bits >> (k * 5)) & 0x1F;
-    }
-}
-
-__device__ __forceinline__
-float dequant_hq5k_element(uint8_t q, GroupParams gp) {
-    float min_f = __half2float(gp.min);
-    float scale_f = __half2float(gp.scale);
-    return min_f + (float(q) / HQ5K_Q_MAX) * scale_f;
-}
-
-__device__ __forceinline__
-void dequant_hq5k_group(
-    const uint8_t* payload, int group_idx, GroupParams gp, float* out
-) {
-    int byte_offset = group_idx * 5;
-    uint8_t q[8];
-    unpack_hq5k_chunk(payload + byte_offset, q);
-    #pragma unroll
-    for (int i = 0; i < 8; i++) {
-        out[i] = dequant_hq5k_element(q[i], gp);
-    }
 }
 
 // ============================================================================
