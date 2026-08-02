@@ -32,7 +32,8 @@ bool shape_is(const TensorInfo* tensor,
 
 Gemma4VisionRunner::Gemma4VisionRunner(Engine& engine,
                                        HnfLoader& loader)
-    : engine_(engine), loader_(loader) {
+    : engine_(engine), loader_(loader),
+      weight_pipeline_(loader, engine, BLOCK_VISION, engine.config().stream) {
     if (!loader_.has_gemma4_vision_config()) return;
     const Gemma4VisionConfig& vision = loader_.gemma4_vision_config();
     const ModelConfig& base = loader_.config_for_block(BLOCK_VISION);
@@ -55,7 +56,6 @@ Gemma4VisionRunner::Gemma4VisionRunner(Engine& engine,
 
 Gemma4VisionRunner::~Gemma4VisionRunner() {
     release();
-    (void)loader_.release_mapped_staging(BLOCK_VISION, engine_);
 }
 
 bool Gemma4VisionRunner::validate_contract(std::string* error) const {
@@ -205,17 +205,9 @@ bool Gemma4VisionRunner::run_patch_embedder(
     if (!reserve(error)) return false;
 
     const cudaStream_t stream = engine_.config().stream;
-    if (!loader_.stage_mapped_prefix(
-            BLOCK_VISION, engine_, "vision.patch_embed.", stream)) {
-        return fail(error, loader_.last_error());
-    }
-    struct RestoreMappedPatch {
-        HnfLoader& loader;
-        Engine& engine;
-        ~RestoreMappedPatch() {
-            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
-        }
-    } restore_mapped{loader_, engine_};
+    MappedWeightPhase weight_phase(
+        weight_pipeline_, "vision.patch_embed.", error);
+    if (!weight_phase) return false;
     const size_t patch_elements = size_t(max_patches_) * patch_width_;
     if (!cuda_ok(cudaMemcpyAsync(d_pixel_values_, input.pixel_values.data(),
                                  patch_elements * sizeof(float),
@@ -245,6 +237,11 @@ bool Gemma4VisionRunner::run_patch_embedder(
     if (!cuda_ok(cudaGetLastError(), "launch Gemma 4 patch embedder", error)) {
         return false;
     }
+    if (num_layers_ > 0 &&
+        !weight_phase.prefetch("vision.layer0.", error)) {
+        return false;
+    }
+    if (!weight_phase.close(error)) return false;
     patch_count_ = max_patches_;
     completed_layers_ = 0;
     real_patches_ = valid_positions;
@@ -362,16 +359,8 @@ bool Gemma4VisionRunner::run_encoder_layer(
     const cudaStream_t stream = engine_.config().stream;
     const size_t hidden_elements = size_t(max_patches_) * hidden_size_;
 
-    if (!loader_.stage_mapped_prefix(BLOCK_VISION, engine_, prefix, stream)) {
-        return fail(error, loader_.last_error());
-    }
-    struct RestoreMappedLayer {
-        HnfLoader& loader;
-        Engine& engine;
-        ~RestoreMappedLayer() {
-            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
-        }
-    } restore_mapped{loader_, engine_};
+    MappedWeightPhase weight_phase(weight_pipeline_, prefix, error);
+    if (!weight_phase) return false;
 
     const half* attn_in = fp16_tensor(prefix + "ln_attn_in.weight", error);
     const half* q_norm = fp16_tensor(prefix + "attn.q_norm.weight", error);
@@ -451,6 +440,13 @@ bool Gemma4VisionRunner::run_encoder_layer(
     if (!cuda_ok(cudaGetLastError(), "launch Gemma 4 visual layer", error)) {
         return false;
     }
+    const std::string next_prefix = layer_index + 1 < num_layers_
+        ? "vision.layer" + std::to_string(layer_index + 1) + '.'
+        : "vision.projector.";
+    if (!weight_phase.prefetch(next_prefix, error) ||
+        !weight_phase.close(error)) {
+        return false;
+    }
     ++completed_layers_;
     return true;
 }
@@ -498,17 +494,9 @@ bool Gemma4VisionRunner::run_projector(std::string* error) {
         return fail(error, "Gemma 4 visual projector already ran");
     }
     const cudaStream_t stream = engine_.config().stream;
-    if (!loader_.stage_mapped_prefix(
-            BLOCK_VISION, engine_, "vision.projector.", stream)) {
-        return fail(error, loader_.last_error());
-    }
-    struct RestoreMappedProjector {
-        HnfLoader& loader;
-        Engine& engine;
-        ~RestoreMappedProjector() {
-            (void)loader.unstage_mapped_prefix(BLOCK_VISION, engine);
-        }
-    } restore_mapped{loader_, engine_};
+    MappedWeightPhase weight_phase(
+        weight_pipeline_, "vision.projector.", error);
+    if (!weight_phase) return false;
     const half* weight = fp16_tensor("vision.projector.weight", error);
     const TensorInfo* info = engine_.tensors().get("vision.projector.weight");
     if (!weight || !shape_is(info, {projection_size_, hidden_size_})) {
@@ -540,6 +528,7 @@ bool Gemma4VisionRunner::run_projector(std::string* error) {
     if (!cuda_ok(cudaGetLastError(), "launch Gemma 4 visual projector", error)) {
         return false;
     }
+    if (!weight_phase.close(error)) return false;
     projector_complete_ = true;
     return true;
 }

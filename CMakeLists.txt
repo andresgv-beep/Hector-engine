@@ -62,6 +62,7 @@ set(ENGINE_SOURCES
     src/command.cpp
     src/engine.cpp
     src/hnf_loader.cpp
+    src/mapped_weight_pipeline.cpp
     src/gemma4_ple.cpp
     src/gemma4_multimodal.cpp
     src/gemma4_validator.cpp

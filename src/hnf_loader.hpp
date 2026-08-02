@@ -19,7 +19,7 @@
 
 namespace helios {
 
-class Gemma4VisionRunner;
+class MappedWeightPipeline;
 
 // ============================================================================
 // HNF CONSTANTS
@@ -532,7 +532,9 @@ struct BlockState {
     size_t tensor_count = 0;
     size_t scratch_budget_bytes = 0;
     std::vector<std::string> tensor_names;  // For unloading
-    void* staging_ptr = nullptr;            // Transient device window for HMM
+    // Single-window backend retained as the zero-risk fallback of the generic
+    // mapped-weight pipeline. Double buffering owns its slots in the pipeline.
+    void* staging_ptr = nullptr;
     size_t staging_capacity = 0;
     std::vector<std::pair<std::string, void*>> staged_tensor_ptrs;
 };
@@ -665,7 +667,7 @@ public:
     void print_loaded_blocks() const;
     
 private:
-    friend class Gemma4VisionRunner;
+    friend class MappedWeightPipeline;
 
     // File handle (kept open for block loading)
     std::string file_path_;
@@ -728,8 +730,8 @@ private:
     bool load_tensor(std::ifstream& f, const TensorEntry& entry, 
                      TensorRegistry& registry);
 
-    // Internal V7 window: mapped vision stays in RAM and only the weights for
-    // the current patch/layer/projector phase occupy transient VRAM.
+    // Single-window backend used by MappedWeightPipeline when double buffering
+    // is disabled. It is generic over block and canonical tensor prefix.
     bool stage_mapped_prefix(BlockID block_id, Engine& engine,
                              const std::string& prefix,
                              cudaStream_t stream = nullptr);

@@ -339,8 +339,10 @@ decode dentro del 1 %. Evidencia en `tools/GEMMA4_VISION_V7.md`.
   implementada y pendiente de commit en `hexos-core`;
 - perfil de doble buffer cerrado: 28,95 ms calientes son copias, cada capa
   ofrece 4,25 ms de cómputo para ocultar 1,62 ms de transporte y la GPU solapa
-  de verdad memoria pageable. Se autoriza un prototipo opt-in con objetivo
-  mínimo de 20 ms; evidencia en `tools/GEMMA4_VISION_V8_PROFILE.md`;
+  de verdad memoria pageable. El pipeline genérico recupera 24,49 ms y cuesta
+  20 MiB adicionales, superando el objetivo mínimo de 20 ms; evidencia en
+  `tools/GEMMA4_VISION_V8_PROFILE.md` y contrato reutilizable en
+  `tools/MAPPED_WEIGHT_PIPELINE.md`;
 - cuantización visual solo contra el HNF FP16 y con A/B conversacional;
 - varias imágenes, vídeo y audio como contratos separados.
 
@@ -386,8 +388,9 @@ arriesgar el HNF de producción.
   HNF/RAM y usa una ventana temporal de 32 MiB. Ahorra 290 MiB de pico frente
   a V6, añade ~33 ms por imagen caliente y conserva precisión/decode. Evidencia
   en `tools/GEMMA4_VISION_V7.md`.
-- **Fase activa:** V8 — política HexOS implementada y doble buffer autorizado
-  por perfil; falta construir y certificar el prototipo opt-in.
+- **Fase activa:** V8 — política HexOS implementada y pipeline genérico de
+  doble buffer certificado con Gemma 4; falta decidir el default de producto y
+  conectar adjuntos al proceso persistente.
 - **Baseline de texto congelado:** `qwen3_4b_final.hnf` para regresión general y
   `gemma4-e2b-it-text-compact.hnf` para integración, ambos con
   `HELIOS_EMBED_MMAP=1`. `HELIOS_EMBED_IN_RAM=1` queda únicamente como ruta
@@ -399,7 +402,7 @@ arriesgar el HNF de producción.
   VRAM o staging desde HNF; carga/descarga mmap recupera toda la memoria. Con
   contexto 4096, prefill y decode permanecen en 85,8 ms y 136,4 tok/s. Tras V7,
   Héctor pasa 18/18 y texto conserva sus barreras independientes.
-- **Siguiente acción exacta:** implementar dos ventanas de staging tras
-  `HELIOS_VISION_DOUBLE_BUFFER=1`, con un stream de copia y eventos de
-  ready/release. La V7 simple debe permanecer intacta sin la variable. Adoptar
-  solo si recupera al menos 20 ms calientes y supera todas las barreras V4.
+- **Siguiente acción exacta:** hacer que HexOS active
+  `HELIOS_MMAP_DOUBLE_BUFFER=1` junto al mmap visual compatible, conservando el
+  override a cero. Después, diseñar el contrato de adjuntos del chat persistente
+  sobre detección de modalidad HNF, no sobre nombres de modelos.

@@ -84,7 +84,7 @@ medir; no forma parte del motor.
 3. La capa N espera `ready[N]` en el stream de cómputo.
 4. La copia de N+1 espera que su ventana haya sido liberada por N−1.
 5. Los punteros del registro solo cambian al activar una fase ya copiada.
-6. Sin `HELIOS_VISION_DOUBLE_BUFFER=1`, la ruta V7 queda byte por byte igual.
+6. Sin `HELIOS_MMAP_DOUBLE_BUFFER=1`, la ruta V7 queda byte por byte igual.
 
 No se adoptará por defecto hasta superar:
 
@@ -100,3 +100,29 @@ El perfil autoriza implementar el prototipo. El techo no son los 31 ms
 completos: patch inicial, eventos y preparación permanecen en la ruta crítica.
 El objetivo de aceptación es ahorrar al menos `20 ms` calientes. Por debajo de
 eso se retira el doble buffer y se conserva la V7 simple.
+
+## Resultado del prototipo genérico
+
+El mecanismo se implementó después del perfil como `MappedWeightPipeline`, no
+dentro de Gemma 4. El adaptador solo abre una fase, encola sus kernels y declara
+el prefijo siguiente. Buffers, stream de copia, eventos y restauración del
+registro pertenecen al pipeline común.
+
+Medición directa sin Nsight:
+
+| ruta | torre caliente | pico visual |
+|---|---:|---:|
+| V7, una ventana | 97,74 ms | +334 MiB |
+| V8, doble buffer genérico | **73,25 ms** | **+356 MiB** |
+
+La ganancia real es `24,49 ms` (`25,1 %`) y supera la barrera de 20 ms. La
+segunda ventana cuesta 20 MiB reales porque solo guarda una capa de 18,881 MB;
+la ventana de 32,637 MB del patch se reutiliza como la otra mitad del ping-pong.
+
+Las cinco fronteras V4 permanecen exactamente iguales, incluido projected
+NRMSE `0,004182350162`; el hash textual sigue siendo
+`e8490bf9…0384a17f`, carga/descarga recupera toda la memoria y Héctor pasa
+18/18. Dos generaciones largas produjeron respuestas byte a byte idénticas.
+La velocidad de decode mostró la misma variación de potencia ya conocida y
+cambió de ganador al invertir el orden; el pipeline se destruye antes del
+decode y no deja una regresión causal observable.

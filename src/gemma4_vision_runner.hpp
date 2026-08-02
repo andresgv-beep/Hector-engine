@@ -2,6 +2,7 @@
 
 #include "gemma4_vision_preprocess.hpp"
 #include "hnf_loader.hpp"
+#include "mapped_weight_pipeline.hpp"
 
 #include <cuda_fp16.h>
 
@@ -88,6 +89,7 @@ private:
 
     Engine& engine_;
     HnfLoader& loader_;
+    MappedWeightPipeline weight_pipeline_;
     uint32_t max_patches_ = 0;
     uint32_t patch_width_ = 0;
     uint32_t hidden_size_ = 0;

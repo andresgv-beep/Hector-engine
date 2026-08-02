@@ -153,6 +153,10 @@ int main(int argc, char** argv) {
         const std::string followup = followup_env ? followup_env : "";
         const char* vision_mmap_env = std::getenv("HELIOS_VISION_MMAP");
         const bool vision_mmap = vision_mmap_env && vision_mmap_env[0] == '1';
+        const char* double_buffer_env =
+            std::getenv("HELIOS_MMAP_DOUBLE_BUFFER");
+        const bool double_buffer =
+            double_buffer_env && double_buffer_env[0] == '1';
         uint32_t vision_repeats = 1;
         if (const char* repeat_env = std::getenv("HELIOS_VISION_REPEAT")) {
             const uint64_t requested_repeats = std::stoull(repeat_env);
@@ -450,7 +454,10 @@ int main(int argc, char** argv) {
         const double generation_seconds =
             std::chrono::duration<double>(generation_end - generation_start).count();
         std::cout << "\n=== GEMMA 4 VISION "
-                  << (vision_mmap ? "V7 MMAP/STAGING" : "V6 VRAM")
+                  << (vision_mmap
+                          ? (double_buffer ? "V8 MMAP/DOUBLE BUFFER"
+                                           : "V7 MMAP/STAGING")
+                          : "V6 VRAM")
                   << " ===\n"
                   << "Imagen: " << image.width << 'x' << image.height
                   << " -> " << preprocessed.resized_width << 'x'
