@@ -117,6 +117,14 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
     todo16 = os.environ.get('REF_FP16_ALL') == '1'
     r16 = (lambda x: x.astype(np.float16).astype(np.float32)) if todo16 else (lambda x: x)
 
+    # REF_DUMP_LAYERS=<dir> guarda las piezas de cada capa como valores de oro
+    # para bisecar contra el motor, y como fixture de los tests: un test que
+    # recalcula el resultado esperado con la misma idea que el kernel no
+    # comprueba nada, solo que el autor es coherente consigo mismo.
+    vuelca = os.environ.get('REF_DUMP_LAYERS')
+    if vuelca:
+        os.makedirs(vuelca, exist_ok=True)
+
     for i in range(L):
         w = lambda s: r16(st.f32(f'{P}layers.{i}.{s}'))
         t = types[i]; glob = (t == 'full_attention')
@@ -168,6 +176,14 @@ def main(model_dir, tokens, out_path, projected_path=None, image_token_id=258880
             # fp32. Redondear aqui aisla cuanto del hueco es precision del flujo
             # y cuanto es diferencia de implementacion del motor.
             h = h.astype(np.float16).astype(np.float32)
+        if vuelca is not None:
+            # Valores de oro para bisecar contra el motor. Se guardan las piezas
+            # de dentro de la capa, no solo el hidden: si la capa se separa,
+            # esto dice en cual de las seis. Ver el README, seccion de bisecar.
+            np.savez(f'{vuelca}/capa{i:02d}.npz', hidden=h.astype(np.float32),
+                     q=q.astype(np.float32), k=k.astype(np.float32),
+                     v=v.astype(np.float32), attn=a.astype(np.float32),
+                     mlp=x.astype(np.float32), ple=g.astype(np.float32))
         print(f'\r[ref] capa {i+1}/{L}', end='', file=sys.stderr)
 
     print(file=sys.stderr)

@@ -375,6 +375,58 @@ Lo que queda, por orden de relación beneficio/riesgo:
 2. **Repetir el banco en Qwen3-8B** antes de afirmar nada en público. Todo lo
    medido hasta ahora es un modelo de 4B.
 
+## Cómo bisecar una diferencia de implementación
+
+Distinto problema que medir cuantización. Aquí el modelo **sin cuantizar** ya no
+coincide con la referencia, así que hay algo que se calcula distinto y hay que
+encontrar la línea.
+
+**Por qué los tests actuales no lo pillan.** `test_gemma4_primitives.cu`
+comprueba así la normalización:
+
+```cpp
+const float expected = input[i] * inv_rms * weights[i];
+```
+
+Eso recalcula el resultado esperado **con la misma idea** que tenía quien
+escribió el kernel. Si la idea es incorrecta, el kernel la reproduce fielmente y
+el test pasa. Verifica que el autor es coherente consigo mismo, no que tenga
+razón sobre el modelo. Es la misma trampa por la que casi se da por buena una
+medida esta sesión: `ref_gemma4.py` y Héctor salían los dos de leer el mismo
+código de Google, y hasta ejecutar `transformers` de verdad no se supo cuál
+tenía razón.
+
+**El procedimiento, de fuera hacia dentro:**
+
+```bash
+# 1. valores de oro de la referencia (verificada exacta contra transformers).
+#    32 tokens sobran: un bug de formula no depende de la longitud.
+REF_DUMP_LAYERS=/tmp/oro REF_ALL_POSITIONS=1 \
+  python3 tools/quant_bench/ref_gemma4.py <dir_modelo_hf> "$(cat mini.txt)" /dev/null
+# deja capa00.npz .. capa34.npz con hidden, q, k, v, attn, mlp, ple
+```
+
+2. **Empezar por `capa00`**, no por el barrido completo. Casi todos estos bugs
+   son uniformes —la misma fórmula mal en las 35 capas—, así que se ven ya en la
+   primera y te ahorras la maquinaria por capa.
+3. Comparar las siete piezas. La que se separe señala el kernel.
+4. Si la capa 0 coincide, entonces sí hay que barrer: un **escalón** en una capa
+   concreta es un bug de implementación; una **pendiente suave** es acumulación
+   y hay que buscar en otro sitio.
+
+Los `.npz` no se versionan (unos 42 MB); se regeneran con el comando de arriba.
+
+**Sitios donde se escapa algo así en Gemma 4**, por si el barrido no es
+concluyente: RoPE proporcional (las dimensiones que deben quedar a CERO), las
+escalas del PLE (`sqrt(D)`, `sqrt(PLE)`, el `1/sqrt(2)`), el `layer_scalar` de
+cada capa, el `v_norm` que va **sin** escala, el borde de la ventana (`< W`),
+el `final_logit_softcapping`, y el scaling de atención, que en Gemma 4 es
+**1.0** — rarísimo, y muy fácil de "corregir" a `1/sqrt(head_dim)` sin querer.
+
+**El arreglo duradero** no es encontrar este bug, es que los tests carguen
+valores de oro de una implementación externa en vez de recalcularlos. Con
+`ref_gemma4.py` verificado, ya hay de dónde sacarlos.
+
 ## Sesión del 2026-08-02 — Gemma 4 E2B
 
 Arrancó con una alarma: el compacto invertía una decisión que el bf16 daba
