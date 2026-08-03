@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <deque>
 #include <map>
+#include <memory>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -28,6 +29,7 @@
 
 using helios::ChatMessage;
 using helios::InferenceSession;
+using helios::Model;
 namespace mj = helios::mini_json;
 
 namespace {
@@ -102,6 +104,23 @@ std::deque<Peticion> g_cola;
 std::atomic<bool> g_cerrar{false};
 std::atomic<bool> g_cancelar{false};
 std::string g_turno_activo;          // protegido por g_cola_mtx
+std::string g_sesion_generando;      // sesión del turno en vuelo; misma cerradura
+
+// ---------------------------------------------------------------------------
+// SESIONES. Héctor ofrece sesiones GENÉRICAS sobre unos mismos pesos: no sabe
+// que unas son chats y otras cualquier otra cosa. Quien llama decide.
+//
+// Solo una genera a la vez, y es a propósito: comparten los buffers de trabajo
+// del grafo. Cuando llega un turno para otra sesión, la que estuviera
+// generando se cancela y se queda EXACTAMENTE como estaba — su KV, su
+// muestreador y su posición no se tocan. Pausar no es reiniciar: reanudarla
+// después es seguir la frase, no rehacer el contexto.
+//
+// Una sesión pausada no consume GPU porque no ejecuta nada; lo que sí ocupa es
+// la VRAM de su KV, y eso no lo arregla pausar. Es el techo real al número de
+// chats abiertos, y conviene decirlo en vez de descubrirlo con un OOM.
+// ---------------------------------------------------------------------------
+constexpr const char* kSesionPorDefecto = "0";
 struct Adjunto {
     std::vector<unsigned char> pixels;
     uint32_t width = 0, height = 0;
@@ -184,6 +203,27 @@ void hilo_lector() {
             g_cancelar.store(true);
             continue;
         }
+        // CONMUTACIÓN. Si llega trabajo para otra sesión mientras una está
+        // generando, se cancela la de ahora. La cancelación es la que ya
+        // existe: para en un límite de token, conserva lo emitido y deja el KV
+        // y el muestreador exactamente donde estaban. Pausar es eso — no
+        // reiniciar, no reconstruir, no perder la frase a medias.
+        //
+        // Se señala aquí, desde el lector, para que la espera del usuario sea
+        // corta; quien manda de verdad es el hilo dueño, que confirma el
+        // estado real cuando su turno termina.
+        if (p.tipo == "turn" || p.tipo == "reset" || p.tipo == "session_close") {
+            std::string destino = kSesionPorDefecto;
+            if (const auto* v = p.doc.get("session")) destino = v->str();
+            std::lock_guard<std::mutex> l(g_cola_mtx);
+            if (!g_sesion_generando.empty() && g_sesion_generando != destino) {
+                emit("{\"type\":\"session_paused\",\"session\":\"" +
+                     json_escape(g_sesion_generando) +
+                     "\",\"reason\":\"switch\"}");
+                g_cancelar.store(true);
+            }
+        }
+
         { std::lock_guard<std::mutex> l(g_cola_mtx); g_cola.push_back(p); }
         if (p.tipo == "shutdown") break;
     }
@@ -218,17 +258,37 @@ int main(int argc, char** argv) {
     // fputs directamente al descriptor, así que no les afecta.
     std::cout.rdbuf(std::cerr.rdbuf());
 
-    InferenceSession session;
-    InferenceSession::Config cfg;
+    Model::Config cfg;
     cfg.hnf_path = hnf;
     cfg.max_seq_len = ctx;
     cfg.temperature = temp;
     std::string err;
-    if (!session.load(cfg, &err)) {
+    auto pesos = Model::load(cfg, &err);
+    if (!pesos) {
         std::fprintf(stderr, "[runtime] no pude cargar el modelo: %s\n", err.c_str());
         return 1;
     }
-    const auto& info = session.info();
+
+    // Las sesiones se crean bajo demanda. `unique_ptr` porque InferenceSession
+    // no es copiable y el mapa tiene que poder crecer sin invalidar nada.
+    std::map<std::string, std::unique_ptr<InferenceSession>> sesiones;
+    auto sesion_de = [&](const std::string& id) -> InferenceSession* {
+        auto it = sesiones.find(id);
+        if (it != sesiones.end()) return it->second.get();
+        auto nueva = std::make_unique<InferenceSession>();
+        std::string e;
+        if (!nueva->attach(pesos, &e)) {
+            std::fprintf(stderr, "[runtime] no pude abrir la sesión %s: %s\n",
+                         id.c_str(), e.c_str());
+            return nullptr;
+        }
+        emit("{\"type\":\"session_opened\",\"session\":\"" +
+             json_escape(id) + "\"}");
+        auto* raw = nueva.get();
+        sesiones.emplace(id, std::move(nueva));
+        return raw;
+    };
+    const auto& info = pesos->info();
 
     emit("{\"type\":\"ready\",\"protocol\":2,\"model\":{\"architecture\":\"" +
          json_escape(info.architecture) + "\",\"max_seq_len\":" +
@@ -240,6 +300,10 @@ int main(int argc, char** argv) {
          (info.vision_adapter.empty()
               ? std::string("null")
               : "\"" + json_escape(info.vision_adapter) + "\"") + "}}");
+
+    // La sesión por defecto se abre DESPUÉS de `ready`: el protocolo exige que
+    // `ready` sea el primer evento, y `session_opened` es un evento.
+    if (!sesion_de(kSesionPorDefecto)) return 1;
 
     std::thread lector(hilo_lector);
 
@@ -253,6 +317,38 @@ int main(int argc, char** argv) {
         if (!hay) {
             if (g_stdin_cerrado.load()) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+
+        // A qué sesión va esto. Sin campo, la de siempre: el protocolo viejo
+        // sigue valiendo palabra por palabra.
+        std::string sid = kSesionPorDefecto;
+        if (const auto* v = p.doc.get("session")) sid = v->str();
+        InferenceSession* ses = sesion_de(sid);
+        if (!ses) {
+            emit_error(p.id, "session_unavailable",
+                       "no pude abrir la sesión " + sid, 0, 0, info.max_seq_len);
+            continue;
+        }
+        InferenceSession& session = *ses;
+
+        if (p.tipo == "session_close") {
+            if (sid == kSesionPorDefecto) {
+                emit_error(p.id, "session_undeletable",
+                           "la sesión por defecto no se cierra", 0, 0,
+                           info.max_seq_len);
+                continue;
+            }
+            const uint32_t pos = session.cache_position();
+            sesiones.erase(sid);
+            emit("{\"type\":\"session_closed\",\"session\":\"" +
+                 json_escape(sid) + "\"}");
+            emit_result(p.id, true, pos, 0, info.max_seq_len);
+            continue;
+        }
+        if (p.tipo == "session_open") {
+            emit_result(p.id, true, session.cache_position(),
+                        session.cache_position(), info.max_seq_len);
             continue;
         }
 
@@ -329,7 +425,11 @@ int main(int argc, char** argv) {
                 gen.max_thinking_tokens = (int)v->num(gen.max_thinking_tokens);
         }
 
-        { std::lock_guard<std::mutex> l(g_cola_mtx); g_turno_activo = p.id; }
+        {
+            std::lock_guard<std::mutex> l(g_cola_mtx);
+            g_turno_activo = p.id;
+            g_sesion_generando = sid;
+        }
         g_cancelar.store(false);
 
         std::string acumulado;
@@ -374,6 +474,7 @@ int main(int argc, char** argv) {
             std::lock_guard<std::mutex> l(g_cola_mtx);
             pendientes.swap(g_cancel_pend);
             g_turno_activo.clear();
+            g_sesion_generando.clear();
         }
         for (const auto& c : pendientes) {
             const bool aplico = (c.objetivo == p.id) &&
