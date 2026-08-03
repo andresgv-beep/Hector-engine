@@ -321,6 +321,10 @@ target_link_libraries(helios_chat PRIVATE helios-engine)
 add_executable(test_mini_json tests/test_mini_json.cpp)
 add_test(NAME mini_json COMMAND test_mini_json)
 
+# Volcador de referencia del CK (E2): no toca CUDA, solo la politica.
+add_executable(ck_dump tools/ck_dump.cpp src/ck_policy.cpp)
+target_include_directories(ck_dump PRIVATE src)
+
 add_executable(helios_runtime tools/helios_runtime.cpp)
 target_link_libraries(helios_runtime PRIVATE helios-engine)
 
