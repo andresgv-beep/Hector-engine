@@ -77,6 +77,7 @@ set(ENGINE_SOURCES
     src/chat_template.cpp
     src/hexos_bridge.cpp
     src/ck_policy.cpp
+    src/inference_session.cpp
 )
 
 # CUDA kernels
@@ -313,6 +314,12 @@ target_link_libraries(test_chat PRIVATE helios-engine)
 # ========== HELIOS CHAT (multi-turn, KV continuity, dynamic output) ==========
 add_executable(helios_chat helios_chat.cpp)
 target_link_libraries(helios_chat PRIVATE helios-engine)
+
+# ===== HELIOS RUNTIME (E1: eventos tipados, ruta paralela al REPL) ==========
+# No sustituye a helios_chat: convive con el. helios_chat sigue siendo el
+# oraculo contra el que se mide la paridad.
+add_executable(helios_runtime tools/helios_runtime.cpp)
+target_link_libraries(helios_runtime PRIVATE helios-engine)
 
 # ============================================================================
 # Info
