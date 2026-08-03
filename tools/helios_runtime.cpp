@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cstdio>
 #include <deque>
+#include <map>
 #include <iostream>
 #include <mutex>
 #include <string>
@@ -101,6 +102,13 @@ std::deque<Peticion> g_cola;
 std::atomic<bool> g_cerrar{false};
 std::atomic<bool> g_cancelar{false};
 std::string g_turno_activo;          // protegido por g_cola_mtx
+struct Adjunto {
+    std::vector<unsigned char> pixels;
+    uint32_t width = 0, height = 0;
+    size_t stride = 0;
+};
+std::map<std::string, Adjunto> g_adjuntos;   // protegido por g_cola_mtx
+
 struct CancelPend { std::string id, objetivo; };
 std::deque<CancelPend> g_cancel_pend;   // protegido por g_cola_mtx
 std::atomic<bool> g_stdin_cerrado{false};
@@ -130,6 +138,42 @@ void hilo_lector() {
         // del KV y podría aceptar una cancelación cuando run_turn() ya
         // terminó y g_turno_activo aún no se ha limpiado. Aquí solo se señala;
         // el hilo dueño de la sesión responde con el estado real.
+        // El payload binario va PEGADO a su cabecera: se lee del mismo flujo
+        // con read(), no con getline, porque son bytes crudos que pueden
+        // contener saltos de línea.
+        if (p.tipo == "attachment") {
+            const auto num = [&](const char* k) -> long long {
+                const auto* v = p.doc.get(k);
+                return v ? (long long)v->num(0) : 0;
+            };
+            const std::string kind = p.doc.get("kind")
+                                   ? p.doc.get("kind")->str() : "";
+            const long long w = num("width"), h = num("height"),
+                            st = num("stride"), by = num("bytes");
+            constexpr long long kTope = 300LL * 1024 * 1024;
+            const bool geo_ok = kind == "rgb8" && w > 0 && h > 0 &&
+                                st >= w * 3 && by == st * h && by <= kTope;
+            std::vector<unsigned char> buf;
+            if (by > 0 && by <= kTope) {
+                buf.resize((size_t)by);
+                std::cin.read(reinterpret_cast<char*>(buf.data()), by);
+                if (std::cin.peek() == '\n') std::cin.get();
+            }
+            if (!geo_ok || (long long)buf.size() != by) {
+                emit_error(p.id, "invalid_attachment",
+                           "geometría RGB8 incoherente o payload incompleto",
+                           0, 0, 0);
+                continue;
+            }
+            {
+                std::lock_guard<std::mutex> l(g_cola_mtx);
+                g_adjuntos[p.id] = Adjunto{std::move(buf), (uint32_t)w,
+                                           (uint32_t)h, (size_t)st};
+            }
+            emit_result(p.id, true, 0, 0, 0);
+            continue;
+        }
+
         if (p.tipo == "cancel") {
             std::string objetivo;
             if (const auto* t = p.doc.get("target")) objetivo = t->str();
@@ -189,10 +233,13 @@ int main(int argc, char** argv) {
     emit("{\"type\":\"ready\",\"protocol\":2,\"model\":{\"architecture\":\"" +
          json_escape(info.architecture) + "\",\"max_seq_len\":" +
          std::to_string(info.max_seq_len) +
-         // Capacidad EFECTIVA del ejecutable: este runtime todavía no acepta
-         // adjuntos, así que anunciar la del HNF sería prometer lo que no
-         // puede cumplir. Se activará al implementar `attachment`.
-         ",\"multimodal\":false,\"vision_adapter\":null}}");
+         // Capacidad EFECTIVA: la sesión solo declara visión si logró crear
+         // el adaptador, así que anunciarla ya no es una promesa vacía.
+         ",\"multimodal\":" + (info.multimodal ? "true" : "false") +
+         ",\"vision_adapter\":" +
+         (info.vision_adapter.empty()
+              ? std::string("null")
+              : "\"" + json_escape(info.vision_adapter) + "\"") + "}}");
 
     std::thread lector(hilo_lector);
 
@@ -248,6 +295,29 @@ int main(int argc, char** argv) {
 
         // Por ÁMBITO: una "temperature" escrita dentro del texto del usuario
         // no puede cambiar el muestreo.
+        std::vector<InferenceSession::ImageAttachment> adjuntos;
+        std::vector<std::string> ids_usados;
+        bool adjunto_malo = false;
+        if (const auto* arr = p.doc.get("attachment_ids");
+            arr && arr->is_array()) {
+            std::lock_guard<std::mutex> l(g_cola_mtx);
+            for (const auto& v : *arr->array) {
+                auto it = g_adjuntos.find(v.str());
+                if (it == g_adjuntos.end()) { adjunto_malo = true; break; }
+                adjuntos.push_back({it->second.pixels.data(),
+                                    it->second.pixels.size(),
+                                    it->second.width, it->second.height,
+                                    it->second.stride});
+                ids_usados.push_back(v.str());
+            }
+        }
+        if (adjunto_malo) {
+            emit_error(p.id, "unknown_attachment",
+                       "adjunto inexistente o ya consumido",
+                       antes, antes, info.max_seq_len);
+            continue;
+        }
+
         InferenceSession::GenConfig gen;
         gen.temperature = temp;
         if (const auto* g = p.doc.get("generation")) {
@@ -288,9 +358,15 @@ int main(int argc, char** argv) {
         (void)t_pref;
 
         std::string msg;
-        const bool ok = session.run_turn(messages, gen, on_text, on_think,
-                                         on_prefill, g_cancelar, &st, &reason,
-                                         &code, &msg);
+        const bool ok = session.run_turn(messages, adjuntos, gen, on_text,
+                                         on_think, on_prefill, g_cancelar,
+                                         &st, &reason, &code, &msg);
+        if (ok) {
+            // Se consume solo si el turno salió bien: si falló, el cliente
+            // puede reintentar sin volver a subir los píxeles.
+            std::lock_guard<std::mutex> l(g_cola_mtx);
+            for (const auto& id : ids_usados) g_adjuntos.erase(id);
+        }
         // Las cancelaciones se confirman AQUÍ, con el estado real y ya sin
         // carrera: el turno ha terminado y sabemos si de verdad se canceló.
         std::deque<CancelPend> pendientes;

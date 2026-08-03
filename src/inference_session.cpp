@@ -16,6 +16,7 @@
 #include "htf_tokenizer.hpp"
 #include "kv_cache.hpp"
 #include "model_capabilities.hpp"
+#include "multimodal_adapter.hpp"
 #include "sampler.hpp"
 #include "../kernels/kernels.hpp"
 
@@ -77,6 +78,7 @@ struct InferenceSession::Impl {
     Sampler sampler;
     SamplingConfig sample_config;
     ModelInfo info;
+    std::unique_ptr<MultimodalAdapter> multimodal;
 
     // Parámetros mecánicos del sampler, fijados al cargar. Se guardan porque
     // la config hay que RECONSTRUIRLA en cada turno: un turno greedy sustituye
@@ -110,6 +112,7 @@ struct InferenceSession::Impl {
     // está en KV, así que la plantilla completa (con su BOS) solo vale para el
     // primer prefill de la sesión.
     std::vector<int32_t> encode(const std::vector<ChatMessage>& messages,
+                                bool con_adjunto,
                                 std::string* error_code, std::string* error);
 
     int32_t forward_batch(const std::vector<int32_t>& ids, cudaStream_t stream);
@@ -131,13 +134,24 @@ struct InferenceSession::Impl {
 
 std::vector<int32_t> InferenceSession::Impl::encode(
         const std::vector<ChatMessage>& messages,
+        bool con_adjunto,
         std::string* error_code, std::string* error) {
+    // El adaptador busca su marcador dentro del turno ya formateado para
+    // expandirlo a los soft tokens de la imagen. Sin él, el prefill visual
+    // falla aunque los píxeles estén perfectos.
+    std::vector<ChatMessage> msgs = messages;
+    if (con_adjunto) {
+        for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
+            if (it->role == "user") { it->content = "<|image|>\n" + it->content; break; }
+        }
+    }
+    const std::vector<ChatMessage>& messages_ref = msgs;
     if (is_gemma4) {
         // Gemma 4 no admite un `system` nuevo entre turnos: su plantilla lo
         // fusiona con el primer user. En vez de inventarnos un encaje, se
         // rechaza y que E2 decida cómo entregar lo efímero.
         if (position() > 0) {
-            for (const auto& m : messages) {
+            for (const auto& m : messages_ref) {
                 if (m.role == "system") {
                     *error_code = "unsupported_role_sequence";
                     *error = "Gemma 4 no admite un mensaje 'system' entre "
@@ -148,7 +162,7 @@ std::vector<int32_t> InferenceSession::Impl::encode(
         }
         Gemma4ChatOptions options;
         options.add_generation_prompt = true;
-        auto ids = tokenizer->encode(format_gemma4_chat(messages, options),
+        auto ids = tokenizer->encode(format_gemma4_chat(messages_ref, options),
                                      false, false);
         const int32_t bos = tokenizer->bos_token_id().value_or(2);
         if (position() > 0 && !ids.empty() && ids.front() == bos) {
@@ -162,7 +176,7 @@ std::vector<int32_t> InferenceSession::Impl::encode(
         auto seg = tokenizer->encode(s, false, false);
         ids.insert(ids.end(), seg.begin(), seg.end());
     };
-    for (const auto& m : messages) {
+    for (const auto& m : messages_ref) {
         ids.push_back(turn_start);
         push(m.role + "\n" + m.content);
         ids.push_back(turn_end);
@@ -351,12 +365,22 @@ bool InferenceSession::load(const Config& config, std::string* error) {
 
         const ModelCapabilities caps = inspect_model_capabilities(s.loader);
         const auto* vision = caps.find(ModelModality::Vision);
+        if (vision && vision->status == AdapterStatus::RuntimeReady) {
+            std::string adapter_error;
+            s.multimodal = create_multimodal_adapter(
+                vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
+                kPrefillChunk, &adapter_error);
+            if (!s.multimodal) {
+                *error = "no pude crear el adaptador visual: " + adapter_error;
+                return false;
+            }
+        }
         s.info.architecture = caps.text_architecture;
         s.info.max_seq_len = s.kv_config.max_seq_len;
         s.info.multimodal = caps.multimodal;
-        if (vision && vision->status == AdapterStatus::RuntimeReady) {
-            s.info.vision_adapter = vision->adapter_id;
-        }
+        // Solo se anuncia lo que el ejecutable puede cumplir de verdad.
+        if (s.multimodal) s.info.vision_adapter = s.multimodal->id();
+        s.info.multimodal = (s.multimodal != nullptr);
         return true;
     } catch (const std::exception& e) {
         *error = e.what();
@@ -365,6 +389,7 @@ bool InferenceSession::load(const Config& config, std::string* error) {
 }
 
 bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
+                                const std::vector<ImageAttachment>& attachments,
                                 const GenConfig& gen,
                                 const TextCallback& on_text,
                                 const ThinkingCallback& on_thinking,
@@ -381,13 +406,18 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     stats->cache_position_before = antes;
     stats->cache_position = antes;
 
-    auto ids = s.encode(messages, error_code, error);
+    auto ids = s.encode(messages, !attachments.empty(), error_code, error);
     if (ids.empty()) {
         if (error_code->empty()) {
             *error_code = "empty_turn";
             *error = "los mensajes no produjeron tokens";
         }
         return false;   // nada tocado: el KV sigue donde estaba
+    }
+    if (!attachments.empty() && !s.multimodal) {
+        *error_code = "unsupported_attachment";
+        *error = "este modelo no declara adaptador visual";
+        return false;
     }
     if (antes + ids.size() + 8 >= s.kv_config.max_seq_len) {
         *error_code = "context_full";
@@ -421,9 +451,45 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
 
     try {
         auto t0 = clock::now();
-        int32_t next = s.forward_batch(ids, stream);
+        int32_t next = 0;
+        if (!attachments.empty()) {
+            // El adaptador expande el placeholder y prefillea; la sesión solo
+            // avanza su posición lógica si la llamada tuvo éxito.
+            MultimodalTurnInput turn;
+            turn.formatted_token_ids = ids;
+            for (const auto& a : attachments) {
+                turn.attachments.push_back({AttachmentKind::ImageRgb8,
+                                            a.data, a.byte_size, "image/rgb8",
+                                            a.width, a.height,
+                                            a.row_stride_bytes, 0, 0});
+            }
+            std::string verr;
+            if (!validate_multimodal_turn(turn, s.multimodal->limits(), &verr)) {
+                *error_code = "invalid_attachment";
+                *error = verr;
+                return false;
+            }
+            MultimodalPrefillResult pr;
+            if (!s.multimodal->prefill(turn, {s.kv_prefix, antes,
+                                              s.kv_config.max_seq_len},
+                                       pr, &verr)) {
+                *error_code = "attachment_prefill_failed";
+                *error = verr;
+                s.rewind(antes);          // §4: nada emitido, sin rastro
+                stats->cache_position = s.position();
+                return false;
+            }
+            s.advance(pr.sequence_tokens);
+            auto* logits = s.gb.get_logits(*s.engine);
+            next = s.sampler.sample(static_cast<const half*>(logits->ptr),
+                                    s.model_config.vocab_size(),
+                                    s.sample_config, stream);
+            stats->prefill_tokens = pr.sequence_tokens;
+        } else {
+            next = s.forward_batch(ids, stream);
+            stats->prefill_tokens = static_cast<uint32_t>(ids.size());
+        }
         auto t1 = clock::now();
-        stats->prefill_tokens = static_cast<uint32_t>(ids.size());
         stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         if (on_prefill) on_prefill(stats->prefill_tokens, stats->prefill_ms);
 

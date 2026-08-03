@@ -45,6 +45,16 @@ public:
         int max_thinking_tokens = 400;
     };
 
+    // Adjunto RGB8 prestado: el motor recibe píxeles ya decodificados. PNG y
+    // JPEG no cruzan esta frontera — los decodifica quien tenga librería de
+    // imágenes, que no es Héctor.
+    struct ImageAttachment {
+        const void* data = nullptr;
+        size_t byte_size = 0;
+        uint32_t width = 0, height = 0;
+        size_t row_stride_bytes = 0;
+    };
+
     enum class FinishReason { Eos, MaxTokens, Stop, Cancelled };
     static const char* finish_reason_name(FinishReason r);
 
@@ -85,7 +95,10 @@ public:
     // Semántica del KV (§4 del protocolo): si falla ANTES de emitir texto
     // visible, el KV vuelve a `cache_position_before`; si ya emitió, se
     // conserva lo emitido. La cancelación conserva exactamente lo emitido.
+    // `attachments` vacío = turno de solo texto. Si no hay adaptador visual
+    // en el HNF, un turno con adjunto falla con `unsupported_attachment`.
     bool run_turn(const std::vector<ChatMessage>& messages,
+                  const std::vector<ImageAttachment>& attachments,
                   const GenConfig& gen,
                   const TextCallback& on_text,
                   const ThinkingCallback& on_thinking,
