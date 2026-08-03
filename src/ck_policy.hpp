@@ -1,5 +1,21 @@
 #pragma once
 
+// ============================================================================
+// CONGELADO — LEGACY (E2 del plan de evacuación cognitiva)
+// ============================================================================
+// Esta política ya vive portada en hexos-core (`hexos/src/ck/ck_policy.c`) y
+// la equivalencia está demostrada byte a byte sobre 71 casos
+// (`tools/ck_diff.py`). Este fichero NO se elimina todavía: `helios_chat` es
+// el oráculo contra el que se mide la evacuación y la ruta legacy sigue
+// siendo la predeterminada.
+//
+// NO SE MODIFICA. Cualquier cambio aquí invalida la referencia congelada
+// (`informes/e2_ref_ck_policy.meta.json` guarda su SHA) y habría que
+// regenerarla y volver a demostrar la igualdad.
+//
+// Se retira en E6, cuando desaparezca la ruta legacy.
+// ============================================================================
+
 #include <cstddef>
 #include <string>
 #include <string_view>
