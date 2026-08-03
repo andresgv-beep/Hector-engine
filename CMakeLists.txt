@@ -318,6 +318,9 @@ target_link_libraries(helios_chat PRIVATE helios-engine)
 # ===== HELIOS RUNTIME (E1: eventos tipados, ruta paralela al REPL) ==========
 # No sustituye a helios_chat: convive con el. helios_chat sigue siendo el
 # oraculo contra el que se mide la paridad.
+add_executable(test_mini_json tests/test_mini_json.cpp)
+add_test(NAME mini_json COMMAND test_mini_json)
+
 add_executable(helios_runtime tools/helios_runtime.cpp)
 target_link_libraries(helios_runtime PRIVATE helios-engine)
 

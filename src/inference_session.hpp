@@ -63,6 +63,10 @@ public:
     using TextCallback = std::function<void(const std::string&)>;
     // Latido del pensamiento: solo el contador, nunca el contenido.
     using ThinkingCallback = std::function<void(uint32_t)>;
+    // El prefill real, en cuanto termina y ANTES del primer fragmento: el
+    // protocolo exige que su evento preceda a cualquier text_delta y con
+    // cifras verdaderas, no ceros de relleno.
+    using PrefillCallback = std::function<void(uint32_t tokens, double ms)>;
 
     InferenceSession();
     ~InferenceSession();
@@ -85,6 +89,7 @@ public:
                   const GenConfig& gen,
                   const TextCallback& on_text,
                   const ThinkingCallback& on_thinking,
+                  const PrefillCallback& on_prefill,
                   const std::atomic<bool>& cancel_flag,
                   TurnStats* stats,
                   FinishReason* reason,

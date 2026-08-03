@@ -78,6 +78,13 @@ struct InferenceSession::Impl {
     SamplingConfig sample_config;
     ModelInfo info;
 
+    // Parámetros mecánicos del sampler, fijados al cargar. Se guardan porque
+    // la config hay que RECONSTRUIRLA en cada turno: un turno greedy sustituye
+    // el objeto entero y el siguiente turno creativo, si solo cambiara la
+    // temperatura, seguiría corriendo en greedy.
+    float cfg_rep = 1.0f, cfg_freq = 0.0f, cfg_topp = 0.95f;
+    int cfg_topk = 64;
+
     bool is_gemma4 = false;
     std::string kv_prefix = "_kv";
     int32_t turn_start = 0, turn_end = 0, eos_id = 0;
@@ -107,6 +114,19 @@ struct InferenceSession::Impl {
 
     int32_t forward_batch(const std::vector<int32_t>& ids, cudaStream_t stream);
     int32_t forward_one(int32_t token, cudaStream_t stream);
+
+    SamplingConfig build_sampling(float temperature) const {
+        SamplingConfig c = temperature < 0.01f
+            ? SamplingConfig::greedy()
+            : SamplingConfig::creative(temperature, cfg_topk, cfg_topp);
+        c.repetition_penalty = cfg_rep;
+        c.frequency_penalty = cfg_freq;
+        return c;
+    }
+
+    // El penalty jamás debe caer sobre tokens especiales: penalizar </think>
+    // es lo que rompía el cierre del pensamiento en el oráculo.
+    bool penalizable(int32_t id) const { return is_gemma4 || id < 151643; }
 };
 
 std::vector<int32_t> InferenceSession::Impl::encode(
@@ -326,11 +346,8 @@ bool InferenceSession::load(const Config& config, std::string* error) {
         const int   seed = env_i("HELIOS_SEED", 0);
         s.sampler.set_penalty_window(win);
         if (seed) s.sampler.set_seed(static_cast<uint64_t>(seed));
-        s.sample_config = config.temperature < 0.01f
-            ? SamplingConfig::greedy()
-            : SamplingConfig::creative(config.temperature, topk, topp);
-        s.sample_config.repetition_penalty = rep;
-        s.sample_config.frequency_penalty = freq;
+        s.cfg_rep = rep; s.cfg_freq = freq; s.cfg_topk = topk; s.cfg_topp = topp;
+        s.sample_config = s.build_sampling(config.temperature);
 
         const ModelCapabilities caps = inspect_model_capabilities(s.loader);
         const auto* vision = caps.find(ModelModality::Vision);
@@ -351,6 +368,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                 const GenConfig& gen,
                                 const TextCallback& on_text,
                                 const ThinkingCallback& on_thinking,
+                                const PrefillCallback& on_prefill,
                                 const std::atomic<bool>& cancel_flag,
                                 TurnStats* stats,
                                 FinishReason* reason,
@@ -359,8 +377,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     auto& s = *impl_;
     using clock = std::chrono::high_resolution_clock;
 
-    stats->cache_position_before = s.position();
-    stats->cache_position = stats->cache_position_before;
+    const uint32_t antes = s.position();
+    stats->cache_position_before = antes;
+    stats->cache_position = antes;
 
     auto ids = s.encode(messages, error_code, error);
     if (ids.empty()) {
@@ -368,92 +387,139 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             *error_code = "empty_turn";
             *error = "los mensajes no produjeron tokens";
         }
-        return false;
+        return false;   // nada tocado: el KV sigue donde estaba
     }
-    if (s.position() + ids.size() + 8 >= s.kv_config.max_seq_len) {
-        // Antes de emitir nada: el KV se queda como estaba (§4).
+    if (antes + ids.size() + 8 >= s.kv_config.max_seq_len) {
         *error_code = "context_full";
         *error = "el turno no cabe en el contexto restante";
         return false;
     }
 
-    s.sample_config.temperature = gen.temperature;
-    if (gen.temperature < 0.01f) s.sample_config = SamplingConfig::greedy();
+    // Config MECÁNICA COMPLETA por turno: reconstruirla evita que un turno
+    // greedy deje al siguiente creativo corriendo en greedy.
+    s.sample_config = s.build_sampling(gen.temperature);
 
     cudaStream_t stream = s.engine_config.stream;
-    auto t0 = clock::now();
-    int32_t next = s.forward_batch(ids, stream);
-    auto t1 = clock::now();
-    stats->prefill_tokens = static_cast<uint32_t>(ids.size());
-    stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-
     std::string visible, pending;
-    bool in_think = false;
     uint32_t visible_tokens = 0, thinking = 0, generated = 0;
+    bool in_think = false, think_cut = false;
     *reason = FinishReason::Eos;
 
-    const int hard_cap = gen.max_visible_tokens + gen.max_thinking_tokens + 64;
-    while (generated < static_cast<uint32_t>(hard_cap)) {
-        if (cancel_flag.load(std::memory_order_relaxed)) {
-            *reason = FinishReason::Cancelled;
-            break;
+    // Volcar la cola pendiente sin dejar UTF-8 a medias: lo incompleto se
+    // sustituye por U+FFFD porque emitirlo crudo invalidaría la cadena JSON.
+    auto flush_pending = [&]() {
+        if (pending.empty()) return;
+        size_t cut = utf8_complete_prefix(pending);
+        std::string chunk = pending.substr(0, cut);
+        if (cut < pending.size()) chunk += "\xEF\xBF\xBD";
+        pending.clear();
+        if (!chunk.empty()) {
+            visible += chunk;
+            if (on_text) on_text(chunk);
         }
-        if (next == s.eos_id || next == s.turn_end) {
-            *reason = FinishReason::Eos;
-            break;
-        }
-        if (s.position() + 2 >= s.kv_config.max_seq_len) {
-            *reason = FinishReason::Stop;
-            break;
-        }
+    };
 
-        if (s.think_open && next == *s.think_open) in_think = true;
+    try {
+        auto t0 = clock::now();
+        int32_t next = s.forward_batch(ids, stream);
+        auto t1 = clock::now();
+        stats->prefill_tokens = static_cast<uint32_t>(ids.size());
+        stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        if (on_prefill) on_prefill(stats->prefill_tokens, stats->prefill_ms);
 
-        if (in_think) {
-            thinking++;
-            if ((thinking % 16) == 0 && on_thinking) on_thinking(thinking);
-            if (s.think_close && next == *s.think_close) in_think = false;
-            if (static_cast<int>(thinking) >= gen.max_thinking_tokens &&
-                s.think_close) {
-                // Rienda mecánica: cerrar el pensamiento y seguir. Cuánto vale
-                // el techo lo decide el llamante, no esta clase.
-                next = s.forward_one(*s.think_close, stream);
-                in_think = false;
-                generated++;
-                continue;
-            }
-        } else {
-            std::string piece = s.tokenizer->decode({next});
-            pending += piece;
-            size_t cut = utf8_complete_prefix(pending);
-            if (cut > 0) {
-                std::string chunk = pending.substr(0, cut);
-                pending.erase(0, cut);
-                visible += chunk;
-                if (on_text) on_text(chunk);
-            }
-            visible_tokens++;
-            if (static_cast<int>(visible_tokens) >= gen.max_visible_tokens) {
-                *reason = FinishReason::MaxTokens;
-                generated++;
+        const int hard_cap = gen.max_visible_tokens + gen.max_thinking_tokens + 64;
+        bool natural_stop = false;
+        while (generated < static_cast<uint32_t>(hard_cap)) {
+            if (cancel_flag.load(std::memory_order_relaxed)) {
+                *reason = FinishReason::Cancelled;
                 break;
             }
+            if (next == s.eos_id || next == s.turn_end) {
+                natural_stop = true;
+                *reason = FinishReason::Eos;
+                break;
+            }
+            if (s.position() + 4 >= s.kv_config.max_seq_len) {
+                *reason = FinishReason::Stop;
+                break;
+            }
+
+            if (s.think_open && next == *s.think_open) in_think = true;
+
+            if (in_think) {
+                thinking++;
+                if ((thinking % 16) == 0 && on_thinking) on_thinking(thinking);
+                if (s.think_close && next == *s.think_close) in_think = false;
+                if (static_cast<int>(thinking) >= gen.max_thinking_tokens &&
+                    s.think_close && in_think) {
+                    next = s.forward_one(*s.think_close, stream);
+                    in_think = false;
+                    think_cut = true;
+                    generated++;
+                    continue;
+                }
+            } else {
+                pending += s.tokenizer->decode({next});
+                size_t cut = utf8_complete_prefix(pending);
+                if (cut > 0) {
+                    std::string chunk = pending.substr(0, cut);
+                    pending.erase(0, cut);
+                    visible += chunk;
+                    if (on_text) on_text(chunk);
+                }
+                visible_tokens++;
+            }
+
+            // El penalty ve el token ACTUAL antes de muestrear el siguiente:
+            // registrarlo después desplaza la ventana una posición y el
+            // sampler no ve lo que acaba de emitir. Sin esto, repetition y
+            // frequency penalty están desconectados y no hay paridad posible.
+            if (!in_think && s.penalizable(next)) s.sampler.add_context(next);
+            generated++;
+
+            const bool tope_visible =
+                static_cast<int>(visible_tokens) >= gen.max_visible_tokens;
+            // Aunque se corte por presupuesto, el token DEBE entrar al KV:
+            // si no, el usuario lo ve y la siguiente generación no.
+            next = s.forward_one(next, stream);
+            if (tope_visible) { *reason = FinishReason::MaxTokens; break; }
         }
+        if (generated >= static_cast<uint32_t>(hard_cap)) {
+            *reason = FinishReason::MaxTokens;
+        }
+        flush_pending();
 
-        next = s.forward_one(next, stream);
-        generated++;
+        // CERRAR EL TURNO, igual que el oráculo: el terminal muestreado aún no
+        // está en KV. Gemma 4 necesita <turn|> siempre; ChatML solo cuando el
+        // runtime corta. Sin esto la continuidad se rompe en el turno 2 aunque
+        // el primero parezca perfecto.
+        const bool forzado = (*reason != FinishReason::Eos) || think_cut;
+        if ((s.is_gemma4 && natural_stop) || forzado) {
+            if (s.position() + 2 < s.kv_config.max_seq_len) {
+                (void)s.forward_one(s.turn_end, stream);
+                for (int32_t t : s.tokenizer->encode("\n", false, false)) {
+                    if (s.position() + 2 >= s.kv_config.max_seq_len) break;
+                    (void)s.forward_one(t, stream);
+                }
+            }
+        }
+        auto t2 = clock::now();
+        stats->decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    } catch (const std::exception& e) {
+        flush_pending();
+        *error_code = "engine_failure";
+        *error = e.what();
+        stats->generated_tokens = generated;
+        stats->thinking_tokens = thinking;
+        // §4: si no llegó a emitir texto, el turno no deja rastro; si ya
+        // emitió, se conserva lo emitido y se reporta la posición real.
+        if (visible.empty()) s.rewind(antes);
+        stats->cache_position = s.position();
+        return false;
     }
-    if (generated >= static_cast<uint32_t>(hard_cap)) *reason = FinishReason::MaxTokens;
-
-    if (!pending.empty()) {          // cola incompleta: se emite tal cual
-        visible += pending;
-        if (on_text) on_text(pending);
-    }
-    auto t2 = clock::now();
 
     stats->generated_tokens = generated;
     stats->thinking_tokens = thinking;
-    stats->decode_ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
     stats->cache_position = s.position();
     return true;
 }
