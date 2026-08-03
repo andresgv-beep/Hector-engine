@@ -105,6 +105,7 @@ std::atomic<bool> g_cerrar{false};
 std::atomic<bool> g_cancelar{false};
 std::string g_turno_activo;          // protegido por g_cola_mtx
 std::string g_sesion_generando;      // sesión del turno en vuelo; misma cerradura
+std::string g_pausa_pendiente;       // sesión a la que hay que anunciar pausa
 
 // ---------------------------------------------------------------------------
 // SESIONES. Héctor ofrece sesiones GENÉRICAS sobre unos mismos pesos: no sabe
@@ -121,6 +122,13 @@ std::string g_sesion_generando;      // sesión del turno en vuelo; misma cerrad
 // chats abiertos, y conviene decirlo en vez de descubrirlo con un OOM.
 // ---------------------------------------------------------------------------
 constexpr const char* kSesionPorDefecto = "0";
+
+// Solo el hilo dueño la llama, y solo cuando el turno ha terminado de verdad.
+void anunciar_pausa(const std::string& sesion) {
+    if (sesion.empty()) return;
+    emit("{\"type\":\"session_paused\",\"session\":\"" +
+         json_escape(sesion) + "\",\"reason\":\"switch\"}");
+}
 struct Adjunto {
     std::vector<unsigned char> pixels;
     uint32_t width = 0, height = 0;
@@ -217,9 +225,21 @@ void hilo_lector() {
             if (const auto* v = p.doc.get("session")) destino = v->str();
             std::lock_guard<std::mutex> l(g_cola_mtx);
             if (!g_sesion_generando.empty() && g_sesion_generando != destino) {
-                emit("{\"type\":\"session_paused\",\"session\":\"" +
-                     json_escape(g_sesion_generando) +
-                     "\",\"reason\":\"switch\"}");
+                // Se APUNTA la pausa; la anuncia el hilo dueño cuando run_turn
+                // haya vuelto de verdad. Anunciarla aquí diría "pausada"
+                // mientras la sesión todavía está terminando su token, y quien
+                // lea la traza deduciría que después de `session_paused` no
+                // puede venir texto de A — que es justo lo que pasaría.
+                // HELIOS_PAUSA_TEMPRANA es un GRIFO DE SABOTAJE: reproduce el
+                // fallo causal —anunciar la pausa al PEDIRLA— para que la
+                // batería pueda verse fallar. Sin la variable no cambia nada.
+                if (getenv("HELIOS_PAUSA_TEMPRANA")) {
+                    emit("{\"type\":\"session_paused\",\"session\":\"" +
+                         json_escape(g_sesion_generando) +
+                         "\",\"reason\":\"switch\"}");
+                } else {
+                    g_pausa_pendiente = g_sesion_generando;
+                }
                 g_cancelar.store(true);
             }
         }
@@ -470,11 +490,13 @@ int main(int argc, char** argv) {
         // Las cancelaciones se confirman AQUÍ, con el estado real y ya sin
         // carrera: el turno ha terminado y sabemos si de verdad se canceló.
         std::deque<CancelPend> pendientes;
+        std::string pausar;
         {
             std::lock_guard<std::mutex> l(g_cola_mtx);
             pendientes.swap(g_cancel_pend);
             g_turno_activo.clear();
             g_sesion_generando.clear();
+            pausar.swap(g_pausa_pendiente);
         }
         for (const auto& c : pendientes) {
             const bool aplico = (c.objetivo == p.id) &&
@@ -499,6 +521,7 @@ int main(int argc, char** argv) {
                  "\",\"message\":\"" + json_escape(msg) + "\"," +
                  state_json(st.cache_position_before, st.cache_position,
                             info.max_seq_len) + extra + "}");
+            anunciar_pausa(pausar);
             continue;
         }
 
@@ -516,6 +539,11 @@ int main(int argc, char** argv) {
                  ? st.generated_tokens * 1000.0 / st.decode_ms : 0.0) +
              "}," + state_json(st.cache_position_before, st.cache_position,
                                info.max_seq_len) + "}");
+
+        // AHORA sí está pausada: run_turn ha vuelto y su terminal ya salió.
+        // El orden que ve quien lee la traza es el orden de lo que pasó:
+        //   ... text_delta A · completed A: cancelled · session_paused A ...
+        anunciar_pausa(pausar);
     }
 
     g_cerrar.store(true);
