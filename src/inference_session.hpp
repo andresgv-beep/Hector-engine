@@ -24,7 +24,22 @@
 
 namespace helios {
 
-class InferenceSession {
+// ============================================================================
+// MODELO COMPARTIDO
+// ============================================================================
+// Lo que se carga una vez y no pertenece a ninguna conversación: los pesos del
+// HNF, el tokenizer, las plantillas, el grafo y sus buffers de trabajo, el
+// adaptador visual. Cargarlo cuesta segundos y gigabytes de VRAM; el estado de
+// una conversación cuesta un KV.
+//
+// La separación no es estética. Sin ella, "otra sesión" significa "otro
+// proceso con el modelo entero otra vez", y eso pone un techo absurdo a
+// cualquier cosa que necesite dos hilos de conversación sobre la misma GPU.
+//
+// Héctor NO sabe para qué se usa cada sesión. Aquí no hay reflexión, ni
+// consolidación, ni chat: hay sesiones genéricas sobre unos pesos. Para qué
+// sirve cada una lo decide quien llama.
+class Model {
 public:
     struct Config {
         std::string hnf_path;
@@ -32,12 +47,42 @@ public:
         float temperature = 0.7f;   // base; cada turno puede cambiarla
     };
 
-    struct ModelInfo {
+    struct Info {
         std::string architecture;
         uint32_t max_seq_len = 0;
         bool multimodal = false;
         std::string vision_adapter;   // vacío si no hay
     };
+
+    // Carga los pesos. Devuelve nullptr y llena `error` si no puede.
+    static std::shared_ptr<Model> load(const Config& config, std::string* error);
+
+    ~Model();
+    Model(const Model&) = delete;
+    Model& operator=(const Model&) = delete;
+
+    const Info& info() const;
+
+    // Cuántas sesiones se han creado sobre estos pesos. Permite comprobar
+    // desde fuera que de verdad se están compartiendo.
+    size_t sessions_created() const;
+
+private:
+    Model();
+    friend class InferenceSession;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+// ============================================================================
+// SESIÓN
+// ============================================================================
+class InferenceSession {
+public:
+    // Los nombres de siempre siguen valiendo: quien ya usaba
+    // InferenceSession::Config no tiene que cambiar nada.
+    using Config = Model::Config;
+    using ModelInfo = Model::Info;
 
     struct GenConfig {
         float temperature = 0.7f;
@@ -83,8 +128,27 @@ public:
     InferenceSession(const InferenceSession&) = delete;
     InferenceSession& operator=(const InferenceSession&) = delete;
 
+    // Carga un modelo SOLO para esta sesión. Sigue existiendo porque hay
+    // llamantes de una sola conversación para los que montar un `Model`
+    // aparte no aporta nada.
     bool load(const Config& config, std::string* error);
+
+    // Se engancha a unos pesos ya cargados. Varias sesiones sobre el mismo
+    // `Model` comparten VRAM y no comparten NADA de la conversación: cada una
+    // tiene su KV, su muestreador y su grafo de decode.
+    //
+    // EN SERIE. Comparten los buffers de trabajo del grafo, así que dos turnos
+    // a la vez se pisarían las activaciones. Un cerrojo interno los serializa:
+    // si dos hilos entran a la vez, uno espera. Correr de verdad en paralelo
+    // pide scratch por sesión, y eso todavía no está.
+    bool attach(std::shared_ptr<Model> model, std::string* error);
+
     const ModelInfo& info() const;
+
+    // Prefijo con el que esta sesión registra su KV en el motor. Dos sesiones
+    // tienen prefijos distintos: es lo que impide que una escriba en el caché
+    // de la otra.
+    const std::string& kv_namespace() const;
 
     uint32_t cache_position() const;
     void reset();

@@ -328,6 +328,11 @@ target_include_directories(ck_dump PRIVATE src)
 add_executable(helios_runtime tools/helios_runtime.cpp)
 target_link_libraries(helios_runtime PRIVATE helios-engine)
 
+# Aislamiento entre sesiones sobre unos mismos pesos.
+add_executable(sesiones_test tools/sesiones_test.cpp)
+target_link_libraries(sesiones_test PRIVATE helios-engine)
+target_include_directories(sesiones_test PRIVATE src)
+
 # ============================================================================
 # Info
 # ============================================================================

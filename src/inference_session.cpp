@@ -1,5 +1,7 @@
 #include "inference_session.hpp"
 
+#include <mutex>
+
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -64,7 +66,10 @@ const char* InferenceSession::finish_reason_name(FinishReason r) {
     return "stop";
 }
 
-struct InferenceSession::Impl {
+// ============================================================================
+// Estado COMPARTIDO: los pesos y todo lo que se deriva de ellos.
+// ============================================================================
+struct Model::Impl {
     EngineConfig engine_config;
     std::unique_ptr<Engine> engine;
     HnfLoader loader;
@@ -72,28 +77,81 @@ struct InferenceSession::Impl {
     ModelConfig model_config;
     GraphBuilder gb;
     ArchDescriptor arch{};
+    Model::Info info;
+    std::unique_ptr<MultimodalAdapter> multimodal;
+
+    bool is_gemma4 = false;
+    int32_t turn_start = 0, turn_end = 0, eos_id = 0;
+    std::optional<int32_t> think_open, think_close;
+    uint32_t max_seq_len = 4096;
+    float base_temperature = 0.7f;
+
+    // Parametros mecanicos del muestreo: se leen del entorno UNA vez, con los
+    // pesos. Cada sesion se hace su propio muestreador a partir de ellos.
+    float cfg_rep = 1.0f, cfg_freq = 0.0f, cfg_topp = 0.95f;
+    int cfg_topk = 64;
+    int penalty_window = 384;
+    int seed = 0;
+
+    size_t sesiones = 0;
+
+    // Las sesiones comparten los buffers de trabajo del grafo, asi que un
+    // turno excluye a otro. Serializar es la respuesta honesta mientras el
+    // scratch sea comun: fingir concurrencia daria resultados corruptos en
+    // vez de lentos.
+    std::mutex en_uso;
+};
+
+Model::Model() : impl_(std::make_unique<Impl>()) {}
+Model::~Model() = default;
+const Model::Info& Model::info() const { return impl_->info; }
+size_t Model::sessions_created() const { return impl_->sesiones; }
+
+// ============================================================================
+// Estado POR SESION: lo que define una conversacion, y nada mas.
+// ============================================================================
+struct InferenceSession::Impl {
+    std::shared_ptr<Model> modelo;   // mantiene vivos los pesos
+    Model::Impl& M;
+
+    // Alias con los nombres de siempre: el cuerpo del turno no se entera de
+    // que ahora hay dos objetos.
+    Engine* engine;
+    HnfLoader& loader;
+    GraphBuilder& gb;
+    const HTFTokenizer* tokenizer;
+    ModelConfig model_config;
+    ArchDescriptor arch;
+    MultimodalAdapter* multimodal;
+    ModelInfo info;
+    bool is_gemma4;
+    int32_t turn_start, turn_end, eos_id;
+    std::optional<int32_t> think_open, think_close;
+
+    // --- lo que de verdad es de esta conversacion ---
     KVCacheConfig kv_config;
     KVCache kv_cache;
     Gemma4KVCache gemma_kv_cache;
     Sampler sampler;
     SamplingConfig sample_config;
-    ModelInfo info;
-    std::unique_ptr<MultimodalAdapter> multimodal;
-
-    // Parámetros mecánicos del sampler, fijados al cargar. Se guardan porque
-    // la config hay que RECONSTRUIRLA en cada turno: un turno greedy sustituye
-    // el objeto entero y el siguiente turno creativo, si solo cambiara la
-    // temperatura, seguiría corriendo en greedy.
-    float cfg_rep = 1.0f, cfg_freq = 0.0f, cfg_topp = 0.95f;
-    int cfg_topk = 64;
-
-    bool is_gemma4 = false;
-    std::string kv_prefix = "_kv";
-    int32_t turn_start = 0, turn_end = 0, eos_id = 0;
-    std::optional<int32_t> think_open, think_close;
-
     CommandBuffer decode_cb;
     bool decode_cb_built = false;
+
+    // Prefijo propio en el registro de tensores del motor. Sin esto, la
+    // segunda sesion registraria "_kv.layer0.k" encima de la primera y las dos
+    // escribirian en el mismo cache: no serian dos conversaciones, seria una
+    // con dos voces.
+    std::string kv_prefix;
+
+    explicit Impl(std::shared_ptr<Model> m)
+        : modelo(std::move(m)), M(*modelo->impl_),
+          engine(M.engine.get()), loader(M.loader), gb(M.gb),
+          tokenizer(M.tokenizer), model_config(M.model_config), arch(M.arch),
+          multimodal(M.multimodal.get()), info(M.info),
+          is_gemma4(M.is_gemma4), turn_start(M.turn_start),
+          turn_end(M.turn_end), eos_id(M.eos_id),
+          think_open(M.think_open), think_close(M.think_close) {}
+
 
     uint32_t position() const {
         return is_gemma4 ? gemma_kv_cache.position() : kv_cache.position();
@@ -121,9 +179,9 @@ struct InferenceSession::Impl {
     SamplingConfig build_sampling(float temperature) const {
         SamplingConfig c = temperature < 0.01f
             ? SamplingConfig::greedy()
-            : SamplingConfig::creative(temperature, cfg_topk, cfg_topp);
-        c.repetition_penalty = cfg_rep;
-        c.frequency_penalty = cfg_freq;
+            : SamplingConfig::creative(temperature, M.cfg_topk, M.cfg_topp);
+        c.repetition_penalty = M.cfg_rep;
+        c.frequency_penalty = M.cfg_freq;
         return c;
     }
 
@@ -252,7 +310,7 @@ int32_t InferenceSession::Impl::forward_batch(const std::vector<int32_t>& ids,
     return next;
 }
 
-InferenceSession::InferenceSession() : impl_(std::make_unique<Impl>()) {}
+InferenceSession::InferenceSession() = default;
 InferenceSession::~InferenceSession() = default;
 
 const InferenceSession::ModelInfo& InferenceSession::info() const {
@@ -265,33 +323,34 @@ void InferenceSession::reset() {
     impl_->sampler.clear_context();
 }
 
-bool InferenceSession::load(const Config& config, std::string* error) {
-    auto& s = *impl_;
+std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
+    std::shared_ptr<Model> m(new Model());
+    auto& s = *m->impl_;
     try {
         s.engine = std::make_unique<Engine>(s.engine_config);
         kernels::register_all_kernels(*s.engine);
 
         if (!s.loader.open(config.hnf_path)) {
             *error = "no pude abrir el HNF";
-            return false;
+            return nullptr;
         }
         s.model_config = s.loader.config();
         if (!s.loader.load_block(BLOCK_TEXT_MODEL, *s.engine)) {
             *error = "no pude cargar el bloque de texto";
-            return false;
+            return nullptr;
         }
         s.tokenizer = s.loader.tokenizer("text");
         if (!s.tokenizer) {
             *error = "el HNF no trae tokenizer embebido";
-            return false;
+            return nullptr;
         }
         s.is_gemma4 = s.loader.has_gemma4_config();
 
         auto ts = s.tokenizer->token_to_id(s.is_gemma4 ? "<|turn>" : "<|im_start|>");
         auto te = s.tokenizer->token_to_id(s.is_gemma4 ? "<turn|>" : "<|im_end|>");
         if (!ts || !te) {
-            *error = "el modelo no trae tokens de turno canónicos";
-            return false;
+            *error = "el modelo no trae tokens de turno canonicos";
+            return nullptr;
         }
         s.turn_start = *ts;
         s.turn_end = *te;
@@ -300,17 +359,88 @@ bool InferenceSession::load(const Config& config, std::string* error) {
             s.think_open = s.tokenizer->token_to_id("<think>");
             s.think_close = s.tokenizer->token_to_id("</think>");
         }
+        s.max_seq_len = config.max_seq_len;
+        s.base_temperature = config.temperature;
 
-        s.kv_config.num_layers = s.model_config.num_hidden_layers();
-        s.kv_config.num_kv_heads = s.model_config.num_key_value_heads();
-        s.kv_config.head_dim = s.model_config.head_dim();
+        // El grafo y sus buffers de trabajo son del MODELO: los comparten
+        // todas las sesiones, y por eso los turnos van en serie.
+        s.arch = s.gb.detect_architecture(*s.engine, "text");
+        s.engine->tensors().allocate_and_register(
+            "input_tokens", {1, kPrefillChunk}, dtype::INT32());
+        if (s.is_gemma4) {
+            s.gb.allocate_gemma4_scratch(*s.engine, s.model_config,
+                                         s.loader.gemma4_config(), s.arch,
+                                         1, kPrefillChunk);
+        } else {
+            s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
+                                  1, kPrefillChunk);
+        }
+
+        // Mismos valores por defecto que el oraculo: esto no cambia conducta.
+        s.cfg_rep  = env_f("HELIOS_REP", s.is_gemma4 ? 1.0f : 1.15f);
+        s.cfg_freq = env_f("HELIOS_FREQ", s.is_gemma4 ? 0.0f : 0.1f);
+        s.penalty_window = env_i("HELIOS_WINDOW", 384);
+        s.cfg_topk = env_i("HELIOS_TOPK", s.is_gemma4 ? 64 : 50);
+        s.cfg_topp = env_f("HELIOS_TOPP", s.is_gemma4 ? 0.95f : 0.9f);
+        s.seed = env_i("HELIOS_SEED", 0);
+
+        const ModelCapabilities caps = inspect_model_capabilities(s.loader);
+        const auto* vision = caps.find(ModelModality::Vision);
+        if (vision && vision->status == AdapterStatus::RuntimeReady) {
+            std::string adapter_error;
+            s.multimodal = create_multimodal_adapter(
+                vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
+                kPrefillChunk, &adapter_error);
+            if (!s.multimodal) {
+                *error = "no pude crear el adaptador visual: " + adapter_error;
+                return nullptr;
+            }
+        }
+        s.info.architecture = caps.text_architecture;
+        s.info.max_seq_len = s.max_seq_len;
+        // Solo se anuncia lo que el ejecutable puede cumplir de verdad.
+        if (s.multimodal) s.info.vision_adapter = s.multimodal->id();
+        s.info.multimodal = (s.multimodal != nullptr);
+        return m;
+    } catch (const std::exception& e) {
+        *error = e.what();
+        return nullptr;
+    }
+}
+
+bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error) {
+    if (!model) { *error = "modelo nulo"; return false; }
+    try {
+        impl_ = std::make_unique<Impl>(std::move(model));
+        auto& s = *impl_;
+        auto& M = s.M;
+
+        // Prefijo propio. La primera sesion conserva "_kv" para que la ruta ya
+        // certificada registre exactamente los mismos nombres que antes.
+        //
+        // HELIOS_KV_PREFIJO_FIJO es un GRIFO DE SABOTAJE, no una opcion: obliga
+        // a todas las sesiones a compartir prefijo, que es exactamente el fallo
+        // que este diseno evita. Existe para que la bateria de aislamiento
+        // pueda verse fallar — una prueba que solo se ha visto pasar no
+        // demuestra nada. Mismo espiritu que HELIOS_SEED: entra por el entorno
+        // y no cambia nada si nadie la pone.
+        const char* fijo = getenv("HELIOS_KV_PREFIJO_FIJO");
+        s.kv_prefix = (fijo && *fijo)
+            ? "_kv"
+            : (M.sesiones == 0 ? "_kv" : "_kv_s" + std::to_string(M.sesiones));
+        M.sesiones++;
+
+        s.kv_config.num_layers = M.model_config.num_hidden_layers();
+        s.kv_config.num_kv_heads = M.model_config.num_key_value_heads();
+        s.kv_config.head_dim = M.model_config.head_dim();
         s.kv_config.max_batch_size = 1;
-        s.kv_config.max_seq_len = config.max_seq_len;
+        s.kv_config.max_seq_len = M.max_seq_len;
+
         if (s.is_gemma4) {
             if (!s.gemma_kv_cache.allocate(s.loader.gemma4_config(),
-                                           s.model_config.num_key_value_heads(),
+                                           M.model_config.num_key_value_heads(),
                                            1, s.kv_config.max_seq_len)) {
-                *error = "no pude reservar el KV heterogéneo de Gemma 4";
+                *error = "no pude reservar el KV heterogeneo de Gemma 4";
                 return false;
             }
             s.gemma_kv_cache.register_tensors(*s.engine, s.kv_prefix);
@@ -319,8 +449,8 @@ bool InferenceSession::load(const Config& config, std::string* error) {
                 *error = "no pude reservar el KV";
                 return false;
             }
-            // Nombres y forma EXACTOS del oráculo: el grafo los busca por
-            // "<prefijo>.layerN.k" y con esta disposición concreta.
+            // Nombres y forma EXACTOS del oraculo: el grafo los busca por
+            // "<prefijo>.layerN.k" y con esta disposicion concreta.
             const auto& c = s.kv_cache.config();
             for (uint32_t l = 0; l < c.num_layers; l++) {
                 TensorInfo k_info;
@@ -339,53 +469,27 @@ bool InferenceSession::load(const Config& config, std::string* error) {
             }
         }
 
-        s.arch = s.gb.detect_architecture(*s.engine, "text");
-        s.engine->tensors().allocate_and_register(
-            "input_tokens", {1, kPrefillChunk}, dtype::INT32());
-        if (s.is_gemma4) {
-            s.gb.allocate_gemma4_scratch(*s.engine, s.model_config,
-                                         s.loader.gemma4_config(), s.arch,
-                                         1, kPrefillChunk);
-        } else {
-            s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
-                                  1, kPrefillChunk);
-        }
-
-        // Mismos valores por defecto que el oráculo: E1 no cambia conducta.
-        const float rep  = env_f("HELIOS_REP", s.is_gemma4 ? 1.0f : 1.15f);
-        const float freq = env_f("HELIOS_FREQ", s.is_gemma4 ? 0.0f : 0.1f);
-        const int   win  = env_i("HELIOS_WINDOW", 384);
-        const int   topk = env_i("HELIOS_TOPK", s.is_gemma4 ? 64 : 50);
-        const float topp = env_f("HELIOS_TOPP", s.is_gemma4 ? 0.95f : 0.9f);
-        const int   seed = env_i("HELIOS_SEED", 0);
-        s.sampler.set_penalty_window(win);
-        if (seed) s.sampler.set_seed(static_cast<uint64_t>(seed));
-        s.cfg_rep = rep; s.cfg_freq = freq; s.cfg_topk = topk; s.cfg_topp = topp;
-        s.sample_config = s.build_sampling(config.temperature);
-
-        const ModelCapabilities caps = inspect_model_capabilities(s.loader);
-        const auto* vision = caps.find(ModelModality::Vision);
-        if (vision && vision->status == AdapterStatus::RuntimeReady) {
-            std::string adapter_error;
-            s.multimodal = create_multimodal_adapter(
-                vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
-                kPrefillChunk, &adapter_error);
-            if (!s.multimodal) {
-                *error = "no pude crear el adaptador visual: " + adapter_error;
-                return false;
-            }
-        }
-        s.info.architecture = caps.text_architecture;
+        // Muestreador PROPIO: las penalizaciones son historia de ESTA
+        // conversacion. Compartirlo haria que lo dicho en una sesion frenara
+        // las palabras de la otra.
+        s.sampler.set_penalty_window(M.penalty_window);
+        if (M.seed) s.sampler.set_seed(static_cast<uint64_t>(M.seed));
+        s.sample_config = s.build_sampling(M.base_temperature);
         s.info.max_seq_len = s.kv_config.max_seq_len;
-        s.info.multimodal = caps.multimodal;
-        // Solo se anuncia lo que el ejecutable puede cumplir de verdad.
-        if (s.multimodal) s.info.vision_adapter = s.multimodal->id();
-        s.info.multimodal = (s.multimodal != nullptr);
         return true;
     } catch (const std::exception& e) {
         *error = e.what();
         return false;
     }
+}
+
+bool InferenceSession::load(const Config& config, std::string* error) {
+    auto m = Model::load(config, error);
+    return m && attach(std::move(m), error);
+}
+
+const std::string& InferenceSession::kv_namespace() const {
+    return impl_->kv_prefix;
 }
 
 bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
@@ -399,6 +503,10 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                 FinishReason* reason,
                                 std::string* error_code,
                                 std::string* error) {
+    // Las sesiones comparten los buffers de trabajo del grafo: dos turnos a la
+    // vez se pisarian los activaciones. Se serializan. Es una espera, no una
+    // corrupcion — y cuando el scratch sea por sesion, esta linea se cae sola.
+    std::lock_guard<std::mutex> en_serie(impl_->M.en_uso);
     auto& s = *impl_;
     using clock = std::chrono::high_resolution_clock;
 
@@ -429,7 +537,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     // greedy deje al siguiente creativo corriendo en greedy.
     s.sample_config = s.build_sampling(gen.temperature);
 
-    cudaStream_t stream = s.engine_config.stream;
+    cudaStream_t stream = s.M.engine_config.stream;
     std::string visible, pending;
     uint32_t visible_tokens = 0, thinking = 0, generated = 0;
     bool in_think = false, think_cut = false;
