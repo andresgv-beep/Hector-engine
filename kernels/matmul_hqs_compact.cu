@@ -21,7 +21,10 @@ namespace helios {
 namespace kernels {
 
 // Same configs as matmul_hqs.cu — must match
-constexpr int COMPACT_MAX_K_SHARED = 16384;
+// Ventana maxima del vector de entrada que se aloja en shared. Las matrices
+// mas anchas se recorren en varias ventanas; el acumulador permanece en fp32.
+// Debe ser multiplo de SUPER_BLOCK_SIZE y de 8 (copia vectorizada float4).
+constexpr int COMPACT_INPUT_CHUNK = 16384;
 
 // Batch (M>1): a partir de este M compensa dequant completo + cuBLAS GEMM
 // frente al bucle de M GEMVs (el dequant lee el peso UNA vez; el bucle M veces)
@@ -57,15 +60,8 @@ __global__ void gemv_hq41k_kernel(
 ) {
     using namespace hqs;
     extern __shared__ half s_input[];
-    {
-        const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
-        const float4* src = reinterpret_cast<const float4*>(input);
-        float4* dst = reinterpret_cast<float4*>(s_input);
-        const int n_vec = K / 8;
-        for (int i = threadIdx.x; i < n_vec; i += BS) dst[i] = src[i];
-        for (int i = n_vec * 8 + threadIdx.x; i < K; i += BS) s_input[i] = input[i];
-    }
-    __syncthreads();
+    const int staged_k = K < COMPACT_INPUT_CHUNK ? K : COMPACT_INPUT_CHUNK;
+    float* s_partial = reinterpret_cast<float*>(s_input + staged_k);
 
     const int threads_per_row = WARPS_PER_ROW * 32;
     const int row_group = threadIdx.x / threads_per_row;
@@ -73,17 +69,34 @@ __global__ void gemv_hq41k_kernel(
     const int warp_in_group = local_tid / 32;
     const int lane_id = local_tid % 32;
     const int row = blockIdx.x * ROWS_PER_BLOCK + row_group;
-    if (row >= N) return;
-
-    float* s_partial = reinterpret_cast<float*>(s_input + K);
     const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
-    const uint8_t* row_weights = weights + (size_t)row * total_sb * HQ41K_BLOCK_SIZE;
+    const uint8_t* row_weights = row < N
+        ? weights + (size_t)row * total_sb * HQ41K_BLOCK_SIZE
+        : weights;
     float acc = 0.0f;
 
-    for (int sb = warp_in_group; sb < total_sb; sb += WARPS_PER_ROW) {
-        const int sb_base_k = sb * SUPER_BLOCK_SIZE;
-        const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
-            row_weights + (size_t)sb * HQ41K_BLOCK_SIZE);
+    // K puede superar la capacidad de shared (Qwen2.5-Coder: 18944). Cada
+    // ventana se copia una vez por bloque y conserva el mismo orden de suma
+    // por warp que el camino de una sola ventana.
+    for (int chunk_base = 0; chunk_base < K; chunk_base += COMPACT_INPUT_CHUNK) {
+        const int chunk_len = min(COMPACT_INPUT_CHUNK, K - chunk_base);
+        const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
+        const float4* src = reinterpret_cast<const float4*>(input + chunk_base);
+        float4* dst = reinterpret_cast<float4*>(s_input);
+        const int n_vec = chunk_len / 8;
+        for (int i = threadIdx.x; i < n_vec; i += BS) dst[i] = src[i];
+        for (int i = n_vec * 8 + threadIdx.x; i < chunk_len; i += BS)
+            s_input[i] = input[chunk_base + i];
+        __syncthreads();
+
+        const int sb_begin = chunk_base / SUPER_BLOCK_SIZE;
+        const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) /
+                           SUPER_BLOCK_SIZE;
+        for (int sb = sb_begin + warp_in_group;
+             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+            const int sb_base_k = sb * SUPER_BLOCK_SIZE;
+            const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
+                row_weights + (size_t)sb * HQ41K_BLOCK_SIZE);
 
         uint32_t h0 = blk32[0];
         uint32_t h1 = blk32[1];
@@ -102,9 +115,10 @@ __global__ void gemv_hq41k_kernel(
 
         // Payload: word 10 + lane (bytes 40..168)
         uint32_t packed = blk32[10 + lane_id];
-        const int k_base = sb_base_k + lane_id * GROUP_SIZE;
-        if (k_base + GROUP_SIZE <= K) {
-            const half2* in2 = reinterpret_cast<const half2*>(s_input + k_base);
+        const int global_k_base = sb_base_k + lane_id * GROUP_SIZE;
+        const int local_k_base = global_k_base - chunk_base;
+        if (global_k_base + GROUP_SIZE <= K) {
+            const half2* in2 = reinterpret_cast<const half2*>(s_input + local_k_base);
             #pragma unroll
             for (int i = 0; i < 4; i++) {
                 uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
@@ -120,12 +134,14 @@ __global__ void gemv_hq41k_kernel(
                 uint8_t byte_val = (packed >> (i * 8)) & 0xFF;
                 float w0 = fmaf(float((byte_val >> 4) & 0x0F), scoeff, min_f);
                 float w1 = fmaf(float(byte_val & 0x0F), scoeff, min_f);
-                const int k0 = k_base + i * 2;
+                const int k0 = global_k_base + i * 2;
                 const int k1 = k0 + 1;
-                if (k0 < K) acc = fmaf(w0, __half2float(s_input[k0]), acc);
-                if (k1 < K) acc = fmaf(w1, __half2float(s_input[k1]), acc);
+                if (k0 < K) acc = fmaf(w0, __half2float(s_input[k0 - chunk_base]), acc);
+                if (k1 < K) acc = fmaf(w1, __half2float(s_input[k1 - chunk_base]), acc);
             }
         }
+        }
+        __syncthreads();
     }
 
     #pragma unroll
@@ -145,7 +161,7 @@ __global__ void gemv_hq41k_kernel(
         #pragma unroll
         for (int offset = WARPS_PER_ROW / 2; offset > 0; offset >>= 1)
             val += __shfl_down_sync(RED_MASK, val, offset);
-        if (lane_id == 0) output[row] = __float2half(val);
+        if (lane_id == 0 && row < N) output[row] = __float2half(val);
     }
 }
 
@@ -165,15 +181,8 @@ __global__ void gemv_hq51k_kernel(
 ) {
     using namespace hqs;
     extern __shared__ half s_input[];
-    {
-        const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
-        const float4* src = reinterpret_cast<const float4*>(input);
-        float4* dst = reinterpret_cast<float4*>(s_input);
-        const int n_vec = K / 8;
-        for (int i = threadIdx.x; i < n_vec; i += BS) dst[i] = src[i];
-        for (int i = n_vec * 8 + threadIdx.x; i < K; i += BS) s_input[i] = input[i];
-    }
-    __syncthreads();
+    const int staged_k = K < COMPACT_INPUT_CHUNK ? K : COMPACT_INPUT_CHUNK;
+    float* s_partial = reinterpret_cast<float*>(s_input + staged_k);
 
     const int threads_per_row = WARPS_PER_ROW * 32;
     const int row_group = threadIdx.x / threads_per_row;
@@ -181,17 +190,31 @@ __global__ void gemv_hq51k_kernel(
     const int warp_in_group = local_tid / 32;
     const int lane_id = local_tid % 32;
     const int row = blockIdx.x * ROWS_PER_BLOCK + row_group;
-    if (row >= N) return;
-
-    float* s_partial = reinterpret_cast<float*>(s_input + K);
     const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
-    const uint8_t* row_weights = weights + (size_t)row * total_sb * HQ51K_BLOCK_SIZE;
+    const uint8_t* row_weights = row < N
+        ? weights + (size_t)row * total_sb * HQ51K_BLOCK_SIZE
+        : weights;
     float acc = 0.0f;
 
-    for (int sb = warp_in_group; sb < total_sb; sb += WARPS_PER_ROW) {
-        const int sb_base_k = sb * SUPER_BLOCK_SIZE;
-        const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
-            row_weights + (size_t)sb * HQ51K_BLOCK_SIZE);
+    for (int chunk_base = 0; chunk_base < K; chunk_base += COMPACT_INPUT_CHUNK) {
+        const int chunk_len = min(COMPACT_INPUT_CHUNK, K - chunk_base);
+        const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
+        const float4* src = reinterpret_cast<const float4*>(input + chunk_base);
+        float4* dst = reinterpret_cast<float4*>(s_input);
+        const int n_vec = chunk_len / 8;
+        for (int i = threadIdx.x; i < n_vec; i += BS) dst[i] = src[i];
+        for (int i = n_vec * 8 + threadIdx.x; i < chunk_len; i += BS)
+            s_input[i] = input[chunk_base + i];
+        __syncthreads();
+
+        const int sb_begin = chunk_base / SUPER_BLOCK_SIZE;
+        const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) /
+                           SUPER_BLOCK_SIZE;
+        for (int sb = sb_begin + warp_in_group;
+             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+            const int sb_base_k = sb * SUPER_BLOCK_SIZE;
+            const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
+                row_weights + (size_t)sb * HQ51K_BLOCK_SIZE);
 
         uint32_t h0 = blk32[0];
         uint32_t h1 = blk32[1];
@@ -217,29 +240,32 @@ __global__ void gemv_hq51k_kernel(
         uint32_t lo = __funnelshift_r(pw0, pw1, sh);  // bits 0..31 del paquete
         uint32_t hi = pw1 >> sh;                      // bits 32..39
 
-        const int k_base = sb_base_k + lane_id * GROUP_SIZE;
-        if (k_base + GROUP_SIZE <= K) {
+        const int global_k_base = sb_base_k + lane_id * GROUP_SIZE;
+        const int local_k_base = global_k_base - chunk_base;
+        if (global_k_base + GROUP_SIZE <= K) {
             #pragma unroll
             for (int i = 0; i < 7; i++) {
                 uint32_t q = __funnelshift_r(lo, hi, i * 5) & 0x1F;
                 acc = fmaf(fmaf(float(q), scoeff, min_f),
-                           __half2float(s_input[k_base + i]), acc);
+                           __half2float(s_input[local_k_base + i]), acc);
             }
             uint32_t q7 = (hi >> 3) & 0x1F;
             acc = fmaf(fmaf(float(q7), scoeff, min_f),
-                       __half2float(s_input[k_base + 7]), acc);
+                       __half2float(s_input[local_k_base + 7]), acc);
         } else {
             #pragma unroll
             for (int i = 0; i < 8; i++) {
                 uint32_t q = (i < 7) ? (__funnelshift_r(lo, hi, i * 5) & 0x1F)
                                      : ((hi >> 3) & 0x1F);
-                int k_idx = k_base + i;
+                int k_idx = global_k_base + i;
                 if (k_idx < K) {
                     acc = fmaf(fmaf(float(q), scoeff, min_f),
-                               __half2float(s_input[k_idx]), acc);
+                               __half2float(s_input[k_idx - chunk_base]), acc);
                 }
             }
         }
+        }
+        __syncthreads();
     }
 
     #pragma unroll
@@ -259,7 +285,7 @@ __global__ void gemv_hq51k_kernel(
         #pragma unroll
         for (int offset = WARPS_PER_ROW / 2; offset > 0; offset >>= 1)
             val += __shfl_down_sync(RED_MASK, val, offset);
-        if (lane_id == 0) output[row] = __float2half(val);
+        if (lane_id == 0 && row < N) output[row] = __float2half(val);
     }
 }
 
@@ -270,32 +296,32 @@ __global__ void gemv_hq51k_kernel(
 // smem: input y parciales de la reducción entre warps.
 static void launch_hq41k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCA_RPB - 1) / CCA_RPB;
-    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
     gemv_hq41k_kernel<CCA_WPR, CCA_RPB><<<nb, CCA_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq41k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCB_RPB - 1) / CCB_RPB;
-    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
     gemv_hq41k_kernel<CCB_WPR, CCB_RPB><<<nb, CCB_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq41k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCC_RPB - 1) / CCC_RPB;
-    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
     gemv_hq41k_kernel<CCC_WPR, CCC_RPB><<<nb, CCC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq51k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCA_RPB - 1) / CCA_RPB;
-    size_t smem = K * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCA_RPB * CCA_WPR * sizeof(float);
     gemv_hq51k_kernel<CCA_WPR, CCA_RPB><<<nb, CCA_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq51k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCB_RPB - 1) / CCB_RPB;
-    size_t smem = K * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCB_RPB * CCB_WPR * sizeof(float);
     gemv_hq51k_kernel<CCB_WPR, CCB_RPB><<<nb, CCB_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 static void launch_hq51k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
     int nb = (N + CCC_RPB - 1) / CCC_RPB;
-    size_t smem = K * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
+    size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
     gemv_hq51k_kernel<CCC_WPR, CCC_RPB><<<nb, CCC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
 
@@ -419,7 +445,7 @@ void launch_matmul_hq41k(
     const half* input, const uint8_t* weights, half* output,
     int M, int K, int N, cudaStream_t stream
 ) {
-    if (M == 1 && K <= COMPACT_MAX_K_SHARED) {
+    if (M == 1) {
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq41k.find(key);
@@ -450,7 +476,8 @@ void launch_matmul_hq41k(
             case 2: launch_hq41k_C(input, weights, output, K, N, stream); break;
         }
     } else if (M >= COMPACT_GEMM_THRESHOLD) {
-        // Batch real: dequant una vez + tensor cores
+        // Batch real: dequant una vez + tensor cores. Decode (M=1), incluso
+        // con K ancho, nunca materializa la matriz completa en fp16.
         launch_matmul_hq41k_cublas(input, weights, output, M, K, N, stream);
     } else {
         for (int m = 0; m < M; m++) {
@@ -463,7 +490,7 @@ void launch_matmul_hq51k(
     const half* input, const uint8_t* weights, half* output,
     int M, int K, int N, cudaStream_t stream
 ) {
-    if (M == 1 && K <= COMPACT_MAX_K_SHARED) {
+    if (M == 1) {
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq51k.find(key);
@@ -485,7 +512,6 @@ void launch_matmul_hq51k(
             case 2: launch_hq51k_C(input, weights, output, K, N, stream); break;
         }
     } else if (M >= COMPACT_GEMM_THRESHOLD) {
-        // Batch real: dequant una vez + tensor cores
         launch_matmul_hq51k_cublas(input, weights, output, M, K, N, stream);
     } else {
         for (int m = 0; m < M; m++) {

@@ -167,6 +167,11 @@ target_link_libraries(test_hq31k PRIVATE helios-engine)
 add_executable(test_hq62_embedding tests/test_hq62_embedding.cu)
 target_link_libraries(test_hq62_embedding PRIVATE helios-engine)
 
+# Compact HQS matrices wider than one shared-memory window must keep using the
+# native chunked GEMV (Qwen2.5-Coder down_proj: K=18944).
+add_executable(test_hqs_wide tests/test_hqs_wide.cu)
+target_link_libraries(test_hqs_wide PRIVATE helios-engine)
+
 # HNF Loader test
 add_executable(test_hnf_loader tests/test_hnf_loader.cpp)
 target_link_libraries(test_hnf_loader PRIVATE helios-engine)
@@ -236,6 +241,7 @@ add_test(NAME EngineTest COMMAND test_engine)
 add_test(NAME KernelTest COMMAND test_kernels)
 add_test(NAME HQ31KTest COMMAND test_hq31k)
 add_test(NAME HQ62EmbeddingTest COMMAND test_hq62_embedding)
+add_test(NAME HqsWideKTest COMMAND test_hqs_wide)
 add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
@@ -302,6 +308,11 @@ target_link_libraries(test_multimodal PRIVATE helios-engine)
 # Modal generation test (any modal)
 add_executable(test_generate_modal test_generate_modal.cpp)
 target_link_libraries(test_generate_modal PRIVATE helios-engine)
+
+# Prueba manual de relevo secuencial entre los bloques TEXT y CODE_EXEC de un
+# mismo HNF. Conserva el KV de TEXT mientras CODE ocupa la GPU.
+add_executable(text_code_relay tools/text_code_relay.cpp)
+target_link_libraries(text_code_relay PRIVATE helios-engine)
 
 # ========== SMOKE TEST (progresivo, 4 fases) ==========
 add_executable(test_smoke test_smoke.cpp)
