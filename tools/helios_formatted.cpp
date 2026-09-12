@@ -6,7 +6,9 @@
 #include <cstdio>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <string>
+#include <vector>
 
 int main(int argc, char** argv) {
     if (argc!=4) return 2;
@@ -19,10 +21,26 @@ int main(int argc, char** argv) {
     std::printf("READY\n"); std::fflush(stdout);
     std::string header;
     while (std::getline(std::cin,header)) {
-        const size_t n=std::stoul(header);
+        // Cabecera: "<bytes_prompt>" o "<bytes_prompt> <bytes_pixeles> <ancho> <alto> <stride>".
+        // La forma corta sigue siendo valida: un turno sin imagen no cambia.
+        size_t n=0, px=0; unsigned w=0,h=0,stride=0;
+        {
+            std::istringstream campos(header);
+            if(!(campos>>n)) return 5;
+            if(campos>>px){ if(!(campos>>w>>h>>stride)) return 5; }
+        }
         if(n>1024*1024) return 3;
+        if(px>64u*1024u*1024u) return 6;
         std::string prompt(n,'\0'); std::cin.read(prompt.data(),n);
         if(static_cast<size_t>(std::cin.gcount())!=n) return 4;
+        std::vector<unsigned char> pixeles(px);
+        if(px){
+            std::cin.read(reinterpret_cast<char*>(pixeles.data()),
+                          static_cast<std::streamsize>(px));
+            if(static_cast<size_t>(std::cin.gcount())!=px) return 4;
+        }
+        std::vector<helios::InferenceSession::ImageAttachment> adjuntos;
+        if(px) adjuntos.push_back({pixeles.data(),pixeles.size(),w,h,stride});
         session.reset();
         std::atomic<bool> stop{false};
         std::string output;
@@ -32,7 +50,7 @@ int main(int argc, char** argv) {
         helios::InferenceSession::TurnStats stats;
         helios::InferenceSession::FinishReason reason;
         auto t=std::chrono::steady_clock::now();
-        const bool ok=session.run_turn({{"user",prompt}}, {},gen,
+        const bool ok=session.run_turn({{"user",prompt}}, adjuntos,gen,
             [&](const std::string& s){output+=s;
                 },
             {},{},stop,&stats,&reason,&code,&error);

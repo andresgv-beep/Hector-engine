@@ -26,7 +26,16 @@
 namespace helios {
 namespace {
 
+// Tanda del prefill de TEXTO. Trocear no es una limitación: cada tanda atiende
+// al KV ya acumulado, así que subirlo vuelve la atención cuadrática dentro del
+// chunk y encarece el prefill. Medido: 2600 tokens pasan de ~4 s a ~13 s con 4096.
 constexpr uint32_t kPrefillChunk = 512;
+// Techo del turno CON IMAGEN, que el adaptador prefillea de una vez y no puede
+// trocear. Es independiente del anterior: los dos caminos están separados en
+// run_turn. Solo comparten los buffers, dimensionados al mayor de los dos.
+constexpr uint32_t kMultimodalPrefill = 6144;
+constexpr uint32_t kScratchTokens =
+    kPrefillChunk > kMultimodalPrefill ? kPrefillChunk : kMultimodalPrefill;
 
 // Un fragmento solo se emite cuando es UTF-8 completo. El protocolo lo mete
 // en una cadena JSON, y un multibyte partido la invalida — ya nos mordió una
@@ -367,14 +376,14 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         // todas las sesiones, y por eso los turnos van en serie.
         s.arch = s.gb.detect_architecture(*s.engine, "text");
         s.engine->tensors().allocate_and_register(
-            "input_tokens", {1, kPrefillChunk}, dtype::INT32());
+            "input_tokens", {1, kScratchTokens}, dtype::INT32());
         if (s.is_gemma4) {
             s.gb.allocate_gemma4_scratch(*s.engine, s.model_config,
                                          s.loader.gemma4_config(), s.arch,
-                                         1, kPrefillChunk);
+                                         1, kScratchTokens);
         } else {
             s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
-                                  1, kPrefillChunk);
+                                  1, kScratchTokens);
         }
 
         // Mismos valores por defecto que el oraculo: esto no cambia conducta.
@@ -391,7 +400,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             std::string adapter_error;
             s.multimodal = create_multimodal_adapter(
                 vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
-                kPrefillChunk, &adapter_error);
+                kMultimodalPrefill, &adapter_error);
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
                 return nullptr;
@@ -525,9 +534,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         }
         stops.push_back(*id);
     }
-    if (gen.preformatted && (messages.size() != 1 || !attachments.empty())) {
+    if (gen.preformatted && messages.size() != 1) {
         *error_code = "invalid_preformatted";
-        *error = "prompt preformateado requiere un mensaje y ningún adjunto";
+        *error = "prompt preformateado requiere exactamente un mensaje";
         return false;
     }
     auto ids = gen.preformatted
@@ -544,6 +553,26 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         *error_code = "unsupported_attachment";
         *error = "este modelo no declara adaptador visual";
         return false;
+    }
+    // Con prompt preformateado el marcador lo coloca quien renderiza la plantilla,
+    // y aquí ya no hay mensajes que anotar. Se comprueba en vez de suponerlo: sin
+    // marcador el prefill visual falla en silencio aunque los pixeles esten bien.
+    if (gen.preformatted && !attachments.empty()) {
+        if (!s.loader.has_gemma4_vision_config()) {
+            *error_code = "unsupported_attachment";
+            *error = "el modelo no declara configuracion visual";
+            return false;
+        }
+        const int32_t marker = s.loader.gemma4_vision_config().image_token_id;
+        const size_t marcadores = static_cast<size_t>(
+            std::count(ids.begin(), ids.end(), marker));
+        if (marcadores != attachments.size()) {
+            *error_code = "image_marker_mismatch";
+            *error = "el prompt preformateado trae " + std::to_string(marcadores) +
+                     " marcadores de imagen y el turno " +
+                     std::to_string(attachments.size()) + " adjuntos";
+            return false;
+        }
     }
     if (antes + ids.size() + 8 >= s.kv_config.max_seq_len) {
         *error_code = "context_full";
