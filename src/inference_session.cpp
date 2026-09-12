@@ -14,6 +14,7 @@
 #include "engine.hpp"
 #include "graph_builder.hpp"
 #include "gemma4_kv_cache.hpp"
+#include <algorithm>
 #include "hnf_loader.hpp"
 #include "htf_tokenizer.hpp"
 #include "kv_cache.hpp"
@@ -513,8 +514,25 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     const uint32_t antes = s.position();
     stats->cache_position_before = antes;
     stats->cache_position = antes;
+    stats->stopped_on_token = false;
 
-    auto ids = s.encode(messages, !attachments.empty(), error_code, error);
+    std::vector<int32_t> stops;
+    for (const auto& token : gen.stop_tokens) {
+        auto id = s.tokenizer->token_to_id(token);
+        if (!id) {
+            *error_code = "invalid_stop_token"; *error = "token de parada inexistente";
+            return false;
+        }
+        stops.push_back(*id);
+    }
+    if (gen.preformatted && (messages.size() != 1 || !attachments.empty())) {
+        *error_code = "invalid_preformatted";
+        *error = "prompt preformateado requiere un mensaje y ningún adjunto";
+        return false;
+    }
+    auto ids = gen.preformatted
+        ? s.tokenizer->encode(messages[0].content, false, false)
+        : s.encode(messages, !attachments.empty(), error_code, error);
     if (ids.empty()) {
         if (error_code->empty()) {
             *error_code = "empty_turn";
@@ -613,6 +631,11 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 *reason = FinishReason::Eos;
                 break;
             }
+            if (std::find(stops.begin(), stops.end(), next) != stops.end()) {
+                stats->stopped_on_token = true;
+                *reason = FinishReason::Stop;
+                break;
+            }
             if (s.position() + 4 >= s.kv_config.max_seq_len) {
                 *reason = FinishReason::Stop;
                 break;
@@ -668,7 +691,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         // runtime corta. Sin esto la continuidad se rompe en el turno 2 aunque
         // el primero parezca perfecto.
         const bool forzado = (*reason != FinishReason::Eos) || think_cut;
-        if ((s.is_gemma4 && natural_stop) || forzado) {
+        if (gen.close_turn && ((s.is_gemma4 && natural_stop) || forzado)) {
             if (s.position() + 2 < s.kv_config.max_seq_len) {
                 (void)s.forward_one(s.turn_end, stream);
                 for (int32_t t : s.tokenizer->encode("\n", false, false)) {

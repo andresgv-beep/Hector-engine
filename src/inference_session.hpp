@@ -88,6 +88,11 @@ public:
         float temperature = 0.7f;
         int max_visible_tokens = 512;
         int max_thinking_tokens = 400;
+        // Opt-in para adaptadores externos: prompt ya formateado y paradas token.
+        // No interpreta herramientas ni decide qué acción debe ejecutarse.
+        bool preformatted = false;
+        bool close_turn = true;
+        std::vector<std::string> stop_tokens;
     };
 
     // Adjunto RGB8 prestado: el motor recibe píxeles ya decodificados. PNG y
@@ -104,6 +109,7 @@ public:
     static const char* finish_reason_name(FinishReason r);
 
     struct TurnStats {
+        bool stopped_on_token = false;
         uint32_t prefill_tokens = 0;
         uint32_t generated_tokens = 0;
         uint32_t thinking_tokens = 0;
