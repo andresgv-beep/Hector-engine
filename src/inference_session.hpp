@@ -92,6 +92,11 @@ public:
         // No interpreta herramientas ni decide qué acción debe ejecutarse.
         bool preformatted = false;
         bool close_turn = true;
+        // Reaprovechar el prefijo que ya está en el KV en vez de reprocesarlo.
+        // Con prompt preformateado el adaptador reenvía la conversación entera
+        // cada vez: sin esto, la segunda generación de un turno vuelve a digerir
+        // los cinco mil tokens que acaba de leer para añadir mil.
+        bool reuse_prefix = false;
         std::vector<std::string> stop_tokens;
     };
 
@@ -117,6 +122,8 @@ public:
         double decode_ms = 0.0;
         uint32_t cache_position_before = 0;
         uint32_t cache_position = 0;
+        // Tokens que no hubo que volver a prefillear por estar ya en el KV.
+        uint32_t prefill_reused = 0;
     };
 
     // Fragmento de texto VISIBLE, siempre UTF-8 completo: el protocolo lo

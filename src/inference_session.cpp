@@ -147,6 +147,13 @@ struct InferenceSession::Impl {
     CommandBuffer decode_cb;
     bool decode_cb_built = false;
 
+    // Los tokens que hay AHORA MISMO en el KV, en orden. Sirve para saber qué
+    // parte de un prompt nuevo ya está procesada. Se mantiene junto a position():
+    // si alguna vez dejan de coincidir, se deja de reaprovechar en vez de
+    // arriesgar un contexto corrupto.
+    std::vector<int32_t> kv_tokens;
+    bool kv_tracked = true;
+
     // Prefijo propio en el registro de tensores del motor. Sin esto, la
     // segunda sesion registraria "_kv.layer0.k" encima de la primera y las dos
     // escribirian en el mismo cache: no serian dos conversaciones, seria una
@@ -171,9 +178,19 @@ struct InferenceSession::Impl {
     }
     void rewind(uint32_t p) {
         if (is_gemma4) gemma_kv_cache.rewind_to(p); else kv_cache.rewind_to(p);
+        if (kv_tokens.size() > p) kv_tokens.resize(p);
     }
     void clear() {
         if (is_gemma4) gemma_kv_cache.reset(); else kv_cache.reset();
+        kv_tokens.clear();
+        kv_tracked = true;
+    }
+    // El seguimiento solo vale si describe el KV entero. La ruta visual expande
+    // el marcador a soft tokens que no son del tokenizador, así que ahí se
+    // renuncia en vez de llevar una cuenta que ya no cuadra.
+    void untrack() { kv_tracked = false; kv_tokens.clear(); }
+    bool prefix_usable() const {
+        return kv_tracked && kv_tokens.size() == position();
     }
 
     // Codifica los mensajes NUEVOS como fragmento incremental: la historia ya
@@ -280,6 +297,7 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
         engine->execute_graph_replay(decode_cb);
     }
     advance(1);
+    if (kv_tracked) kv_tokens.push_back(token);
     auto* logits = gb.get_logits(*engine);
     return sampler.sample((const half*)logits->ptr, model_config.vocab_size(),
                           sample_config, stream);
@@ -312,6 +330,8 @@ int32_t InferenceSession::Impl::forward_batch(const std::vector<int32_t>& ids,
         engine->execute(pcb);
         engine->sync();
         advance(static_cast<uint32_t>(n));
+        if (kv_tracked) kv_tokens.insert(kv_tokens.end(), ids.begin() + done,
+                                         ids.begin() + done + n);
         auto* logits = gb.get_logits(*engine);
         next = sampler.sample((const half*)logits->ptr, model_config.vocab_size(),
                               sample_config, stream);
@@ -539,7 +559,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         *error = "prompt preformateado requiere exactamente un mensaje";
         return false;
     }
-    auto ids = gen.preformatted
+    std::vector<int32_t> ids = gen.preformatted
         ? s.tokenizer->encode(messages[0].content, false, false)
         : s.encode(messages, !attachments.empty(), error_code, error);
     if (ids.empty()) {
@@ -574,7 +594,38 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             return false;
         }
     }
-    if (antes + ids.size() + 8 >= s.kv_config.max_seq_len) {
+    // Reaprovechar lo ya procesado. Se compara en TOKENS y no en texto: partir la
+    // cadena y tokenizar cada trozo aparte puede dar tokens distintos en la
+    // costura, y ese error no se ve, se nota semanas después. Aquí se tokeniza el
+    // prompt entero igual que siempre y solo se deja de alimentar el prefijo que
+    // ya coincide, retrocediendo el KV a donde dejan de parecerse.
+    uint32_t reutilizados = 0;
+    if (gen.preformatted && gen.reuse_prefix && attachments.empty() && s.prefix_usable()) {
+        const size_t tope = std::min(s.kv_tokens.size(), ids.size());
+        size_t comun = 0;
+        while (comun < tope && s.kv_tokens[comun] == ids[comun]) comun++;
+        // Dejar el KV vacío no aporta nada y complica el resto; con cero comunes
+        // se reinicia como siempre.
+        if (comun > 0) {
+            s.rewind(static_cast<uint32_t>(comun));
+            ids.erase(ids.begin(), ids.begin() + static_cast<long>(comun));
+            reutilizados = static_cast<uint32_t>(comun);
+        } else {
+            s.clear();
+        }
+        // Un prompt que coincide entero no deja nada que procesar y el turno no
+        // podría arrancar: se devuelve el último token para que el decode siga.
+        if (ids.empty()) {
+            ids.push_back(s.kv_tokens.back());
+            s.rewind(static_cast<uint32_t>(s.kv_tokens.size() - 1));
+            reutilizados--;
+        }
+    }
+    stats->prefill_reused = reutilizados;
+    const uint32_t base = s.position();
+    stats->cache_position_before = base;
+    stats->cache_position = base;
+    if (base + ids.size() + 8 >= s.kv_config.max_seq_len) {
         *error_code = "context_full";
         *error = "el turno no cabe en el contexto restante";
         return false;
@@ -635,6 +686,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 return false;
             }
             s.advance(pr.sequence_tokens);
+            // Los soft tokens de la imagen no son del tokenizador: a partir de
+            // aquí no se puede afirmar qué hay en el KV, así que no se reaprovecha.
+            s.untrack();
             auto* logits = s.gb.get_logits(*s.engine);
             next = s.sampler.sample(static_cast<const half*>(logits->ptr),
                                     s.model_config.vocab_size(),
@@ -739,7 +793,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         stats->thinking_tokens = thinking;
         // §4: si no llegó a emitir texto, el turno no deja rastro; si ya
         // emitió, se conserva lo emitido y se reporta la posición real.
-        if (visible.empty()) s.rewind(antes);
+        // Al suelo REAL de este prefill, que con reaprovechamiento ya no es
+        // `antes`: retroceder más arriba dejaría en el KV tokens que se quitaron.
+        if (visible.empty()) s.rewind(base);
         stats->cache_position = s.position();
         return false;
     }

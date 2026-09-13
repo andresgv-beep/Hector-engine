@@ -41,12 +41,19 @@ int main(int argc, char** argv) {
         }
         std::vector<helios::InferenceSession::ImageAttachment> adjuntos;
         if(px) adjuntos.push_back({pixeles.data(),pixeles.size(),w,h,stride});
-        session.reset();
+        // Antes se reseteaba siempre, y con el prompt entero reenviado en cada
+        // generación eso obligaba a reprocesar el mismo preámbulo una y otra vez:
+        // medido, el 86% del turno era prefill y el 83% de la segunda generación
+        // era texto idéntico al de la primera. Ahora la sesión compara tokens y
+        // solo procesa lo nuevo. Con imagen sí se reinicia: el marcador visual se
+        // expande a soft tokens y el prefijo deja de ser comparable.
         std::atomic<bool> stop{false};
         std::string output;
         helios::InferenceSession::GenConfig gen;
         gen.temperature=0; gen.max_visible_tokens=1536; gen.max_thinking_tokens=0;
         gen.preformatted=true; gen.close_turn=false; gen.stop_tokens={argv[3]};
+        gen.reuse_prefix=true;
+        if(px) session.reset();
         helios::InferenceSession::TurnStats stats;
         helios::InferenceSession::FinishReason reason;
         auto t=std::chrono::steady_clock::now();
@@ -56,8 +63,9 @@ int main(int argc, char** argv) {
             {},{},stop,&stats,&reason,&code,&error);
         auto ms=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-t).count();
         if(!ok) output="ERROR: "+code+" "+error;
-        std::printf("%zu %ld %u %d %s\n",output.size(),ms,stats.generated_tokens,
-                    stats.stopped_on_token?1:0,ok?helios::InferenceSession::finish_reason_name(reason):"error");
+        std::printf("%zu %ld %u %d %s %u %u\n",output.size(),ms,stats.generated_tokens,
+                    stats.stopped_on_token?1:0,ok?helios::InferenceSession::finish_reason_name(reason):"error",
+                    stats.prefill_tokens,stats.prefill_reused);
         std::fwrite(output.data(),1,output.size(),stdout);std::fflush(stdout);
     }
 }
