@@ -13,19 +13,31 @@
 int main(int argc, char** argv) {
     if (argc!=4) return 2;
     std::cout.rdbuf(std::cerr.rdbuf());
-    helios::InferenceSession session;
     std::string error, code;
     helios::Model::Config cfg;
     cfg.hnf_path=argv[1]; cfg.max_seq_len=std::stoul(argv[2]);
-    if (!session.load(cfg,&error)) { std::cerr<<error; return 1; }
+    auto modelo = helios::Model::load(cfg,&error);
+    if (!modelo) { std::cerr<<error; return 1; }
+    // Dos sesiones sobre los MISMOS pesos. La auxiliar existe para que un
+    // preámbulo o una extracción —prompt corto y propio, que no es la
+    // conversación— no pise el KV de la conversación y la deje sin prefijo que
+    // reaprovechar. Su ventana es pequeña porque esos prompts lo son.
+    helios::InferenceSession session, auxiliar;
+    if (!session.attach(modelo,&error)) { std::cerr<<error; return 1; }
+    if (!auxiliar.attach(modelo,&error,2048)) { std::cerr<<error; return 1; }
     std::printf("READY\n"); std::fflush(stdout);
     std::string header;
     while (std::getline(std::cin,header)) {
         // Cabecera: "<bytes_prompt>" o "<bytes_prompt> <bytes_pixeles> <ancho> <alto> <stride>".
         // La forma corta sigue siendo valida: un turno sin imagen no cambia.
-        size_t n=0, px=0; unsigned w=0,h=0,stride=0;
+        // Un '*' delante del tamano marca una generacion AUXILIAR: prompt propio y
+        // corto, que no pertenece a la conversacion. Se ejecuta y se deshace, porque
+        // si no pisa el KV y deja al turno siguiente sin prefijo que reaprovechar.
+        size_t n=0, px=0; unsigned w=0,h=0,stride=0; bool es_auxiliar=false;
         {
-            std::istringstream campos(header);
+            std::string cabeza=header;
+            if(!cabeza.empty() && cabeza[0]=='*'){ es_auxiliar=true; cabeza.erase(0,1); }
+            std::istringstream campos(cabeza);
             if(!(campos>>n)) return 5;
             if(campos>>px){ if(!(campos>>w>>h>>stride)) return 5; }
         }
@@ -53,11 +65,12 @@ int main(int argc, char** argv) {
         gen.temperature=0; gen.max_visible_tokens=1536; gen.max_thinking_tokens=0;
         gen.preformatted=true; gen.close_turn=false; gen.stop_tokens={argv[3]};
         gen.reuse_prefix=true;
-        if(px) session.reset();
+        auto& s_activa = es_auxiliar ? auxiliar : session;
+        if(px) s_activa.reset();
         helios::InferenceSession::TurnStats stats;
         helios::InferenceSession::FinishReason reason;
         auto t=std::chrono::steady_clock::now();
-        const bool ok=session.run_turn({{"user",prompt}}, adjuntos,gen,
+        const bool ok=s_activa.run_turn({{"user",prompt}}, adjuntos,gen,
             [&](const std::string& s){output+=s;
                 },
             {},{},stop,&stats,&reason,&code,&error);

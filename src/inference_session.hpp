@@ -154,7 +154,10 @@ public:
     // a la vez se pisarían las activaciones. Un cerrojo interno los serializa:
     // si dos hilos entran a la vez, uno espera. Correr de verdad en paralelo
     // pide scratch por sesión, y eso todavía no está.
-    bool attach(std::shared_ptr<Model> model, std::string* error);
+    // `max_seq_len` a 0 usa el del modelo. Una sesión auxiliar —preámbulos,
+    // extracciones— no necesita la ventana entera y su KV cuesta VRAM.
+    bool attach(std::shared_ptr<Model> model, std::string* error,
+                uint32_t max_seq_len = 0);
 
     const ModelInfo& info() const;
 

@@ -438,7 +438,8 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
     }
 }
 
-bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error) {
+bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
+                              uint32_t max_seq_len) {
     if (!model) { *error = "modelo nulo"; return false; }
     try {
         impl_ = std::make_unique<Impl>(std::move(model));
@@ -464,7 +465,8 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error) 
         s.kv_config.num_kv_heads = M.model_config.num_key_value_heads();
         s.kv_config.head_dim = M.model_config.head_dim();
         s.kv_config.max_batch_size = 1;
-        s.kv_config.max_seq_len = M.max_seq_len;
+        s.kv_config.max_seq_len = max_seq_len ? std::min(max_seq_len, M.max_seq_len)
+                                              : M.max_seq_len;
 
         if (s.is_gemma4) {
             if (!s.gemma_kv_cache.allocate(s.loader.gemma4_config(),
