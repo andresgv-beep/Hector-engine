@@ -323,7 +323,10 @@ struct Gemma4LayerConfigBin {
     float    rope_theta;
     float    partial_rotary_factor;
     int32_t  kv_share_group;         // -1 until sharing groups are assigned
-    uint32_t reserved;
+    // KV heads DE ESTA CAPA.  Gemma 4 «unified» mezcla GQA en las deslizantes
+    // con una sola KV head en las globales.  0 = el HNF es anterior a este
+    // campo y manda el valor global del TextModelConfig.
+    uint32_t num_kv_heads;
 };
 static_assert(sizeof(Gemma4LayerConfigBin) == 40,
               "Gemma4LayerConfigBin must be 40 bytes");
@@ -336,6 +339,11 @@ constexpr uint32_t GEMMA4_EXT_FLAG_LOGIT_SOFTCAP    = (1u << 2);
 constexpr uint32_t GEMMA4_EXT_FLAG_SHARED_KV        = (1u << 3);
 constexpr uint32_t GEMMA4_EXT_FLAG_DOUBLE_WIDE_MLP  = (1u << 4);
 constexpr uint32_t GEMMA4_EXT_FLAG_FOUR_NORM_BLOCK  = (1u << 5);
+
+// Flags de Gemma4LayerConfigBin.flags (por CAPA, no confundir con los EXT del
+// modelo).  Bit 0: la capa no tiene v_proj y reutiliza la proyeccion K como V
+// (`attention_k_eq_v`).
+constexpr uint32_t GEMMA4_LAYER_FLAG_K_EQ_V = (1u << 0);
 
 constexpr uint32_t GEMMA4_VISION_FLAG_CLIPPED_LINEARS  = (1u << 0);
 constexpr uint32_t GEMMA4_VISION_FLAG_STANDARDIZE      = (1u << 1);
@@ -364,8 +372,14 @@ struct Gemma4LayerConfig {
     float rope_theta = 10000.0f;
     float partial_rotary_factor = 1.0f;
     int32_t kv_share_group = -1;
+    uint32_t num_kv_heads = 0;   // 0 = usar el valor global del modelo
 
     bool is_global_attention() const { return attention_kind == 1; }
+    bool k_eq_v() const { return (flags & GEMMA4_LAYER_FLAG_K_EQ_V) != 0; }
+    /// KV heads efectivos: los de la capa si el HNF los trae, si no el global.
+    uint32_t kv_heads_or(uint32_t global) const {
+        return num_kv_heads != 0 ? num_kv_heads : global;
+    }
 };
 
 struct Gemma4Config {

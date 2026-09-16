@@ -1280,6 +1280,7 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
         layer.rope_theta = record.rope_theta;
         layer.partial_rotary_factor = record.partial_rotary_factor;
         layer.kv_share_group = record.kv_share_group;
+        layer.num_kv_heads = record.num_kv_heads;
         parsed.layers.push_back(layer);
     }
 

@@ -324,7 +324,9 @@ int main(int argc, char** argv) {
     
     // 2d. Validate weights
     std::cout << std::endl << "  [2d] Validando pesos..." << std::endl;
-    std::string missing = builder.validate_weights(engine, effective_config, arch);
+    std::string missing = builder.validate_weights(
+        engine, effective_config, arch,
+        loader.has_gemma4_config() ? &loader.gemma4_config() : nullptr);
     if (!missing.empty()) {
         print_fail("Pesos faltantes: " + missing);
         print_info("Esto puede indicar que el conversor no generó todos los tensores necesarios,");

@@ -390,10 +390,14 @@ public:
     // VALIDATION
     // ========================================================================
     
+    /// `gemma` es opcional: cuando se pasa, las capas con attention_k_eq_v
+    /// dejan de exigir v_proj (no lo tienen, reutilizan k_proj).  Sin el, el
+    /// comportamiento es exactamente el de siempre.
     std::string validate_weights(
         const Engine& engine,
         const ModelConfig& config,
-        const ArchDescriptor& arch
+        const ArchDescriptor& arch,
+        const Gemma4Config* gemma = nullptr
     ) const;
     
     void print_scratch_info(const Engine& engine) const;

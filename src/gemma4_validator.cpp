@@ -211,7 +211,10 @@ Gemma4ValidationReport validate_gemma4_tensors(
         const Gemma4LayerConfig& layer = gemma.layers[layer_index];
         const std::string prefix = "text.layer" + std::to_string(layer_index) + '.';
         const uint64_t q_width64 = static_cast<uint64_t>(heads) * layer.head_dim;
-        const uint64_t kv_width64 = static_cast<uint64_t>(kv_heads) * layer.head_dim;
+        // KV heads de la capa cuando el HNF los trae (Gemma 4 «unified»); si no,
+        // el valor global de siempre.
+        const uint64_t kv_width64 =
+            static_cast<uint64_t>(layer.kv_heads_or(kv_heads)) * layer.head_dim;
         if (q_width64 > std::numeric_limits<uint32_t>::max() ||
             kv_width64 > std::numeric_limits<uint32_t>::max()) {
             add_error(report, "attention width exceeds uint32 in layer " +
@@ -224,7 +227,11 @@ Gemma4ValidationReport validate_gemma4_tensors(
 
         expect(prefix + "attn.q_proj.weight", {q_width, hidden}, "hq51k");
         expect(prefix + "attn.k_proj.weight", {kv_width, hidden}, "hq51k");
-        expect(prefix + "attn.v_proj.weight", {kv_width, hidden}, "hq51k");
+        // Una capa con attention_k_eq_v no tiene v_proj: exigirlo la marcaria
+        // como incompleta cuando en realidad esta bien formada.
+        if (!layer.k_eq_v()) {
+            expect(prefix + "attn.v_proj.weight", {kv_width, hidden}, "hq51k");
+        }
         expect(prefix + "attn.o_proj.weight", {hidden, q_width}, "hq51k");
         expect(prefix + "attn.q_norm.weight", {layer.head_dim}, "fp16");
         expect(prefix + "attn.k_norm.weight", {layer.head_dim}, "fp16");

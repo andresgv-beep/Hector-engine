@@ -56,6 +56,7 @@ public:
         source_layers_.resize(layers);
         offsets_.resize(layers);
         head_dims_.resize(layers);
+        kv_heads_.resize(layers);
 
         int32_t last_local = -1;
         int32_t last_global = -1;
@@ -67,11 +68,12 @@ public:
             source_layers_[i] = i;
             offsets_[i] = total_elements;
             head_dims_[i] = layer.head_dim;
+            kv_heads_[i] = layer.kv_heads_or(num_kv_heads);
             if (layer.is_global_attention()) last_global = static_cast<int32_t>(i);
             else last_local = static_cast<int32_t>(i);
 
             size_t stride = 0;
-            if (!checked_stride(layer.head_dim, stride) ||
+            if (!checked_stride(layer.head_dim, kv_heads_[i], stride) ||
                 total_elements > std::numeric_limits<size_t>::max() - stride) {
                 return fail_layout();
             }
@@ -81,12 +83,14 @@ public:
         for (uint32_t i = first_shared; i < layers; ++i) {
             const auto& layer = gemma.layers[i];
             const int32_t source = layer.is_global_attention() ? last_global : last_local;
-            if (source < 0 || layer.head_dim != gemma.layers[source].head_dim) {
+            if (source < 0 || layer.head_dim != gemma.layers[source].head_dim ||
+                layer.kv_heads_or(num_kv_heads) != kv_heads_[source]) {
                 return fail_layout();
             }
             source_layers_[i] = static_cast<uint32_t>(source);
             offsets_[i] = offsets_[source];
             head_dims_[i] = layer.head_dim;
+            kv_heads_[i] = kv_heads_[source];
         }
 
         if (total_elements == 0 ||
@@ -121,6 +125,7 @@ public:
         source_layers_.clear();
         offsets_.clear();
         head_dims_.clear();
+        kv_heads_.clear();
         num_kv_heads_ = 0;
         max_batch_size_ = 0;
         max_seq_len_ = 0;
@@ -135,7 +140,7 @@ public:
         }
         for (uint32_t layer = 0; layer < num_layers(); ++layer) {
             const std::vector<uint32_t> shape{
-                max_batch_size_, max_seq_len_, num_kv_heads_, head_dims_[layer]};
+                max_batch_size_, max_seq_len_, kv_heads_[layer], head_dims_[layer]};
             const std::string base = prefix + ".layer" + std::to_string(layer);
             engine.tensors().register_external(base + ".k", k_cache(layer), shape,
                                                dtype::FP16());
@@ -172,6 +177,9 @@ public:
         return layer < head_dims_.size() ? head_dims_[layer] : 0;
     }
     uint32_t num_kv_heads() const { return num_kv_heads_; }
+    uint32_t num_kv_heads(uint32_t layer) const {
+        return layer < kv_heads_.size() ? kv_heads_[layer] : num_kv_heads_;
+    }
     uint32_t max_batch_size() const { return max_batch_size_; }
     uint32_t max_seq_len() const { return max_seq_len_; }
     size_t total_bytes() const { return 2 * elements_per_plane_ * sizeof(half); }
@@ -188,8 +196,11 @@ public:
 
 private:
     bool checked_stride(uint32_t head_dim, size_t& stride) const {
+        return checked_stride(head_dim, num_kv_heads_, stride);
+    }
+    bool checked_stride(uint32_t head_dim, uint32_t kv_heads, size_t& stride) const {
         size_t value = max_batch_size_;
-        const size_t factors[] = {max_seq_len_, num_kv_heads_, head_dim};
+        const size_t factors[] = {max_seq_len_, kv_heads, head_dim};
         for (size_t factor : factors) {
             if (factor == 0 || value > std::numeric_limits<size_t>::max() / factor) {
                 return false;
@@ -215,6 +226,7 @@ private:
         source_layers_ = std::move(other.source_layers_);
         offsets_ = std::move(other.offsets_);
         head_dims_ = std::move(other.head_dims_);
+        kv_heads_ = std::move(other.kv_heads_);
         num_kv_heads_ = other.num_kv_heads_;
         max_batch_size_ = other.max_batch_size_;
         max_seq_len_ = other.max_seq_len_;
@@ -231,6 +243,9 @@ private:
     std::vector<uint32_t> source_layers_;
     std::vector<size_t> offsets_;
     std::vector<uint32_t> head_dims_;
+    // KV heads por capa: «unified» mezcla 8 en las deslizantes con 1 en las
+    // globales.  Para las E-series todas valen lo mismo y el layout no cambia.
+    std::vector<uint32_t> kv_heads_;
     uint32_t num_kv_heads_ = 0;
     uint32_t max_batch_size_ = 0;
     uint32_t max_seq_len_ = 0;

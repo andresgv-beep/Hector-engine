@@ -410,5 +410,60 @@ void launch_fp32_to_fp16(
     fp32_to_fp16_kernel<<<grid, block, 0, stream>>>(input, output, elements);
 }
 
+// ============================================================================
+// GEMMA 4 «UNIFIED»: posiciones factorizadas
+// ============================================================================
+//
+// El embebedor sin encoder no usa RoPE 2D: guarda una tabla
+// pos_embedding[mm_posemb_size][2][dim] y a cada parche le suma la fila de su
+// coordenada X (eje 0) MAS la de su coordenada Y (eje 1).  La referencia
+// (Gemma4UnifiedVisionEmbedder.forward) lo escribe asi:
+//
+//   clamped = ids.clamp(min=0)
+//   valid   = (ids != -1)
+//   pos     = (pos_embedding[clamped, axes] * valid).sum(-2)
+//   hidden  = hidden + pos
+//
+// Un id de -1 marca parche de relleno y no aporta nada, de ahi el factor
+// `valid` en vez de saltar la fila: el parche existe, solo que suma cero.
+__global__ void gemma4_unified_pos_add_fp16_kernel(
+    const half* __restrict__ table,     // [posemb, 2, dim]
+    const int32_t* __restrict__ ids,    // [tokens, 2] con -1 = relleno
+    half* __restrict__ hidden,          // [tokens, dim] in-place
+    int tokens, int dim, int posemb
+) {
+    const size_t count = size_t(tokens) * dim;
+    size_t index = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t stride = size_t(blockDim.x) * gridDim.x;
+    for (; index < count; index += stride) {
+        const int token = int(index / dim);
+        const int component = int(index % dim);
+
+        float sum = __half2float(hidden[index]);
+        for (int axis = 0; axis < 2; ++axis) {
+            const int id = ids[size_t(token) * 2 + axis];
+            if (id < 0 || id >= posemb) continue;   // relleno: aporta 0
+            sum += __half2float(
+                table[((size_t(id) * 2) + axis) * dim + component]);
+        }
+        hidden[index] = __float2half(sum);
+    }
+}
+
+void launch_gemma4_unified_pos_add_fp16(
+    const half* table,
+    const int32_t* ids,
+    half* hidden,
+    int tokens, int dim, int posemb,
+    cudaStream_t stream) {
+    if (tokens <= 0 || dim <= 0 || posemb <= 0) return;
+    const size_t count = size_t(tokens) * dim;
+    constexpr uint32_t block = 256;
+    uint32_t grid = static_cast<uint32_t>((count + block - 1) / block);
+    grid = min(grid, 65535u);
+    gemma4_unified_pos_add_fp16_kernel<<<grid, block, 0, stream>>>(
+        table, ids, hidden, tokens, dim, posemb);
+}
+
 } // namespace kernels
 } // namespace helios

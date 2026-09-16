@@ -493,6 +493,32 @@ void register_memory_kernels(Engine& engine) {
         }
     });
 
+    // Gemma 4 «unified»: hidden += pos_embedding[x,0] + pos_embedding[y,1].
+    // Entradas: (0) hidden in-place, (1) tabla [posemb,2,dim], (2) ids [tokens,2].
+    engine.register_kernel(op::G4U_POS_ADD(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* hidden = ctx.output;
+        TensorInfo* table = ctx.in(1);
+        TensorInfo* ids = ctx.in(2);
+        if (!hidden || !table || !ids) {
+            throw std::runtime_error("G4U_POS_ADD: missing tensors");
+        }
+        if (table->shape.size() != 3 || table->shape[1] != 2) {
+            throw std::runtime_error("G4U_POS_ADD: table must be [posemb, 2, dim]");
+        }
+        const int dim = static_cast<int>(table->shape[2]);
+        if (static_cast<int>(hidden->shape.back()) != dim) {
+            throw std::runtime_error("G4U_POS_ADD: hidden dim differs from table dim");
+        }
+        const int tokens = static_cast<int>(hidden->numel() / dim);
+        const int posemb = static_cast<int>(table->shape[0]);
+        if (ids->numel() < static_cast<size_t>(tokens) * 2) {
+            throw std::runtime_error("G4U_POS_ADD: ids must hold two per token");
+        }
+        launch_gemma4_unified_pos_add_fp16(
+            as_fp16_const(table), as_i32(ids), as_fp16(hidden),
+            tokens, dim, posemb, ctx.stream);
+    });
+
     engine.register_kernel(op::SCATTER_ROWS(), [](ExecContext& ctx, const Command&) {
         TensorInfo* rows = ctx.in(0);
         TensorInfo* indices = ctx.in(1);

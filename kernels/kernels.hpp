@@ -145,6 +145,15 @@ void launch_gemma4_vision_head_to_token_fp16(
 
 // Spatial 3x3 average pooling. The FP32 result intentionally preserves the
 // post-FP16-pool sqrt(hidden) scale used by upstream before standardization.
+/// Gemma 4 «unified»: suma a cada parche su posicion factorizada (X + Y).
+/// `ids` es [tokens, 2]; un -1 marca relleno y aporta cero.
+void launch_gemma4_unified_pos_add_fp16(
+    const half* table,
+    const int32_t* ids,
+    half* hidden,
+    int tokens, int dim, int posemb,
+    cudaStream_t stream);
+
 void launch_gemma4_vision_pool3x3_fp32(
     const half* hidden,
     float* pooled,

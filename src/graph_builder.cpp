@@ -391,8 +391,12 @@ void GraphBuilder::allocate_gemma4_scratch(
         arch.num_layers != config.num_hidden_layers()) {
         throw std::invalid_argument("GraphBuilder: invalid Gemma 4/GM4X contract");
     }
+    // Gemma 4 «unified» (12B/31B) no lleva Per-Layer Embeddings: su
+    // hidden_size_per_layer_input es 0 y el GM4X trae el flag PLE apagado.
+    // Para las E-series el flag viene encendido y el check es el de siempre.
+    const bool has_ple = gemma.has_flag(GEMMA4_EXT_FLAG_PLE);
     if (max_batch == 0 || max_seq == 0 || config.hidden_size() == 0 ||
-        gemma.ple_hidden_size == 0) {
+        (has_ple && gemma.ple_hidden_size == 0)) {
         throw std::invalid_argument("GraphBuilder: invalid Gemma 4 scratch dimensions");
     }
 
@@ -442,18 +446,25 @@ void GraphBuilder::allocate_gemma4_scratch(
     alloc(S("g4.up_backing"), {B, L, max_intermediate});
     alloc(S("g4.mlp_h_backing"), {B, L, max_intermediate});
 
-    alloc(S("g4.ple"), {B, L, PW});
-    alloc(S("g4.ple_context"), {B, L, PW});
-    alloc(S("g4.ple_segment"), {B, L, P});
-    alloc(S("g4.ple_gate"), {B, L, P});
+    if (has_ple) {
+        alloc(S("g4.ple"), {B, L, PW});
+        alloc(S("g4.ple_context"), {B, L, PW});
+        alloc(S("g4.ple_segment"), {B, L, P});
+        alloc(S("g4.ple_gate"), {B, L, P});
+    }
     alloc(S("logits"), {B, 1, V});
 
     for (uint32_t i = 0; i < arch.num_layers; ++i) {
         const uint32_t HD = gemma.layers[i].head_dim;
         const uint32_t I = gemma.layers[i].intermediate_size;
+        // Los KV heads son POR CAPA en Gemma 4 «unified» (1 en las globales,
+        // 8 en las deslizantes).  La vista tiene que describir lo que k_proj
+        // produce de verdad, no el maximo global, o el tensor declara mas
+        // columnas de las que se escriben y la atencion lee basura.
+        const uint32_t LKVH = gemma.layers[i].kv_heads_or(KVH);
         view(G4(i, "q"), S("g4.q_backing"), {B, L, H * HD});
-        view(G4(i, "k"), S("g4.k_backing"), {B, L, KVH * HD});
-        view(G4(i, "v"), S("g4.v_backing"), {B, L, KVH * HD});
+        view(G4(i, "k"), S("g4.k_backing"), {B, L, LKVH * HD});
+        view(G4(i, "v"), S("g4.v_backing"), {B, L, LKVH * HD});
         view(G4(i, "attn_out"), S("g4.attn_out_backing"), {B, L, H * HD});
         view(G4(i, "gate"), S("g4.gate_backing"), {B, L, I});
         view(G4(i, "up"), S("g4.up_backing"), {B, L, I});
@@ -507,12 +518,15 @@ CommandBuffer GraphBuilder::build_gemma4_input(
     cb.add_scale(S("hidden"), S("hidden"),
                  std::sqrt(static_cast<float>(config.hidden_size())));
 
-    Gemma4PlePreparationNames names;
-    names.input_tokens = input_tokens;
-    names.main_embeddings = S("hidden");
-    names.ple = S("g4.ple");
-    names.context = S("g4.ple_context");
-    append_gemma4_ple_preparation(cb, config, gemma, names);
+    // Sin PLE (Gemma 4 «unified») la entrada es solo embedding + escala.
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_PLE)) {
+        Gemma4PlePreparationNames names;
+        names.input_tokens = input_tokens;
+        names.main_embeddings = S("hidden");
+        names.ple = S("g4.ple");
+        names.context = S("g4.ple_context");
+        append_gemma4_ple_preparation(cb, config, gemma, names);
+    }
     return cb;
 }
 
@@ -568,12 +582,15 @@ CommandBuffer GraphBuilder::build_gemma4_multimodal_input(
     cb.add_scatter_rows(S("hidden"), names.image_embeddings,
                         names.image_positions);
 
-    Gemma4PlePreparationNames ple_names;
-    ple_names.input_tokens = names.ple_identity_tokens;
-    ple_names.main_embeddings = S("hidden");
-    ple_names.ple = S("g4.ple");
-    ple_names.context = S("g4.ple_context");
-    append_gemma4_ple_preparation(cb, config, gemma, ple_names);
+    // Idem en la ruta multimodal: sin PLE no hay preparacion que hacer.
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_PLE)) {
+        Gemma4PlePreparationNames ple_names;
+        ple_names.input_tokens = names.ple_identity_tokens;
+        ple_names.main_embeddings = S("hidden");
+        ple_names.ple = S("g4.ple");
+        ple_names.context = S("g4.ple_context");
+        append_gemma4_ple_preparation(cb, config, gemma, ple_names);
+    }
     return cb;
 }
 
@@ -608,7 +625,9 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     set_active_scratch_shape(engine, batch_size, seq_len);
 
     const uint32_t H = config.num_attention_heads();
-    const uint32_t KVH = config.num_key_value_heads();
+    // «unified» trae los KV heads por capa; los HNF anteriores traen 0 y se
+    // sigue usando el valor global, asi que esto es no-op para E2B/E4B.
+    const uint32_t KVH = layer.kv_heads_or(config.num_key_value_heads());
     const uint32_t HD = layer.head_dim;
     const std::string q = G4(layer_idx, "q");
     const std::string k = G4(layer_idx, "k");
@@ -627,7 +646,13 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     set_seq(cb);
     cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
     set_seq(cb);
-    cb.add_matmul(v, S("normed"), W(arch, layer_idx, "attn.v_proj.weight"));
+    // attention_k_eq_v: la capa no tiene v_proj y V sale de la MISMA
+    // proyeccion que K.  Lo que sigue diferenciandolos es el tramo de abajo:
+    // K lleva k_norm + RoPE, V solo su norma sin peso.
+    cb.add_matmul(v, S("normed"),
+                  W(arch, layer_idx,
+                    layer.k_eq_v() ? "attn.k_proj.weight"
+                                   : "attn.v_proj.weight"));
     set_seq(cb);
 
     cb.add_rmsnorm(q, q, W(arch, layer_idx, "attn.q_norm.weight"),
@@ -694,7 +719,9 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     const bool shared = layer_idx >= first_shared;
     const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
     const uint32_t H = config.num_attention_heads();
-    const uint32_t KVH = config.num_key_value_heads();
+    // «unified» trae los KV heads por capa; los HNF anteriores traen 0 y se
+    // sigue usando el valor global, asi que esto es no-op para E2B/E4B.
+    const uint32_t KVH = layer.kv_heads_or(config.num_key_value_heads());
     const uint32_t HD = layer.head_dim;
     const uint32_t window = layer.is_global_attention() ? 0u : layer.sliding_window;
     if (H == 0 || KVH == 0 || HD == 0 || (shared && first_shared == 0)) {
@@ -746,7 +773,11 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     if (!shared) {
         cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
         set_seq(cb);
-        cb.add_matmul(v, S("normed"), W(arch, layer_idx, "attn.v_proj.weight"));
+        // attention_k_eq_v: ver nota en build_gemma4_single_layer.
+        cb.add_matmul(v, S("normed"),
+                      W(arch, layer_idx,
+                        layer.k_eq_v() ? "attn.k_proj.weight"
+                                       : "attn.v_proj.weight"));
         set_seq(cb);
         cb.add_rmsnorm(k, k, W(arch, layer_idx, "attn.k_norm.weight"),
                        config.rms_norm_eps(), HD);
@@ -910,6 +941,19 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
                    W(arch, layer_idx, "ln_mlp_post.weight"),
                    config.rms_norm_eps());
     cb.add_add(S("hidden"), S("hidden"), S("mlp_out"));
+
+    // Gemma 4 «unified» no tiene Per-Layer Embeddings, pero SI layer_scalar:
+    // la referencia cierra cada capa con `hidden_states *= layer_scalar`, y en
+    // las E-series ese producto viaja dentro de la inyeccion PLE.  Sin PLE hay
+    // que aplicarlo igualmente o las 48 capas salen sin escalar.
+    if (!gemma.has_flag(GEMMA4_EXT_FLAG_PLE)) {
+        if (gemma.has_flag(GEMMA4_EXT_FLAG_LAYER_SCALAR)) {
+            cb.add_mul_scalar_tensor(
+                S("hidden"), S("hidden"),
+                "text.layer" + std::to_string(layer_idx) + ".layer_scalar");
+        }
+        return;
+    }
 
     cb.add_ple_slice(S("g4.ple_segment"), S("g4.ple"), layer_idx,
                      arch.num_layers, gemma.ple_hidden_size);
@@ -1462,7 +1506,8 @@ TensorInfo* GraphBuilder::get_hidden(Engine& engine) const {
 std::string GraphBuilder::validate_weights(
     const Engine& engine,
     const ModelConfig& config,
-    const ArchDescriptor& arch
+    const ArchDescriptor& arch,
+    const Gemma4Config* gemma
 ) const {
     std::ostringstream missing;
     int count = 0;
@@ -1493,7 +1538,15 @@ std::string GraphBuilder::validate_weights(
         } else {
             check(W(arch, i, "attn.q_proj.weight"));
             check(W(arch, i, "attn.k_proj.weight"));
-            check(W(arch, i, "attn.v_proj.weight"));
+            // Gemma 4 «unified»: las capas globales declaran attention_k_eq_v y
+            // no traen v_proj porque V sale de k_proj.  Exigirlo las marcaria
+            // como incompletas estando bien formadas.
+            const bool k_eq_v = gemma != nullptr &&
+                                i < gemma->layers.size() &&
+                                gemma->layers[i].k_eq_v();
+            if (!k_eq_v) {
+                check(W(arch, i, "attn.v_proj.weight"));
+            }
         }
         check(W(arch, i, "attn.o_proj.weight"));
         
