@@ -164,7 +164,8 @@ __global__ void attention_cached_v2_kernel(
     int head_dim,
     int max_seq_len,
     float scale,
-    int window_size
+    int window_size,
+    int cache_slots
 ) {
     // Block = 4 warps for 1 head
     const int head_id = blockIdx.x;  // Which (batch, head) pair
@@ -189,7 +190,7 @@ __global__ void attention_cached_v2_kernel(
     }
     
     // KV cache addressing
-    const int kv_batch_base = b * max_seq_len * num_kv_heads * head_dim;
+    const int kv_batch_base = b * cache_slots * num_kv_heads * head_dim;
     const int kv_head_offset = kv_h * head_dim;
     
     // Each warp processes a chunk of seq_len
@@ -208,7 +209,8 @@ __global__ void attention_cached_v2_kernel(
     
     // Process assigned chunk
     for (int pos = pos_start; pos < pos_end; pos++) {
-        const int kv_base = kv_batch_base + pos * num_kv_heads * head_dim + kv_head_offset;
+        const int kv_base = kv_batch_base + (pos % cache_slots) * num_kv_heads * head_dim
+                          + kv_head_offset;
         
         // Q·K dot product
         float dot = 0.0f;
@@ -320,7 +322,8 @@ void launch_attention_cached_fp16(
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int max_seq_len, float scale, int window_size,
     cudaStream_t stream
-) {
+, int cache_slots) {
+    if (cache_slots <= 0) cache_slots = max_seq_len;
     int num_blocks = batch_size * num_heads;
     
     // Shared memory for merge: max[4] + sum[4] + acc[4][MAX_HD*32]
@@ -329,7 +332,7 @@ void launch_attention_cached_fp16(
     attention_cached_v2_kernel<<<num_blocks, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         batch_size, seq_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale, window_size
+        max_seq_len, scale, window_size, cache_slots
     );
 }
 
@@ -346,7 +349,8 @@ __global__ void attention_cached_v2_kernel_dp(
     int head_dim,
     int max_seq_len,
     float scale,
-    int window_size
+    int window_size,
+    int cache_slots
 ) {
     int seq_len = *d_seq_len;
     
@@ -377,7 +381,7 @@ __global__ void attention_cached_v2_kernel_dp(
                               : make_float2(0.0f, 0.0f);
     }
 
-    const int kv_batch_base = b * max_seq_len * num_kv_heads * head_dim;
+    const int kv_batch_base = b * cache_slots * num_kv_heads * head_dim;
     const int kv_head_offset = kv_h * head_dim;
     const half2* K2 = reinterpret_cast<const half2*>(K_cache);
     const half2* V2 = reinterpret_cast<const half2*>(V_cache);
@@ -396,7 +400,7 @@ __global__ void attention_cached_v2_kernel_dp(
 
     for (int pos = pos_start; pos < pos_end; pos++) {
         const int kv_base2 =
-            (kv_batch_base + pos * num_kv_heads * head_dim + kv_head_offset) >> 1;
+            (kv_batch_base + (pos % cache_slots) * num_kv_heads * head_dim + kv_head_offset) >> 1;
 
         float dot = 0.0f;
         #pragma unroll
@@ -498,14 +502,15 @@ void launch_attention_cached_fp16_dp(
     int batch_size, const int32_t* d_seq_len, int num_heads, int num_kv_heads,
     int head_dim, int max_seq_len, float scale, int window_size,
     cudaStream_t stream
-) {
+, int cache_slots) {
+    if (cache_slots <= 0) cache_slots = max_seq_len;
     int num_blocks = batch_size * num_heads;
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
     
     attention_cached_v2_kernel_dp<<<num_blocks, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         batch_size, d_seq_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale, window_size
+        max_seq_len, scale, window_size, cache_slots
     );
 }
 
@@ -672,6 +677,7 @@ __global__ void attention_prefill_cached_kernel(
     int num_kv_heads,
     int head_dim,
     int max_seq_len,
+    int cache_slots,
     float scale,
     int window_size
 ) {
@@ -706,7 +712,7 @@ __global__ void attention_prefill_cached_kernel(
     for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] = 0.0f;
 
     for (int pos = pos_start; pos < pos_end; pos++) {
-        const int kv_base = pos * num_kv_heads * head_dim + kv_head_offset;
+        const int kv_base = (pos % cache_slots) * num_kv_heads * head_dim + kv_head_offset;
 
         float dot = 0.0f;
         #pragma unroll
@@ -777,13 +783,14 @@ void launch_attention_prefill_cached_fp16(
     int seq_new, int past_len, int num_heads, int num_kv_heads,
     int head_dim, int max_seq_len, float scale, int window_size,
     cudaStream_t stream
-) {
+, int cache_slots) {
+    if (cache_slots <= 0) cache_slots = max_seq_len;
     dim3 grid(seq_new, num_heads);
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
     attention_prefill_cached_kernel<<<grid, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         seq_new, past_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale, window_size
+        max_seq_len, cache_slots, scale, window_size
     );
 }
 
@@ -1086,8 +1093,9 @@ __global__ void kv_cache_update_kernel(
     int s = (idx / (head_dim * kv_heads)) % seq_len;
     int b = idx / (head_dim * kv_heads * seq_len);
     
-    int cache_pos = position + s;
-    if (cache_pos >= max_seq_len) return;
+    // El anillo da la vuelta en vez de tirar la escritura: en una capa deslizante
+    // la posición 1500 con 1536 ranuras vive en la 1500, y la 1600 en la 64.
+    int cache_pos = (position + s) % max_seq_len;
     
     int dst_idx = b * max_seq_len * kv_heads * head_dim +
                   cache_pos * kv_heads * head_dim +
@@ -1140,8 +1148,9 @@ __global__ void kv_cache_update_kernel_dp(
     int s = (idx / (head_dim * kv_heads)) % seq_len;
     int b = idx / (head_dim * kv_heads * seq_len);
     
-    int cache_pos = position + s;
-    if (cache_pos >= max_seq_len) return;
+    // El anillo da la vuelta en vez de tirar la escritura: en una capa deslizante
+    // la posición 1500 con 1536 ranuras vive en la 1500, y la 1600 en la 64.
+    int cache_pos = (position + s) % max_seq_len;
     
     int dst_idx = b * max_seq_len * kv_heads * head_dim +
                   cache_pos * kv_heads * head_dim +

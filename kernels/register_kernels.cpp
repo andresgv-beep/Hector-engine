@@ -881,6 +881,7 @@ void register_attention_kernels(Engine& engine) {
         uint32_t seq_len = cmd.get<uint32_t>("seq_len", 1);
         uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
         uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
+        uint32_t cache_slots = cmd.get<uint32_t>("cache_slots", 0);
         if (head_dim == 0 || head_dim > 512 || num_kv_heads == 0 ||
             num_heads == 0 || num_heads % num_kv_heads != 0) {
             throw std::runtime_error("ATTENTION_CACHED: unsupported head geometry");
@@ -896,7 +897,7 @@ void register_attention_kernels(Engine& engine) {
                     1, engine.device_total_seq(),
                     num_heads, num_kv_heads, head_dim,
                     max_seq_len, scale, window_size,
-                    ctx.stream
+                    ctx.stream, (int)cache_slots
                 );
         } else {
             launch_attention_cached_fp16(
@@ -907,7 +908,7 @@ void register_attention_kernels(Engine& engine) {
                     1, seq_len,
                     num_heads, num_kv_heads, head_dim,
                     max_seq_len, scale, window_size,
-                    ctx.stream
+                    ctx.stream, (int)cache_slots
                 );
         }
     });
@@ -931,6 +932,7 @@ void register_attention_kernels(Engine& engine) {
             uint32_t past_len = cmd.get<uint32_t>("past_len", 0);
             uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
             uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
+            uint32_t cache_slots = cmd.get<uint32_t>("cache_slots", 0);
             if (head_dim == 0 || head_dim > 512 || num_kv_heads == 0 ||
                 num_heads == 0 || num_heads % num_kv_heads != 0) {
                 throw std::runtime_error(
@@ -942,7 +944,8 @@ void register_attention_kernels(Engine& engine) {
                 as_fp16(output),
                 (int)seq_new, (int)past_len,
                 (int)num_heads, (int)num_kv_heads, (int)head_dim,
-                (int)max_seq_len, scale, (int)window_size, ctx.stream);
+                (int)max_seq_len, scale, (int)window_size, ctx.stream,
+                (int)cache_slots);
         });
     }
 

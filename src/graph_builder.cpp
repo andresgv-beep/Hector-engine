@@ -740,9 +740,23 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     const TensorInfo* cached_v = engine.tensors().get(v_cache);
     if (!cached_k || !cached_v || cached_k->shape.size() != 4 ||
         cached_v->shape != cached_k->shape || cached_k->shape[0] < batch_size ||
-        cached_k->shape[1] < cache.max_cache_len ||
         cached_k->shape[2] != KVH || cached_k->shape[3] != HD) {
         throw std::invalid_argument("GraphBuilder: Gemma 4 KV alias shape mismatch");
+    }
+    /* Ranuras REALES de esta capa, tomadas del tensor ya registrado. Una capa
+     * deslizante tiene un anillo más corto que la secuencia, y ahí la posición
+     * lógica y la ranura física dejan de coincidir: los kernels hacen el módulo.
+     * Cuando son iguales —capas globales, o modelos sin ventana— el módulo no
+     * cambia nada y se recorre el mismo camino de siempre. */
+    const uint32_t slots = cached_k->shape[1];
+    if (slots < (window ? 1u : cache.max_cache_len) ||
+        (window == 0 && slots < cache.max_cache_len)) {
+        throw std::invalid_argument("GraphBuilder: Gemma 4 KV alias shape mismatch");
+    }
+    if (window && slots < cache.max_cache_len && slots < window + seq_len) {
+        // El anillo tiene que aguantar la ventana MÁS la tanda que se escribe de
+        // una vez; si no, una tanda larga se pisa a sí misma antes de atenderse.
+        throw std::invalid_argument("GraphBuilder: anillo de KV menor que ventana + tanda");
     }
 
     set_active_scratch_shape(engine, batch_size, seq_len);
@@ -784,7 +798,7 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
         cb.add_rmsnorm_no_weight(v, v, config.rms_norm_eps(), HD);
         add_rope(cb, k, KVH);
         cb.add_kv_cache_update(k_cache, v_cache, k, v,
-                               cache.cache_position, cache.max_cache_len,
+                               cache.cache_position, slots,
                                KVH, HD, seq_len);
         if (seq_len == 1) cb.commands().back().set("device_pos", uint32_t{1});
     }
@@ -799,13 +813,15 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
             .set("seq_len", seq_len)
             .set("past_len", cache.cache_position)
             .set("max_seq_len", cache.max_cache_len)
+            .set("cache_slots", slots)
             .set("window_size", window);
     } else {
         cb.add_attention_cached(attn_out, q, k_cache, v_cache,
                                 H, KVH, HD, cache.cache_position + 1,
                                 cache.max_cache_len, window);
         auto& attention = cb.commands().back();
-        attention.set("scale", 1.0f).set("device_pos", uint32_t{1});
+        attention.set("scale", 1.0f).set("device_pos", uint32_t{1})
+                 .set("cache_slots", slots);
     }
 
     cb.add_matmul(S("attn_proj"), attn_out,

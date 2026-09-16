@@ -469,9 +469,15 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                                               : M.max_seq_len;
 
         if (s.is_gemma4) {
+            // La tanda más grande que esta sesión va a empujar de una vez. Es lo
+            // que decide el anillo de las capas deslizantes: sin visión el prefill
+            // va troceado a kPrefillChunk, y con ella el adaptador mete la imagen
+            // entera de un golpe y hay que dejarle sitio.
+            const uint32_t tanda = s.loader.has_gemma4_vision_config()
+                                       ? kScratchTokens : kPrefillChunk;
             if (!s.gemma_kv_cache.allocate(s.loader.gemma4_config(),
                                            M.model_config.num_key_value_heads(),
-                                           1, s.kv_config.max_seq_len)) {
+                                           1, s.kv_config.max_seq_len, tanda)) {
                 *error = "no pude reservar el KV heterogeneo de Gemma 4";
                 return false;
             }

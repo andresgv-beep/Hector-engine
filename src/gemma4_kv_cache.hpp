@@ -36,8 +36,17 @@ public:
         return *this;
     }
 
+    /* `max_prefill` es la tanda más grande que la sesión va a empujar de una vez.
+     *
+     * Una capa deslizante no mira más allá de su ventana, así que no necesita
+     * guardar la secuencia entera: le basta un anillo de ventana + tanda, y la
+     * tanda hace falta porque durante el prefill se escriben varias posiciones
+     * antes de atenderlas y no pueden pisarse entre ellas. Reservar max_seq_len
+     * para las 40 capas deslizantes del 12B son 10 GB a 32k; el anillo son 480 MiB.
+     * Con max_prefill 0 se conserva el comportamiento de siempre. */
     bool allocate(const Gemma4Config& gemma, uint32_t num_kv_heads,
-                  uint32_t max_batch_size, uint32_t max_seq_len) {
+                  uint32_t max_batch_size, uint32_t max_seq_len,
+                  uint32_t max_prefill = 0) {
         free();
         if (gemma.layers.empty() || num_kv_heads == 0 ||
             max_batch_size == 0 || max_seq_len == 0 ||
@@ -57,6 +66,7 @@ public:
         offsets_.resize(layers);
         head_dims_.resize(layers);
         kv_heads_.resize(layers);
+        slots_.resize(layers);
 
         int32_t last_local = -1;
         int32_t last_global = -1;
@@ -69,11 +79,12 @@ public:
             offsets_[i] = total_elements;
             head_dims_[i] = layer.head_dim;
             kv_heads_[i] = layer.kv_heads_or(num_kv_heads);
+            slots_[i] = ranuras(layer, max_seq_len, max_prefill);
             if (layer.is_global_attention()) last_global = static_cast<int32_t>(i);
             else last_local = static_cast<int32_t>(i);
 
             size_t stride = 0;
-            if (!checked_stride(layer.head_dim, kv_heads_[i], stride) ||
+            if (!checked_stride(layer.head_dim, kv_heads_[i], slots_[i], stride) ||
                 total_elements > std::numeric_limits<size_t>::max() - stride) {
                 return fail_layout();
             }
@@ -90,6 +101,8 @@ public:
             source_layers_[i] = static_cast<uint32_t>(source);
             offsets_[i] = offsets_[source];
             head_dims_[i] = layer.head_dim;
+            kv_heads_[i] = kv_heads_[source];
+            slots_[i] = slots_[source];
             kv_heads_[i] = kv_heads_[source];
         }
 
@@ -126,6 +139,7 @@ public:
         offsets_.clear();
         head_dims_.clear();
         kv_heads_.clear();
+        slots_.clear();
         num_kv_heads_ = 0;
         max_batch_size_ = 0;
         max_seq_len_ = 0;
@@ -140,13 +154,19 @@ public:
         }
         for (uint32_t layer = 0; layer < num_layers(); ++layer) {
             const std::vector<uint32_t> shape{
-                max_batch_size_, max_seq_len_, kv_heads_[layer], head_dims_[layer]};
+                max_batch_size_, slots_[layer], kv_heads_[layer], head_dims_[layer]};
             const std::string base = prefix + ".layer" + std::to_string(layer);
             engine.tensors().register_external(base + ".k", k_cache(layer), shape,
                                                dtype::FP16());
             engine.tensors().register_external(base + ".v", v_cache(layer), shape,
                                                dtype::FP16());
         }
+    }
+
+    /* Ranuras del anillo de esa capa. Igual a max_seq_len cuando no hay anillo,
+     * que es como se apaga todo esto sin tocar una línea del grafo. */
+    uint32_t slots(uint32_t layer) const {
+        return valid_layer(layer) ? slots_[layer] : max_seq_len_;
     }
 
     half* k_cache(uint32_t layer) {
@@ -196,11 +216,21 @@ public:
 
 private:
     bool checked_stride(uint32_t head_dim, size_t& stride) const {
-        return checked_stride(head_dim, num_kv_heads_, stride);
+        return checked_stride(head_dim, num_kv_heads_, max_seq_len_, stride);
     }
-    bool checked_stride(uint32_t head_dim, uint32_t kv_heads, size_t& stride) const {
+    static uint32_t ranuras(const Gemma4LayerConfig& layer, uint32_t max_seq_len,
+                            uint32_t max_prefill) {
+        if (max_prefill == 0 || layer.is_global_attention() || layer.sliding_window == 0) {
+            return max_seq_len;
+        }
+        const uint64_t anillo = (uint64_t)layer.sliding_window + max_prefill;
+        return anillo < max_seq_len ? (uint32_t)anillo : max_seq_len;
+    }
+
+    bool checked_stride(uint32_t head_dim, uint32_t kv_heads, uint32_t slots,
+                        size_t& stride) const {
         size_t value = max_batch_size_;
-        const size_t factors[] = {max_seq_len_, kv_heads, head_dim};
+        const size_t factors[] = {slots, kv_heads, head_dim};
         for (size_t factor : factors) {
             if (factor == 0 || value > std::numeric_limits<size_t>::max() / factor) {
                 return false;
@@ -227,6 +257,7 @@ private:
         offsets_ = std::move(other.offsets_);
         head_dims_ = std::move(other.head_dims_);
         kv_heads_ = std::move(other.kv_heads_);
+        slots_ = std::move(other.slots_);
         num_kv_heads_ = other.num_kv_heads_;
         max_batch_size_ = other.max_batch_size_;
         max_seq_len_ = other.max_seq_len_;
@@ -246,6 +277,8 @@ private:
     // KV heads por capa: «unified» mezcla 8 en las deslizantes con 1 en las
     // globales.  Para las E-series todas valen lo mismo y el layout no cambia.
     std::vector<uint32_t> kv_heads_;
+    /* Ranuras reales de cada capa: su ventana si es deslizante, la secuencia si no. */
+    std::vector<uint32_t> slots_;
     uint32_t num_kv_heads_ = 0;
     uint32_t max_batch_size_ = 0;
     uint32_t max_seq_len_ = 0;
