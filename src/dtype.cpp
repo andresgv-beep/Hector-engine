@@ -118,6 +118,25 @@ void DTypeRegistry::register_builtins() {
         return num_blocks * 264;
     };
     register_dtype(info);
+
+    // HQ4.2K/HQ5.2K - symmetric groups, 5-bit step metadata in a 24 B header.
+    info = DTypeInfo{};
+    info.name = "hq42k";
+    info.block_elements = 256;
+    info.block_bytes = 152;
+    info.is_quantized = true;
+    info.is_signed = true;
+    info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 152; };
+    register_dtype(info);
+
+    info = DTypeInfo{};
+    info.name = "hq52k";
+    info.block_elements = 256;
+    info.block_bytes = 184;
+    info.is_quantized = true;
+    info.is_signed = true;
+    info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 184; };
+    register_dtype(info);
 }
 
 DTypeID DTypeRegistry::register_dtype(const DTypeInfo& info) {

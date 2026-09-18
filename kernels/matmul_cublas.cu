@@ -145,6 +145,45 @@ __global__ void dequant_hq51k_kernel(
     }
 }
 
+template<int BITS, int BLOCK_BYTES>
+__global__ void dequant_hq_symmetric_kernel(
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+    const int row = blockIdx.x;
+    const int group_global = blockIdx.y * blockDim.x + threadIdx.x;
+    const int total_groups = (K + GROUP_SIZE - 1) / GROUP_SIZE;
+    if (row >= N || group_global >= total_groups) return;
+    const int sb = group_global / NUM_GROUPS;
+    const int group = group_global % NUM_GROUPS;
+    const uint8_t* block = weights +
+        (size_t(row) * ((K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE) + sb) * BLOCK_BYTES;
+    const float step = decode_symmetric_step(block, group);
+    const int k_base = sb * SUPER_BLOCK_SIZE + group * GROUP_SIZE;
+    half* dst = output + size_t(row) * K + k_base;
+    if constexpr (BITS == 4) {
+        const uint8_t* payload = block + SYMMETRIC_HEADER_SIZE + group * 4;
+        #pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            const uint8_t byte = payload[i];
+            if (k_base + i * 2 < K) dst[i * 2] = __float2half(float(int(byte >> 4) - 8) * step);
+            if (k_base + i * 2 + 1 < K) dst[i * 2 + 1] = __float2half(float(int(byte & 15) - 8) * step);
+        }
+    } else {
+        const uint8_t* payload = block + SYMMETRIC_HEADER_SIZE + group * 5;
+        uint64_t packed = 0;
+        #pragma unroll
+        for (int i = 0; i < 5; ++i) packed |= uint64_t(payload[i]) << (i * 8);
+        #pragma unroll
+        for (int i = 0; i < GROUP_SIZE; ++i) {
+            if (k_base + i < K)
+                dst[i] = __float2half(float(int((packed >> (i * 5)) & 31) - 16) * step);
+        }
+    }
+}
+
 // ============================================================================
 // LAUNCH: Dequant → cuBLAS
 // ============================================================================
@@ -235,6 +274,40 @@ void launch_matmul_hq51k_cublas(
         &beta_h,
         output, N
     );
+}
+
+template<int BITS, int BLOCK_BYTES>
+static void launch_matmul_hq_symmetric_cublas(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream
+) {
+    ensure_cublas();
+    cublasSetStream(g_cublas_handle, stream);
+    ensure_dequant_buffer(size_t(N) * K, stream);
+    const int total_groups = (K + hqs::GROUP_SIZE - 1) / hqs::GROUP_SIZE;
+    dim3 grid(N, (total_groups + 255) / 256);
+    dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES><<<grid, 256, 0, stream>>>(
+        weights, g_dequant_buffer, K, N);
+    __half alpha = __float2half(1.0f);
+    __half beta = __float2half(0.0f);
+    cublasHgemm(g_cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K, &alpha, g_dequant_buffer, K, input, K, &beta, output, N);
+}
+
+void launch_matmul_hq42k_cublas(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream
+) {
+    launch_matmul_hq_symmetric_cublas<4, hqs::HQ42K_BLOCK_SIZE>(
+        input, weights, output, M, K, N, stream);
+}
+
+void launch_matmul_hq52k_cublas(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream
+) {
+    launch_matmul_hq_symmetric_cublas<5, hqs::HQ52K_BLOCK_SIZE>(
+        input, weights, output, M, K, N, stream);
 }
 
 void launch_matmul_fp16_cublas(

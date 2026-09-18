@@ -32,6 +32,8 @@ constexpr int COMPACT_GEMM_THRESHOLD = 9;  // medido: el dequant cuesta ~420us f
 
 void launch_matmul_hq41k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
 void launch_matmul_hq51k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
+void launch_matmul_hq42k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
+void launch_matmul_hq52k_cublas(const half*, const uint8_t*, half*, int, int, int, cudaStream_t);
 
 // Candidatos del autoajuste (warps por fila x filas por bloque).
 //
@@ -290,6 +292,107 @@ __global__ void gemv_hq51k_kernel(
 }
 
 // ============================================================================
+// GEMV HQ4.2K / HQ5.2K — header simétrico de 24 bytes
+// ============================================================================
+
+template<int BITS, int BLOCK_BYTES, int WARPS_PER_ROW, int ROWS_PER_BLOCK>
+__global__ void gemv_hq_symmetric_kernel(
+    const half* __restrict__ input,
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+    extern __shared__ half s_input[];
+    const int staged_k = K < COMPACT_INPUT_CHUNK ? K : COMPACT_INPUT_CHUNK;
+    float* s_partial = reinterpret_cast<float*>(s_input + staged_k);
+    const int threads_per_row = WARPS_PER_ROW * 32;
+    const int row_group = threadIdx.x / threads_per_row;
+    const int local_tid = threadIdx.x % threads_per_row;
+    const int warp_in_group = local_tid / 32;
+    const int lane = local_tid % 32;
+    const int row = blockIdx.x * ROWS_PER_BLOCK + row_group;
+    const int total_sb = (K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
+    const uint8_t* row_weights = row < N
+        ? weights + size_t(row) * total_sb * BLOCK_BYTES : weights;
+    float acc = 0.0f;
+
+    for (int chunk_base = 0; chunk_base < K; chunk_base += COMPACT_INPUT_CHUNK) {
+        const int chunk_len = min(COMPACT_INPUT_CHUNK, K - chunk_base);
+        const int BS = WARPS_PER_ROW * ROWS_PER_BLOCK * 32;
+        const float4* src = reinterpret_cast<const float4*>(input + chunk_base);
+        float4* dst = reinterpret_cast<float4*>(s_input);
+        const int n_vec = chunk_len / 8;
+        for (int i = threadIdx.x; i < n_vec; i += BS) dst[i] = src[i];
+        for (int i = n_vec * 8 + threadIdx.x; i < chunk_len; i += BS)
+            s_input[i] = input[chunk_base + i];
+        __syncthreads();
+
+        const int sb_begin = chunk_base / SUPER_BLOCK_SIZE;
+        const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
+        for (int sb = sb_begin + warp_in_group;
+             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+            const int sb_base = sb * SUPER_BLOCK_SIZE;
+            const uint8_t* block = row_weights + size_t(sb) * BLOCK_BYTES;
+            const float step = decode_symmetric_step(block, lane);
+            const int global_k = sb_base + lane * GROUP_SIZE;
+            const int local_k = global_k - chunk_base;
+            if constexpr (BITS == 4) {
+                const uint32_t packed = *reinterpret_cast<const uint32_t*>(
+                    block + SYMMETRIC_HEADER_SIZE + lane * 4);
+                #pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const uint8_t byte = (packed >> (i * 8)) & 0xff;
+                    const float w0 = float(int(byte >> 4) - 8) * step;
+                    const float w1 = float(int(byte & 0x0f) - 8) * step;
+                    const int k0 = global_k + i * 2;
+                    if (k0 < K) acc = fmaf(w0, __half2float(s_input[local_k + i * 2]), acc);
+                    if (k0 + 1 < K) acc = fmaf(w1, __half2float(s_input[local_k + i * 2 + 1]), acc);
+                }
+            } else {
+                const int offset = SYMMETRIC_HEADER_SIZE + lane * 5;
+                uint64_t packed = 0;
+                #pragma unroll
+                for (int byte = 0; byte < 5; ++byte)
+                    packed |= uint64_t(block[offset + byte]) << (byte * 8);
+                #pragma unroll
+                for (int i = 0; i < GROUP_SIZE; ++i) {
+                    const float w = float(int((packed >> (i * 5)) & 0x1f) - 16) * step;
+                    const int k = global_k + i;
+                    if (k < K) acc = fmaf(w, __half2float(s_input[local_k + i]), acc);
+                }
+            }
+        }
+        __syncthreads();
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1)
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+    if (lane == 0) s_partial[row_group * WARPS_PER_ROW + warp_in_group] = acc;
+    __syncthreads();
+    if (warp_in_group == 0 && lane < WARPS_PER_ROW) {
+        float value = s_partial[row_group * WARPS_PER_ROW + lane];
+        constexpr unsigned mask = WARPS_PER_ROW >= 32 ? 0xffffffffu : ((1u << WARPS_PER_ROW) - 1u);
+        #pragma unroll
+        for (int offset = WARPS_PER_ROW / 2; offset > 0; offset >>= 1)
+            value += __shfl_down_sync(mask, value, offset);
+        if (lane == 0 && row < N) output[row] = __float2half(value);
+    }
+}
+
+template<int BITS, int BLOCK_BYTES, int WPR, int RPB>
+static void launch_symmetric(const half* in, const uint8_t* weights, half* out,
+                             int K, int N, cudaStream_t stream) {
+    const int threads = WPR * RPB * 32;
+    const int blocks = (N + RPB - 1) / RPB;
+    const size_t shared = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) +
+                          RPB * WPR * sizeof(float);
+    gemv_hq_symmetric_kernel<BITS, BLOCK_BYTES, WPR, RPB>
+        <<<blocks, threads, shared, stream>>>(in, weights, out, K, N);
+}
+
+// ============================================================================
 // LAUNCHERS
 // ============================================================================
 
@@ -324,6 +427,24 @@ static void launch_hq51k_C(const half* in, const uint8_t* w, half* out, int K, i
     size_t smem = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) + CCC_RPB * CCC_WPR * sizeof(float);
     gemv_hq51k_kernel<CCC_WPR, CCC_RPB><<<nb, CCC_BLOCK, smem, s>>>(in, w, out, K, N);
 }
+static void launch_hq42k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<4, hqs::HQ42K_BLOCK_SIZE, CCA_WPR, CCA_RPB>(in, w, out, K, N, s);
+}
+static void launch_hq42k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<4, hqs::HQ42K_BLOCK_SIZE, CCB_WPR, CCB_RPB>(in, w, out, K, N, s);
+}
+static void launch_hq42k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<4, hqs::HQ42K_BLOCK_SIZE, CCC_WPR, CCC_RPB>(in, w, out, K, N, s);
+}
+static void launch_hq52k_A(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<5, hqs::HQ52K_BLOCK_SIZE, CCA_WPR, CCA_RPB>(in, w, out, K, N, s);
+}
+static void launch_hq52k_B(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<5, hqs::HQ52K_BLOCK_SIZE, CCB_WPR, CCB_RPB>(in, w, out, K, N, s);
+}
+static void launch_hq52k_C(const half* in, const uint8_t* w, half* out, int K, int N, cudaStream_t s) {
+    launch_symmetric<5, hqs::HQ52K_BLOCK_SIZE, CCC_WPR, CCC_RPB>(in, w, out, K, N, s);
+}
 
 // ============================================================================
 // AUTO-TUNE BENCHMARK (local copy to keep TU independent)
@@ -356,6 +477,8 @@ static float benchmark_compact_kernel(
 
 static std::unordered_map<uint64_t, int> s_tune_cache_hq41k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq51k;
+static std::unordered_map<uint64_t, int> s_tune_cache_hq42k;
+static std::unordered_map<uint64_t, int> s_tune_cache_hq52k;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -419,6 +542,8 @@ static void tune_sidecar_load_once() {
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
         if      (strcmp(fmt, "hq41k") == 0) s_tune_cache_hq41k[key] = best;
         else if (strcmp(fmt, "hq51k") == 0) s_tune_cache_hq51k[key] = best;
+        else if (strcmp(fmt, "hq42k") == 0) s_tune_cache_hq42k[key] = best;
+        else if (strcmp(fmt, "hq52k") == 0) s_tune_cache_hq52k[key] = best;
         loaded++;
     }
     fclose(f);
@@ -517,6 +642,78 @@ void launch_matmul_hq51k(
         for (int m = 0; m < M; m++) {
             launch_matmul_hq51k(input + m * K, weights, output + m * N, 1, K, N, stream);
         }
+    }
+}
+
+void launch_matmul_hq42k(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream
+) {
+    if (M == 1) {
+        const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+        tune_sidecar_load_once();
+        auto it = s_tune_cache_hq42k.find(key);
+        if (it == s_tune_cache_hq42k.end()) {
+            const float ms_a = benchmark_compact_kernel(launch_hq42k_A, input, weights, output, K, N, stream);
+            const float ms_b = benchmark_compact_kernel(launch_hq42k_B, input, weights, output, K, N, stream);
+            const float ms_c = benchmark_compact_kernel(launch_hq42k_C, input, weights, output, K, N, stream);
+            int best = 0;
+            float best_ms = ms_a;
+            if (ms_b < best_ms) { best = 1; best_ms = ms_b; }
+            if (ms_c < best_ms) { best = 2; }
+            s_tune_cache_hq42k[key] = best;
+            tune_sidecar_append("hq42k", K, N, best);
+            if (getenv("HELIOS_TUNE_DEBUG"))
+                fprintf(stderr, "[tune] hq42k K=%d N=%d A=%.1fus B=%.1fus C=%.1fus -> %c\n",
+                        K, N, ms_a * 1000, ms_b * 1000, ms_c * 1000, 'A' + best);
+            it = s_tune_cache_hq42k.find(key);
+        }
+        switch (it->second) {
+            case 0: launch_hq42k_A(input, weights, output, K, N, stream); break;
+            case 1: launch_hq42k_B(input, weights, output, K, N, stream); break;
+            case 2: launch_hq42k_C(input, weights, output, K, N, stream); break;
+        }
+    } else if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hq42k_cublas(input, weights, output, M, K, N, stream);
+    } else {
+        for (int m = 0; m < M; ++m)
+            launch_matmul_hq42k(input + m * K, weights, output + m * N, 1, K, N, stream);
+    }
+}
+
+void launch_matmul_hq52k(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream
+) {
+    if (M == 1) {
+        const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+        tune_sidecar_load_once();
+        auto it = s_tune_cache_hq52k.find(key);
+        if (it == s_tune_cache_hq52k.end()) {
+            const float ms_a = benchmark_compact_kernel(launch_hq52k_A, input, weights, output, K, N, stream);
+            const float ms_b = benchmark_compact_kernel(launch_hq52k_B, input, weights, output, K, N, stream);
+            const float ms_c = benchmark_compact_kernel(launch_hq52k_C, input, weights, output, K, N, stream);
+            int best = 0;
+            float best_ms = ms_a;
+            if (ms_b < best_ms) { best = 1; best_ms = ms_b; }
+            if (ms_c < best_ms) { best = 2; }
+            s_tune_cache_hq52k[key] = best;
+            tune_sidecar_append("hq52k", K, N, best);
+            if (getenv("HELIOS_TUNE_DEBUG"))
+                fprintf(stderr, "[tune] hq52k K=%d N=%d A=%.1fus B=%.1fus C=%.1fus -> %c\n",
+                        K, N, ms_a * 1000, ms_b * 1000, ms_c * 1000, 'A' + best);
+            it = s_tune_cache_hq52k.find(key);
+        }
+        switch (it->second) {
+            case 0: launch_hq52k_A(input, weights, output, K, N, stream); break;
+            case 1: launch_hq52k_B(input, weights, output, K, N, stream); break;
+            case 2: launch_hq52k_C(input, weights, output, K, N, stream); break;
+        }
+    } else if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hq52k_cublas(input, weights, output, M, K, N, stream);
+    } else {
+        for (int m = 0; m < M; ++m)
+            launch_matmul_hq52k(input + m * K, weights, output + m * N, 1, K, N, stream);
     }
 }
 

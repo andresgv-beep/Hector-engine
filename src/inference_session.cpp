@@ -395,15 +395,19 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         // El grafo y sus buffers de trabajo son del MODELO: los comparten
         // todas las sesiones, y por eso los turnos van en serie.
         s.arch = s.gb.detect_architecture(*s.engine, "text");
+        // Gemma de solo texto nunca prefillea más de kPrefillChunk.
+        // Conservar el techo multimodal para los demás caminos.
+        const uint32_t scratch_tokens = s.is_gemma4 && !s.loader.has_gemma4_vision_config()
+                                            ? kPrefillChunk : kScratchTokens;
         s.engine->tensors().allocate_and_register(
-            "input_tokens", {1, kScratchTokens}, dtype::INT32());
+            "input_tokens", {1, scratch_tokens}, dtype::INT32());
         if (s.is_gemma4) {
             s.gb.allocate_gemma4_scratch(*s.engine, s.model_config,
                                          s.loader.gemma4_config(), s.arch,
-                                         1, kScratchTokens);
+                                         1, scratch_tokens);
         } else {
             s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
-                                  1, kScratchTokens);
+                                  1, scratch_tokens);
         }
 
         // Mismos valores por defecto que el oraculo: esto no cambia conducta.

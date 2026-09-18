@@ -60,6 +60,16 @@ void launch_matmul_hq51k(
     cudaStream_t stream = nullptr
 );
 
+void launch_matmul_hq42k(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream = nullptr
+);
+
+void launch_matmul_hq52k(
+    const half* input, const uint8_t* weights, half* output,
+    int M, int K, int N, cudaStream_t stream = nullptr
+);
+
 // FP16 x FP16 matmul (for activations, non-quantized weights)
 void launch_matmul_fp16(
     const half* A,          // [M, K]
@@ -531,6 +541,18 @@ void launch_embedding_hq51k(
     int seq_len,
     int vocab_size,
     int dim,
+    cudaStream_t stream = nullptr
+);
+
+void launch_embedding_hq42k(
+    const int32_t* indices, const uint8_t* table, half* output,
+    int batch_size, int seq_len, int vocab_size, int dim,
+    cudaStream_t stream = nullptr
+);
+
+void launch_embedding_hq52k(
+    const int32_t* indices, const uint8_t* table, half* output,
+    int batch_size, int seq_len, int vocab_size, int dim,
     cudaStream_t stream = nullptr
 );
 

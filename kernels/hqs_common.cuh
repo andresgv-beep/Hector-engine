@@ -53,6 +53,10 @@ constexpr int HQ31K_BLOCK_SIZE = COMPACT_HEADER_SIZE + HQ31K_PAYLOAD;  // 136
 constexpr int HQ41K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_4BIT;  // 168
 constexpr int HQ51K_BLOCK_SIZE = COMPACT_HEADER_SIZE + PAYLOAD_5BIT;  // 200
 
+constexpr int SYMMETRIC_HEADER_SIZE = 24;
+constexpr int HQ42K_BLOCK_SIZE = SYMMETRIC_HEADER_SIZE + PAYLOAD_4BIT;  // 152
+constexpr int HQ52K_BLOCK_SIZE = SYMMETRIC_HEADER_SIZE + PAYLOAD_5BIT;  // 184
+
 // HQ6.2K layout (264 bytes): fp16 d_scale/d_min/min_base, two padding
 // bytes, 32 byte-aligned q_scale values, 32 byte-aligned q_min values and
 // 192 bytes of 6-bit payload.
@@ -90,6 +94,19 @@ void decode_compact_group(
     float scale = d_scale * (float(q_s) * (1.0f / 15.0f));
     min_f = min_base + d_min * (float(q_m) * (1.0f / 15.0f));
     scoeff = scale * q_max_inv;
+}
+
+__device__ __forceinline__
+float decode_symmetric_step(const uint8_t* block_ptr, int group_idx) {
+    const float d_step = __half2float(__ushort_as_half(
+        block_ptr[0] | (block_ptr[1] << 8)));
+    const int bit = group_idx * 5;
+    const int byte = 4 + bit / 8;
+    const int shift = bit & 7;
+    const uint16_t word = uint16_t(block_ptr[byte]) |
+        (uint16_t(block_ptr[byte + 1]) << 8);
+    const uint8_t q_step = (word >> shift) & 0x1f;
+    return d_step * float(q_step) * (1.0f / 31.0f);
 }
 
 __device__ __forceinline__

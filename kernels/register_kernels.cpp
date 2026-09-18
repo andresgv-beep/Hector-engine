@@ -433,6 +433,16 @@ void register_linear_kernels(Engine& engine) {
                 M, K, N,
                 ctx.stream
             );
+        } else if (weight->dtype == dtype::HQ42K()) {
+            launch_matmul_hq42k(
+                in_ptr, as_u8_const(weight), as_fp16(output),
+                M, K, N, ctx.stream
+            );
+        } else if (weight->dtype == dtype::HQ52K()) {
+            launch_matmul_hq52k(
+                in_ptr, as_u8_const(weight), as_fp16(output),
+                M, K, N, ctx.stream
+            );
         } else if (weight->dtype == dtype::FP16()) {
             launch_matmul_fp16(
                 in_ptr, as_fp16_const(weight), as_fp16(output),
@@ -479,6 +489,16 @@ void register_memory_kernels(Engine& engine) {
             );
         } else if (table->dtype == dtype::HQ51K()) {
             launch_embedding_hq51k(
+                as_i32(indices), as_u8_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
+        } else if (table->dtype == dtype::HQ42K()) {
+            launch_embedding_hq42k(
+                as_i32(indices), as_u8_const(table), as_fp16(output),
+                batch, seq, vocab, dim, ctx.stream
+            );
+        } else if (table->dtype == dtype::HQ52K()) {
+            launch_embedding_hq52k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),
                 batch, seq, vocab, dim, ctx.stream
             );

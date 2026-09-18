@@ -148,6 +148,64 @@ void launch_embedding_hq51k(
     );
 }
 
+template<int BITS, int BLOCK_BYTES>
+__global__ void embedding_hq_symmetric_kernel(
+    const int32_t* __restrict__ indices,
+    const uint8_t* __restrict__ table,
+    half* __restrict__ output,
+    int total_tokens, int vocab_size, int dim
+) {
+    using namespace hqs;
+    const int token = blockIdx.x;
+    if (token >= total_tokens) return;
+    const int row = indices[token];
+    half* dst = output + size_t(token) * dim;
+    if (row < 0 || row >= vocab_size) {
+        for (int d = threadIdx.x; d < dim; d += blockDim.x) dst[d] = __float2half(0.0f);
+        return;
+    }
+    const size_t blocks_per_row = (size_t(dim) + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
+    for (int d = threadIdx.x; d < dim; d += blockDim.x) {
+        const uint8_t* block = table +
+            (size_t(row) * blocks_per_row + size_t(d) / SUPER_BLOCK_SIZE) * BLOCK_BYTES;
+        const int in_block = d % SUPER_BLOCK_SIZE;
+        const int group = in_block / GROUP_SIZE;
+        const int lane = in_block % GROUP_SIZE;
+        const float step = decode_symmetric_step(block, group);
+        int code = 0;
+        if constexpr (BITS == 4) {
+            const uint8_t byte = block[SYMMETRIC_HEADER_SIZE + in_block / 2];
+            code = (in_block & 1) ? (byte & 15) : (byte >> 4);
+            code -= 8;
+        } else {
+            const int offset = SYMMETRIC_HEADER_SIZE + group * 5;
+            uint64_t packed = 0;
+            #pragma unroll
+            for (int i = 0; i < 5; ++i) packed |= uint64_t(block[offset + i]) << (i * 8);
+            code = int((packed >> (lane * 5)) & 31) - 16;
+        }
+        dst[d] = __float2half(float(code) * step);
+    }
+}
+
+void launch_embedding_hq42k(
+    const int32_t* indices, const uint8_t* table, half* output,
+    int batch_size, int seq_len, int vocab_size, int dim, cudaStream_t stream
+) {
+    const int tokens = batch_size * seq_len;
+    embedding_hq_symmetric_kernel<4, hqs::HQ42K_BLOCK_SIZE>
+        <<<tokens, min(256, dim), 0, stream>>>(indices, table, output, tokens, vocab_size, dim);
+}
+
+void launch_embedding_hq52k(
+    const int32_t* indices, const uint8_t* table, half* output,
+    int batch_size, int seq_len, int vocab_size, int dim, cudaStream_t stream
+) {
+    const int tokens = batch_size * seq_len;
+    embedding_hq_symmetric_kernel<5, hqs::HQ52K_BLOCK_SIZE>
+        <<<tokens, min(256, dim), 0, stream>>>(indices, table, output, tokens, vocab_size, dim);
+}
+
 __global__ void embedding_hq62k_kernel(
     const int32_t* __restrict__ indices,
     const uint8_t* __restrict__ table,

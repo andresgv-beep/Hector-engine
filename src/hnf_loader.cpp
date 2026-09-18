@@ -1574,6 +1574,8 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     if (s == "hq41k") return dtype::HQ41K();
     if (s == "hq51k") return dtype::HQ51K();
     if (s == "hq62k") return dtype::HQ62K();
+    if (s == "hq42k") return dtype::HQ42K();
+    if (s == "hq52k") return dtype::HQ52K();
     if (s == "int8") return dtype::INT8();
     if (s == "int32") return dtype::INT32();
     return DTYPE_INVALID;

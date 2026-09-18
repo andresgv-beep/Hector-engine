@@ -24,7 +24,10 @@ int main(int argc, char** argv) {
     // reaprovechar. Su ventana es pequeña porque esos prompts lo son.
     helios::InferenceSession session, auxiliar;
     if (!session.attach(modelo,&error)) { std::cerr<<error; return 1; }
-    if (!auxiliar.attach(modelo,&error,2048)) { std::cerr<<error; return 1; }
+    // Las generaciones auxiliares son avisos y extracciones breves. Darles 2K
+    // duplicaba innecesariamente el anillo KV de las capas locales; 1K cubre
+    // esos prompts y deja más margen para el modelo principal en tarjetas de 12 GB.
+    if (!auxiliar.attach(modelo,&error,1024)) { std::cerr<<error; return 1; }
     std::printf("READY\n"); std::fflush(stdout);
     std::string header;
     while (std::getline(std::cin,header)) {

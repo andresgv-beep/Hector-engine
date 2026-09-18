@@ -172,6 +172,10 @@ target_link_libraries(test_hq62_embedding PRIVATE helios-engine)
 add_executable(test_hqs_wide tests/test_hqs_wide.cu)
 target_link_libraries(test_hqs_wide PRIVATE helios-engine)
 
+# Symmetric HQ4.2K/HQ5.2K CPU/CUDA parity for decode, prefill and embedding.
+add_executable(test_hqs_symmetric tests/test_hqs_symmetric.cu)
+target_link_libraries(test_hqs_symmetric PRIVATE helios-engine)
+
 # HNF Loader test
 add_executable(test_hnf_loader tests/test_hnf_loader.cpp)
 target_link_libraries(test_hnf_loader PRIVATE helios-engine)
@@ -242,6 +246,7 @@ add_test(NAME KernelTest COMMAND test_kernels)
 add_test(NAME HQ31KTest COMMAND test_hq31k)
 add_test(NAME HQ62EmbeddingTest COMMAND test_hq62_embedding)
 add_test(NAME HqsWideKTest COMMAND test_hqs_wide)
+add_test(NAME HqsSymmetricTest COMMAND test_hqs_symmetric)
 add_test(NAME HnfLoaderTest COMMAND test_hnf_loader)
 add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
