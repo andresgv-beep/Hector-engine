@@ -65,7 +65,11 @@ int main(int argc, char** argv) {
         std::atomic<bool> stop{false};
         std::string output;
         helios::InferenceSession::GenConfig gen;
-        gen.temperature=0; gen.max_visible_tokens=1536; gen.max_thinking_tokens=0;
+        // Una respuesta con código puede superar 1536 tokens. Ese techo hacía
+        // que el agente descartara una salida correcta como `max_tokens` aunque
+        // quedaran miles de tokens de contexto y casi 2 GiB de VRAM. El límite
+        // operativo del agente corta el KV a 12K, así que 3072 aún cabe en 16K.
+        gen.temperature=0; gen.max_visible_tokens=3072; gen.max_thinking_tokens=0;
         gen.preformatted=true; gen.close_turn=false; gen.stop_tokens={argv[3]};
         gen.reuse_prefix=true;
         auto& s_activa = es_auxiliar ? auxiliar : session;
