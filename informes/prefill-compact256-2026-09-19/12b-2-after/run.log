@@ -1,0 +1,13 @@
+  [VRAM] text.token_embedding.weight compartido con lm_head; no se puede mapear a RAM
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=0 trial=0 prompt=41 output=128 prefill_ms=223.233 decode_ms=3068.273 tok_s=41.717 used_MiB=9364.9 captures=1 replays=126 fallbacks=0 hash=15730427814794380040 bytes=668
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=0 trial=1 prompt=41 output=128 prefill_ms=182.882 decode_ms=3062.861 tok_s=41.791 used_MiB=9373.9 captures=1 replays=126 fallbacks=0 hash=15730427814794380040 bytes=668
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=128 trial=0 prompt=2089 output=128 prefill_ms=1826.413 decode_ms=3478.278 tok_s=36.800 used_MiB=9373.1 captures=1 replays=126 fallbacks=0 hash=15579933776154709868 bytes=714
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=128 trial=1 prompt=2089 output=128 prefill_ms=1840.523 decode_ms=3461.782 tok_s=36.975 used_MiB=9364.1 captures=1 replays=126 fallbacks=0 hash=15579933776154709868 bytes=714
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=384 trial=0 prompt=6185 output=128 prefill_ms=6919.229 decode_ms=3785.799 tok_s=33.811 used_MiB=9364.1 captures=1 replays=126 fallbacks=0 hash=4148028306768951682 bytes=720
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH prefill=1 repeat=384 trial=1 prompt=6185 output=128 prefill_ms=6899.411 decode_ms=3787.312 tok_s=33.797 used_MiB=9364.1 captures=1 replays=126 fallbacks=0 hash=4148028306768951682 bytes=720

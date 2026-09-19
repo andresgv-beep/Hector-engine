@@ -1,0 +1,58 @@
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+
+Resource usage:
+ Common:
+  GLOBAL:0
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+
+Resource usage:
+ Common:
+  GLOBAL:0
+ Function _ZN6helios7kernels25kv_cache_update_kernel_dpEPK6__halfPS1_iiiiiPKi:
+  REG:23 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels22kv_cache_update_kernelEPK6__halfPS1_iiiiii:
+  REG:22 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels24rope_proportional_kernelILb1EEEvP6__halfiiiiiiPKiff:
+  REG:24 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels24rope_proportional_kernelILb0EEEvP6__halfiiiiiiPKiff:
+  REG:22 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels19qk_norm_rope_kernelILb0ELb1EEEvP6__halfS3_PKS2_S5_iiiiiiiPKifffS5_S3_S3_i:
+  REG:25 STACK:0 SHARED:128 LOCAL:0 CONSTANT[0]:468 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels19qk_norm_rope_kernelILb1ELb1EEEvP6__halfS3_PKS2_S5_iiiiiiiPKifffS5_S3_S3_i:
+  REG:26 STACK:0 SHARED:128 LOCAL:0 CONSTANT[0]:468 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels19qk_norm_rope_kernelILb1ELb0EEEvP6__halfS3_PKS2_S5_iiiiiiiPKifffS5_S3_S3_i:
+  REG:26 STACK:0 SHARED:128 LOCAL:0 CONSTANT[0]:468 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels19qk_norm_rope_kernelILb0ELb0EEEvP6__halfS3_PKS2_S5_iiiiiiiPKifffS5_S3_S3_i:
+  REG:25 STACK:0 SHARED:128 LOCAL:0 CONSTANT[0]:468 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels35attention_prefill_compact256_kernelEPK6__halfS3_S3_PS1_iiiiiiifi:
+  REG:56 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels34attention_prefill_coalesced_kernelEPK6__halfS3_S3_PS1_iiiiiiifi:
+  REG:64 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels31attention_prefill_cached_kernelEPK6__halfS3_S3_PS1_iiiiiiifi:
+  REG:80 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels14rope_kernel_dpEP6__halfiiiiiPKiff:
+  REG:23 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:400 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels11rope_kernelEP6__halfiiiiiiff:
+  REG:22 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:392 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels29attention_cached_v2_kernel_dpILb1EEEvPK6__halfS4_S4_PS2_iPKiiiiifiiPf:
+  REG:56 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:440 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels28attention_cached_split_mergeEPKfP6__halfii:
+  REG:39 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:376 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels29attention_cached_v2_kernel_dpILb0EEEvPK6__halfS4_S4_PS2_iPKiiiiifiiPf:
+  REG:72 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:440 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels26attention_cached_v2_kernelEPK6__halfS3_S3_PS1_iiiiiifii:
+  REG:80 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels22attention_naive_kernelEPK6__halfS3_S3_PS1_iiiiiifbi:
+  REG:40 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0

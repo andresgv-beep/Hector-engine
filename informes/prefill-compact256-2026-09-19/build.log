@@ -1,0 +1,101 @@
+[  2%] Built target ck_dump
+[  3%] Built target test_mini_json
+[  4%] Building CUDA object CMakeFiles/helios-engine.dir/kernels/attention.cu.o
+[  4%] Linking CXX static library libhelios-engine.a
+[ 29%] Built target helios-engine
+[ 33%] Linking CXX executable test_command
+[ 33%] Linking CXX executable test_engine
+[ 33%] Linking CXX executable test_memory
+[ 33%] Linking CXX executable test_hq31k
+[ 33%] Linking CXX executable test_tensor
+[ 33%] Linking CXX executable test_kernels
+[ 34%] Built target test_tensor
+[ 35%] Built target test_memory
+[ 36%] Built target test_command
+[ 37%] Built target test_engine
+[ 38%] Linking CXX executable test_hq62_embedding
+[ 39%] Built target test_hq31k
+[ 40%] Linking CXX executable test_hqs_wide
+[ 40%] Linking CXX executable test_hqs_symmetric
+[ 41%] Linking CXX executable test_hnf_loader
+[ 42%] Built target test_kernels
+[ 43%] Linking CXX executable test_gemma4_metadata
+[ 43%] Linking CXX executable test_gemma4_vision_metadata
+[ 43%] Built target test_hq62_embedding
+[ 43%] Built target test_gemma4_metadata
+[ 44%] Built target test_hnf_loader
+[ 44%] Built target test_hqs_wide
+[ 45%] Built target test_hqs_symmetric
+[ 46%] Linking CXX executable test_gemma4_vision_preprocess
+[ 47%] Built target test_gemma4_vision_metadata
+[ 48%] Linking CXX executable test_gemma4_primitives
+[ 48%] Linking CXX executable test_gemma4_vision_runner
+[ 48%] Linking CXX executable test_gemma4_multimodal
+[ 49%] Linking CXX executable test_gemma4_ple
+[ 50%] Linking CXX executable test_gemma4_graph
+[ 51%] Built target test_gemma4_vision_preprocess
+[ 52%] Linking CXX executable test_gemma4_kv
+[ 53%] Built target test_gemma4_primitives
+[ 54%] Built target test_gemma4_multimodal
+[ 55%] Built target test_gemma4_vision_runner
+[ 55%] Built target test_gemma4_ple
+[ 56%] Linking CXX executable test_gemma4_tokenizer
+[ 57%] Linking CXX executable test_chat_template
+[ 57%] Linking CXX executable test_ck_policy
+[ 58%] Linking CXX executable inspect_hnf
+[ 58%] Built target test_gemma4_graph
+[ 59%] Linking CXX executable helios_model_probe
+[ 60%] Built target test_chat_template
+[ 62%] Built target test_ck_policy
+[ 62%] Built target test_gemma4_kv
+[ 63%] Built target test_gemma4_tokenizer
+[ 65%] Linking CXX executable test_attention_split
+[ 65%] Linking CXX executable test_attention_prefill
+[ 65%] Linking CXX executable test_attention_split_model
+[ 66%] Linking CXX executable test_attention_prefill_model
+[ 67%] Built target helios_model_probe
+[ 68%] Built target inspect_hnf
+[ 69%] Linking CXX executable test_graph_builder
+[ 70%] Linking CXX executable test_generate
+[ 71%] Built target test_attention_prefill
+[ 72%] Built target test_attention_split
+[ 73%] Linking CXX executable test_generate_kv
+[ 73%] Built target test_attention_prefill_model
+[ 75%] Linking CXX executable test_tokenizer
+[ 75%] Built target test_attention_split_model
+[ 76%] Built target test_graph_builder
+[ 78%] Linking CXX executable test_generate_full
+[ 78%] Linking CXX executable test_gemma4_generate
+[ 79%] Linking CXX executable gemma4_dump_logits
+[ 80%] Built target test_generate
+[ 81%] Linking CXX executable gemma4_multimodal_dump
+[ 81%] Built target test_tokenizer
+[ 82%] Built target test_generate_kv
+[ 83%] Linking CXX executable gemma4_calibrate
+[ 83%] Built target test_generate_full
+[ 84%] Built target test_gemma4_generate
+[ 85%] Linking CXX executable test_multimodal
+[ 86%] Built target gemma4_dump_logits
+[ 87%] Linking CXX executable test_generate_modal
+[ 88%] Linking CXX executable text_code_relay
+[ 89%] Linking CXX executable test_smoke
+[ 89%] Built target gemma4_multimodal_dump
+[ 89%] Linking CXX executable test_chat
+[ 89%] Built target gemma4_calibrate
+[ 90%] Built target test_multimodal
+[ 90%] Built target test_generate_modal
+[ 92%] Built target text_code_relay
+[ 92%] Linking CXX executable helios_chat
+[ 93%] Linking CXX executable helios_runtime
+[ 93%] Built target test_smoke
+[ 93%] Linking CXX executable helios_formatted
+[ 94%] Linking CXX executable sesiones_test
+[ 95%] Linking CXX executable test_inference_session_gemma4
+[ 96%] Built target test_chat
+[ 96%] Linking CXX executable test_inference_cancellation
+[ 96%] Built target helios_runtime
+[ 97%] Built target helios_chat
+[ 98%] Built target helios_formatted
+[ 98%] Built target sesiones_test
+[ 99%] Built target test_inference_session_gemma4
+[100%] Built target test_inference_cancellation

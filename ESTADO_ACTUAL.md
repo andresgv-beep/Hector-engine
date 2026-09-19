@@ -1,6 +1,6 @@
 # Estado actual e índice documental de Héctor
 
-Revisión documental: **2026-09-19**, código `b822e1b`. Este archivo resume el
+Actualizado: **2026-09-19**, con prefill compacto validado sobre `333b7e5`. Este archivo resume el
 estado operativo. Los planes e informes fechados conservan sus resultados de
 entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 
@@ -16,6 +16,7 @@ entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 | Phi / DeepSeek | Referencias y pruebas históricas; no se declaran recertificados por la batería reciente Gemma. |
 | Falcon / LLaMA y otras familias | No elevar detección/configuración a soporte end-to-end certificado sin prueba específica con pesos. |
 | Sesiones | `Model` comparte pesos; `InferenceSession` tiene KV y sampler propios. Ejecución serializada, no batching concurrente. |
+| Prefill local HD256 | Acumuladores compactos integrados para las dos geometrías Gemma 12B/E4B validadas. Prefill largo 14–15 % / 10–11 % más corto frente al coalescido previo; decode sin cambios. [Pruebas y medidas](informes/PREFILL_COMPACTO_HD256_2026-09-19.md). |
 | Prefijo y CUDA Graphs | Implementados con límites del anillo y reconstrucción cuando corresponde. [KV/grafos](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md). |
 | Progreso/cancelación | Implementados en NDJSON y conectados al agente/UI de Hexos. [Contrato](tools/RUNTIME_PROTOCOL.md). |
 | HTTP | Pertenece a Hexos, no al ejecutable de inferencia. Héctor sí tiene CLI/runtime utilizables, no solo tests. |
@@ -60,7 +61,7 @@ La cancelación conserva límites: espera a que termine el trabajo CUDA en curso
 - **Contratos vigentes:** [runtime](tools/RUNTIME_PROTOCOL.md),
   [capacidades](tools/MODEL_CAPABILITIES.md), [adaptadores](tools/MULTIMODAL_ADAPTER.md),
   [pesos mapeados](tools/MAPPED_WEIGHT_PIPELINE.md).
-- **Implementación reciente:** [cancelación y recursos](informes/CANCELACION_RECURSOS_2026-09-19.md),
+- **Implementación reciente:** [prefill compacto HD256](informes/PREFILL_COMPACTO_HD256_2026-09-19.md), [cancelación y recursos](informes/CANCELACION_RECURSOS_2026-09-19.md),
   los informes `OPTIMIZACION_*_2026-09-19.md` enlazados en el README.
 - **Diagnósticos de una base anterior:** [arquitectura inicial](informes/ARQUITECTURA_RENDIMIENTO_2026-09-19.md),
   [revisión posterior](informes/REVISION_ARQUITECTURA_ACTUAL_2026-09-19.md),
@@ -82,8 +83,9 @@ con código y corregido. Los planes antiguos llevan un aviso y este enlace;
 se conservan mediciones originales. El contrato NDJSON documenta las extensiones
 ya implementadas, sin presentar las fixtures iniciales como cobertura completa.
 
-La revisión solo cambia Markdown. Se comprobaron enlaces relativos y diferencias
-de formato; no se generaron nuevos benchmarks ni se recompiló el motor.
+La revisión documental inicial (`333b7e5`) solo cambió Markdown. La ampliación
+posterior de prefill HD256 sí recompila y mide el motor: CTest 25/25, 63 casos
+sintéticos y regresiones con pesos reales 12B/E4B; véase su informe enlazado.
 
 ## Mantenimiento
 

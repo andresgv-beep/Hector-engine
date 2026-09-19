@@ -1,0 +1,5 @@
+<|channel>thought
+<channel|>Un sistema operativo (SO) es el software fundamental que actúa como intermediario entre el hardware de una computadora y las aplicaciones de usuario. Su función principal es gestionar los recursos físicos (CPU, memoria, dispositivos de entrada/salida) y proporcionar un entorno abstracto y seguro para que los programas puedan ejecutarse sin necesidad de que el programador gestione directamente los detalles complejos del hardware. Para entender cómo funciona, es necesario desglosar sus componentes, sus modos de ejecución y sus mecanismos de gestión de recursos.
+
+### 1. El Núcleo (Kernel) y los Modos de Ejecución
+El corazón de

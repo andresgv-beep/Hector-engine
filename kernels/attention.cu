@@ -765,7 +765,7 @@ __global__ void rope_proportional_kernel(
 // merge en shared. Requiere kv_cache_update ANTES (el cache ya contiene las
 // posiciones nuevas).
 
-template<bool Coalesced = false>
+template<bool Coalesced = false, int ValuesPerThread = MAX_HD_PER_THREAD>
 __device__ __forceinline__ void attention_prefill_cached_body(
     const half* __restrict__ Q,          // [S_new, heads, head_dim]
     const half* __restrict__ K_cache,    // [max_seq, kv_heads, head_dim]
@@ -791,9 +791,9 @@ __device__ __forceinline__ void attention_prefill_cached_body(
     const int total_kv = past_len + q_idx + 1;   // causal: hasta mi posición
 
     const int q_base = (q_idx * num_heads + h) * head_dim;
-    float q_reg[MAX_HD_PER_THREAD];
+    float q_reg[ValuesPerThread];
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+    for (int i = 0; i < ValuesPerThread; i++) {
         int d = lane + i * WARP_SIZE;
         q_reg[i] = (d < head_dim) ? __half2float(Q[q_base + d]) : 0.0f;
     }
@@ -807,9 +807,9 @@ __device__ __forceinline__ void attention_prefill_cached_body(
 
     float running_max = -1e10f;
     float running_sum = 0.0f;
-    float acc[MAX_HD_PER_THREAD];
+    float acc[ValuesPerThread];
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] = 0.0f;
+    for (int i = 0; i < ValuesPerThread; i++) acc[i] = 0.0f;
 
     int physical = Coalesced ? pos_start % cache_slots : 0;
     for (int pos = pos_start; pos < pos_end; pos++) {
@@ -817,7 +817,7 @@ __device__ __forceinline__ void attention_prefill_cached_body(
 
         float dot = 0.0f;
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+        for (int i = 0; i < ValuesPerThread; i++) {
             int d = lane + i * WARP_SIZE;
             if (d < head_dim) dot += q_reg[i] * __half2float(K_cache[kv_base + d]);
         }
@@ -831,9 +831,14 @@ __device__ __forceinline__ void attention_prefill_cached_body(
         float correction = expf(running_max - new_max);
         running_sum = running_sum * correction + exp_score;
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) acc[i] *= correction;
+        for (int i = 0; i < ValuesPerThread; i++) {
+            // Keep the reference's separate rescaling before adding weighted V.
+            if constexpr (ValuesPerThread < MAX_HD_PER_THREAD)
+                acc[i] = __fmul_rn(acc[i], correction);
+            else acc[i] *= correction;
+        }
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+        for (int i = 0; i < ValuesPerThread; i++) {
             int d = lane + i * WARP_SIZE;
             if (d < head_dim) acc[i] += exp_score * __half2float(V_cache[kv_base + d]);
         }
@@ -851,31 +856,31 @@ __device__ __forceinline__ void attention_prefill_cached_body(
     float* s_acc = s_sum + ATTN_WARPS;
 
     if (lane == 0) { s_max[warp_id] = running_max; s_sum[warp_id] = running_sum; }
-    const int acc_stride = MAX_HD_PER_THREAD * WARP_SIZE;
+    const int acc_stride = ValuesPerThread * WARP_SIZE;
     #pragma unroll
-    for (int i = 0; i < MAX_HD_PER_THREAD; i++)
-        s_acc[warp_id * acc_stride + (Coalesced ? i * WARP_SIZE + lane : lane * MAX_HD_PER_THREAD + i)] = acc[i];
+    for (int i = 0; i < ValuesPerThread; i++)
+        s_acc[warp_id * acc_stride + (Coalesced ? i * WARP_SIZE + lane : lane * ValuesPerThread + i)] = acc[i];
     __syncthreads();
 
     if (warp_id == 0) {
         float global_max = s_max[0];
         for (int w = 1; w < ATTN_WARPS; w++) global_max = fmaxf(global_max, s_max[w]);
 
-        float merged_acc[MAX_HD_PER_THREAD];
+        float merged_acc[ValuesPerThread];
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) merged_acc[i] = 0.0f;
+        for (int i = 0; i < ValuesPerThread; i++) merged_acc[i] = 0.0f;
         float merged_sum = 0.0f;
         for (int w = 0; w < ATTN_WARPS; w++) {
             float correction = expf(s_max[w] - global_max);
             merged_sum += s_sum[w] * correction;
             #pragma unroll
-            for (int i = 0; i < MAX_HD_PER_THREAD; i++)
-                merged_acc[i] += s_acc[w * acc_stride + (Coalesced ? i * WARP_SIZE + lane : lane * MAX_HD_PER_THREAD + i)] * correction;
+            for (int i = 0; i < ValuesPerThread; i++)
+                merged_acc[i] += s_acc[w * acc_stride + (Coalesced ? i * WARP_SIZE + lane : lane * ValuesPerThread + i)] * correction;
         }
         float inv_sum = (merged_sum > 0.0f) ? (1.0f / merged_sum) : 0.0f;
         const int out_base = (q_idx * num_heads + h) * head_dim;
         #pragma unroll
-        for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+        for (int i = 0; i < ValuesPerThread; i++) {
             int d = lane + i * WARP_SIZE;
             if (d < head_dim)
                 output[out_base + d] = __float2half(merged_acc[i] * inv_sum);
@@ -903,6 +908,18 @@ __global__ __launch_bounds__(ATTN_BLOCK, 2) void attention_prefill_coalesced_ker
         heads, kv_heads, head_dim, max_seq_len, cache_slots, scale, window_size);
 }
 
+// The validated HD256 paths only need eight values per lane. Keep head_dim
+// dynamic: fully constant-folding it changes compiler contraction/rounding.
+// This halves shared accumulators without changing the 16 softmax partitions.
+__global__ __launch_bounds__(ATTN_BLOCK, 2) void attention_prefill_compact256_kernel(
+    const half* __restrict__ q, const half* __restrict__ k,
+    const half* __restrict__ v, half* __restrict__ output,
+    int seq_new, int past_len, int heads, int kv_heads, int head_dim,
+    int max_seq_len, int cache_slots, float scale, int window_size) {
+    attention_prefill_cached_body<true, 8>(q, k, v, output, seq_new, past_len,
+        heads, kv_heads, head_dim, max_seq_len, cache_slots, scale, window_size);
+}
+
 void launch_attention_prefill_cached_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads,
@@ -926,6 +943,17 @@ void launch_attention_prefill_cached_coalesced_fp16(
     cudaStream_t stream, int cache_slots) {
     if (cache_slots <= 0) cache_slots = max_seq_len;
     dim3 grid(seq_new, num_heads);
+    const bool compact256 = head_dim == 256 &&
+        ((num_heads == 16 && num_kv_heads == 8 && window_size == 1024) ||
+         (num_heads == 8 && num_kv_heads == 2 && window_size == 512));
+    if (compact256) {
+        const size_t compact_smem = (2 * ATTN_WARPS + ATTN_WARPS * 256) * sizeof(float);
+        attention_prefill_compact256_kernel<<<grid, ATTN_BLOCK, compact_smem, stream>>>(
+            q, k_cache, v_cache, output, seq_new, past_len, num_heads, num_kv_heads,
+            head_dim, max_seq_len, cache_slots, scale, window_size);
+        return;
+    }
+
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
     attention_prefill_coalesced_kernel<<<grid, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,

@@ -3,7 +3,7 @@
 Motor de inferencia local C++/CUDA para modelos HNF. El agente, las herramientas,
 el historial y la interfaz React viven en el repositorio `hexos-core`.
 
-**Estado revisado el 2026-09-19 sobre `b822e1b`.**
+**Estado revisado el 2026-09-19; prefill compacto validado sobre la base `333b7e5`.**
 Consulta [estado actual e índice documental](ESTADO_ACTUAL.md) para distinguir
 capacidades implementadas, límites y resultados de campañas históricas.
 
@@ -22,6 +22,10 @@ capacidades implementadas, límites y resultados de campañas históricas.
   cancelación dirigida, métricas y capacidad de contexto por sesión.
 - Puente `helios_formatted` compatible con clientes antiguos, sin entrega
   progresiva ni orden de cancelación. La ruta nativa actual de Hexos usa NDJSON.
+
+Atención local HD256 con acumuladores compactos: prefill largo del 12B un
+14–15 % más corto y del E4B un 10–11 % en la campaña local, frente al kernel
+coalescido previo. [Mediciones y límites](informes/PREFILL_COMPACTO_HD256_2026-09-19.md).
 
 ## Compilación
 

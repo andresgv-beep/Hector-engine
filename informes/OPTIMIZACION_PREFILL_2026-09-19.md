@@ -2,6 +2,10 @@
 
 Ampliación posterior: [validación y activación para E4B](OPTIMIZACION_PREFILL_E4B_2026-09-19.md).
 
+Mejora posterior adicional: [acumuladores compactos HD256](PREFILL_COMPACTO_HD256_2026-09-19.md),
+medida contra el kernel coalescido de esta campaña. Las cifras siguientes
+corresponden a la primera optimización y se conservan como evidencia histórica.
+
 Continuación de [la optimización de decode](OPTIMIZACION_ATENCION_2026-09-19.md).
 Base: `2e4f2f581bc5ae318dfeb68be5e38135b8e6ab35`. GPU: RTX 4070 Ti de 12 GB,
 60 SM; Release, CUDA 13.1, `--use_fast_math`, arquitectura nativa sm_89.

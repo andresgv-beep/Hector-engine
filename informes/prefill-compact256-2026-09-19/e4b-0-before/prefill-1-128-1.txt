@@ -1,0 +1,3 @@
+## Funcionamiento Profundo de un Sistema Operativo: Una Arquitectura de Gestión de Recursos
+
+Un Sistema Operativo (SO) es mucho más que una simple interfaz gráfica; es el **software fundamental** que actúa como intermediario, gestor y árbitro entre el hardware físico de la computadora y los programas de aplicación que el usuario desea ejecutar. Su función primordial es abstraer la complejidad del hardware subyacente, proporcionando una capa de abstracción coherente y eficiente para que los desarrolladores de software puedan escribir aplicaciones sin preocuparse por los detalles intrincados de la arquitectura del procesador, la gestión de la memoria o

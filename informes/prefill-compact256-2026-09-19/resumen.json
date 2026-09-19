@@ -1,0 +1,702 @@
+{
+  "12b": {
+    "0": {
+      "prompt_tokens": 41,
+      "before_ms": 182.433,
+      "after_ms": 182.868,
+      "reduction_percent": -0.23844370261958403,
+      "paired_reductions": [
+        0.8283587832415229,
+        -0.02023726829696315,
+        -0.24611775281884185
+      ],
+      "before_decode_tps": 42.025,
+      "after_decode_tps": 42.066,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "181.926",
+            "decode_ms": "3035.504",
+            "tok_s": "42.168",
+            "used_MiB": "9369.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "182.831",
+            "decode_ms": "3045.831",
+            "tok_s": "42.025",
+            "used_MiB": "9365.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "182.433",
+            "decode_ms": "3064.171",
+            "tok_s": "41.773",
+            "used_MiB": "9364.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "180.419",
+            "decode_ms": "3042.854",
+            "tok_s": "42.066",
+            "used_MiB": "9379.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "182.868",
+            "decode_ms": "3039.673",
+            "tok_s": "42.110",
+            "used_MiB": "9376.5",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "182.882",
+            "decode_ms": "3062.861",
+            "tok_s": "41.791",
+            "used_MiB": "9373.9",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15730427814794380040",
+            "bytes": "668"
+          }
+        ]
+      }
+    },
+    "128": {
+      "prompt_tokens": 2089,
+      "before_ms": 2148.671,
+      "after_ms": 1830.856,
+      "reduction_percent": 14.791236071041114,
+      "paired_reductions": [
+        14.791236071041114,
+        14.967716607390303,
+        14.800462909385493
+      ],
+      "before_decode_tps": 36.702,
+      "after_decode_tps": 36.724,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "2148.671",
+            "decode_ms": "3469.420",
+            "tok_s": "36.894",
+            "used_MiB": "9389.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "2144.756",
+            "decode_ms": "3489.944",
+            "tok_s": "36.677",
+            "used_MiB": "9365.9",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "2160.250",
+            "decode_ms": "3487.524",
+            "tok_s": "36.702",
+            "used_MiB": "9364.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "1830.856",
+            "decode_ms": "3485.449",
+            "tok_s": "36.724",
+            "used_MiB": "9369.2",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "1823.735",
+            "decode_ms": "3488.590",
+            "tok_s": "36.691",
+            "used_MiB": "9365.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "1840.523",
+            "decode_ms": "3461.782",
+            "tok_s": "36.975",
+            "used_MiB": "9364.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "15579933776154709868",
+            "bytes": "714"
+          }
+        ]
+      }
+    },
+    "384": {
+      "prompt_tokens": 6185,
+      "before_ms": 8025.032,
+      "after_ms": 6899.411,
+      "reduction_percent": 14.026373975829632,
+      "paired_reductions": [
+        14.130510632231752,
+        14.045103424860649,
+        14.019345554096674
+      ],
+      "before_decode_tps": 33.865,
+      "after_decode_tps": 33.792,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "8025.032",
+            "decode_ms": "3780.885",
+            "tok_s": "33.855",
+            "used_MiB": "9389.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "8028.969",
+            "decode_ms": "3778.224",
+            "tok_s": "33.878",
+            "used_MiB": "9364.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "8024.376",
+            "decode_ms": "3779.694",
+            "tok_s": "33.865",
+            "used_MiB": "9364.0",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "6891.054",
+            "decode_ms": "3797.469",
+            "tok_s": "33.707",
+            "used_MiB": "9375.8",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "6901.292",
+            "decode_ms": "3787.859",
+            "tok_s": "33.792",
+            "used_MiB": "9385.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "6899.411",
+            "decode_ms": "3787.312",
+            "tok_s": "33.797",
+            "used_MiB": "9364.1",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "4148028306768951682",
+            "bytes": "720"
+          }
+        ]
+      }
+    }
+  },
+  "e4b": {
+    "0": {
+      "prompt_tokens": 41,
+      "before_ms": 60.753,
+      "after_ms": 60.744,
+      "reduction_percent": 0.01481408325514355,
+      "paired_reductions": [
+        -0.6945710733526678,
+        -0.6732177834839481,
+        0.4901639344262243
+      ],
+      "before_decode_tps": 85.854,
+      "after_decode_tps": 85.579,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "60.325",
+            "decode_ms": "1485.140",
+            "tok_s": "86.187",
+            "used_MiB": "5823.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "60.753",
+            "decode_ms": "1490.903",
+            "tok_s": "85.854",
+            "used_MiB": "5833.8",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "61.000",
+            "decode_ms": "1493.306",
+            "tok_s": "85.716",
+            "used_MiB": "5813.5",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "60.744",
+            "decode_ms": "1495.694",
+            "tok_s": "85.579",
+            "used_MiB": "5813.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "61.162",
+            "decode_ms": "1498.543",
+            "tok_s": "85.416",
+            "used_MiB": "5823.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          },
+          {
+            "prefill": "1",
+            "repeat": "0",
+            "trial": "1",
+            "prompt": "41",
+            "output": "128",
+            "prefill_ms": "60.701",
+            "decode_ms": "1489.357",
+            "tok_s": "85.943",
+            "used_MiB": "5823.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "3346210124819552155",
+            "bytes": "644"
+          }
+        ]
+      }
+    },
+    "128": {
+      "prompt_tokens": 2089,
+      "before_ms": 735.773,
+      "after_ms": 653.597,
+      "reduction_percent": 11.168662073764601,
+      "paired_reductions": [
+        11.150186237459558,
+        11.152089205882431,
+        11.890080228548761
+      ],
+      "before_decode_tps": 72.68,
+      "after_decode_tps": 72.481,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "735.620",
+            "decode_ms": "1761.152",
+            "tok_s": "72.680",
+            "used_MiB": "5823.5",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "738.606",
+            "decode_ms": "1761.957",
+            "tok_s": "72.646",
+            "used_MiB": "5813.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "735.773",
+            "decode_ms": "1760.604",
+            "tok_s": "72.702",
+            "used_MiB": "5833.9",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "653.597",
+            "decode_ms": "1765.976",
+            "tok_s": "72.481",
+            "used_MiB": "5813.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "656.236",
+            "decode_ms": "1761.535",
+            "tok_s": "72.664",
+            "used_MiB": "5813.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          },
+          {
+            "prefill": "1",
+            "repeat": "128",
+            "trial": "1",
+            "prompt": "2089",
+            "output": "128",
+            "prefill_ms": "648.289",
+            "decode_ms": "1767.342",
+            "tok_s": "72.425",
+            "used_MiB": "5833.8",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "12648419669653998755",
+            "bytes": "668"
+          }
+        ]
+      }
+    },
+    "384": {
+      "prompt_tokens": 6185,
+      "before_ms": 2771.893,
+      "after_ms": 2501.917,
+      "reduction_percent": 9.73976989732288,
+      "paired_reductions": [
+        9.73976989732288,
+        9.57411108055971,
+        10.291296420412365
+      ],
+      "before_decode_tps": 61.742,
+      "after_decode_tps": 61.409,
+      "answers_identical": true,
+      "samples": {
+        "before": [
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2771.893",
+            "decode_ms": "2084.498",
+            "tok_s": "61.406",
+            "used_MiB": "5823.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2771.286",
+            "decode_ms": "2072.517",
+            "tok_s": "61.761",
+            "used_MiB": "5813.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2775.180",
+            "decode_ms": "2073.134",
+            "tok_s": "61.742",
+            "used_MiB": "5833.8",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          }
+        ],
+        "after": [
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2501.917",
+            "decode_ms": "2084.615",
+            "tok_s": "61.402",
+            "used_MiB": "5823.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2505.960",
+            "decode_ms": "2084.389",
+            "tok_s": "61.409",
+            "used_MiB": "5813.4",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          },
+          {
+            "prefill": "1",
+            "repeat": "384",
+            "trial": "1",
+            "prompt": "6185",
+            "output": "128",
+            "prefill_ms": "2489.578",
+            "decode_ms": "2074.729",
+            "tok_s": "61.695",
+            "used_MiB": "5813.6",
+            "captures": "1",
+            "replays": "126",
+            "fallbacks": "0",
+            "hash": "6589255476552901116",
+            "bytes": "655"
+          }
+        ]
+      }
+    }
+  }
+}

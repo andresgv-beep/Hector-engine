@@ -1,0 +1,11 @@
+SUITE graphs=0 split=0 prefill=0 long_ring=0
+  [MMAP] text.token_embedding.weight (660 MB, paginas bajo demanda)
+  [MMAP] text.ple.token_embedding.weight (2100 MB, paginas bajo demanda)
+  tokens=48 prefill=23 reused=0 captures=0 replays=0
+  tokens=48 prefill=21 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=22 captures=0 replays=0
+  tokens=48 prefill=15 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=22 captures=0 replays=0
+  tokens=48 prefill=2072 reused=0 captures=0 replays=0
+  tokens=48 prefill=2068 reused=5 captures=0 replays=0
+FAIL: reused an overwritten prefix

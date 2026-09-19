@@ -141,8 +141,16 @@ int main(int argc, char** argv) {
         // A multimodal caller may submit the entire 6144-query batch at once.
         run(8, 2, 256, 512, 6656, 6144, 1023, false, false);
         run(8, 2, 512, 0, 16384, 6144, 1023, false, false);
+        // Compact HD256: partial warp partitions and ring wrap boundaries.
+        // Also exercise HD256 geometries that must keep the generic fallback.
+        for (int seq : {1, 16, 17, 511}) {
+            run(16, 8, 256, 1024, 1536, seq, 1535, seq == 17, false);
+            run(8, 2, 256, 512, 1024, seq, 1023, seq == 17, false);
+        }
+        run(4, 4, 256, 128, 1024, 128, 512, false, false);
+        run(16, 8, 256, 0, 1024, 128, 512, true, false);
         std::printf("PASS: %d prefill cases; exact GPU parity, CPU FP64 reference, graph replay\n",
-                    e4b_only ? 26 : 53);
+                    e4b_only ? 36 : 63);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1;
     }

@@ -1,0 +1,5 @@
+## Funcionamiento Integral de un Sistema Operativo: Una Disquisición Técnica Extensa
+
+Un Sistema Operativo (SO) es mucho más que un simple intermediario entre el hardware de una computadora y el software de aplicación; es la capa de abstracción fundamental, el gestor de recursos y el árbitro de la ejecución que permite que un sistema informático funcione de manera coherente, eficiente y segura. Su función primordial es transformar la complejidad cruda del hardware (procesadores, memoria, dispositivos de E/S) en una interfaz lógica y manejable para el usuario y los programas.
+
+Para comprender su funcionamiento, es necesario des

@@ -1,0 +1,11 @@
+START e4b test_inference_session_gemma4
+PASS e4b test_inference_session_gemma4
+BENCH e4b 0 before
+BENCH e4b 0 after
+BENCH e4b 1 after
+BENCH e4b 1 before
+BENCH e4b 2 before
+BENCH e4b 2 after
+START runtime cancel regression
+ALL MODEL RUNS PASS
+RESTART 2114255 optimized
