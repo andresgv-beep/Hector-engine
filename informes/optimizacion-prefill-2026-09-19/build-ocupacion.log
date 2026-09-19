@@ -1,0 +1,8 @@
+[  3%] Building CUDA object CMakeFiles/helios-engine.dir/kernels/attention.cu.o
+[  7%] Linking CXX static library libhelios-engine.a
+[ 96%] Built target helios-engine
+[100%] Linking CXX executable test_attention_prefill
+[100%] Built target test_attention_prefill
+[ 93%] Built target helios-engine
+[ 96%] Linking CXX executable test_attention_prefill_model
+[100%] Built target test_attention_prefill_model

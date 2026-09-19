@@ -67,6 +67,7 @@ struct EngineConfig {
     bool check_errors = true;          // Check CUDA errors
     bool enable_profiling = false;     // Measure kernel times
     bool use_split_attention = false; // Opt-in Gemma decode with stable scratch
+    bool use_coalesced_prefill = false; // Opt-in cached prefill; reference available for A/B
     
     // Default stream (nullptr = default CUDA stream)
     cudaStream_t stream = nullptr;

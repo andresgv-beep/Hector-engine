@@ -1,0 +1,67 @@
+Testing: AttentionPrefillTest
+21/25 Test: AttentionPrefillTest
+Command: "/home/andres/Documentos/GitHub/Hector-engine/build/test_attention_prefill"
+Directory: /home/andres/Documentos/GitHub/Hector-engine/build
+"AttentionPrefillTest" start time: Sep 19 15:21 CEST
+Output:
+----------------------------------------------------------
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00024222002
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=0 peaked=0 bitwise=1 cpu_max=0.00016678982
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=0 peaked=1 bitwise=1 cpu_max=1.0252719e-06
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=5.3553734e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=2.7718354e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024270786
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=1535 peaked=0 bitwise=1 cpu_max=9.2873526e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=1535 peaked=0 bitwise=1 cpu_max=5.524847e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=1535 peaked=1 bitwise=1 cpu_max=0.00024717236
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=9.9593176e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=1.8342054e-05
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024717236
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00024346593
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=0 peaked=0 bitwise=1 cpu_max=9.3521216e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=0 peaked=1 bitwise=1 cpu_max=2.1385116e-12
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=0.00011902007
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=5.7040755e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024331692
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=1535 peaked=0 bitwise=1 cpu_max=0.00010573473
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=1535 peaked=0 bitwise=1 cpu_max=5.2948077e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=1535 peaked=1 bitwise=1 cpu_max=3.0170758e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=4.5752015e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=2.577978e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024255477
+PASS h=4 kvh=4 hd=64 window=0 slots=1024 seq=1 past=0 peaked=1 bitwise=1 cpu_max=0
+PASS h=8 kvh=2 hd=128 window=512 slots=640 seq=128 past=639 peaked=1 bitwise=1 cpu_max=0.00024381376
+PASS h=4 kvh=1 hd=96 window=64 slots=128 seq=65 past=64 peaked=0 bitwise=1 cpu_max=8.6392728e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00023878739
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=512 past=0 peaked=0 bitwise=1 cpu_max=0.00012068793
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=33 past=0 peaked=1 bitwise=1 cpu_max=0.00024394029
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=7 past=511 peaked=0 bitwise=1 cpu_max=0.00010704209
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=512 past=511 peaked=0 bitwise=1 cpu_max=4.3136018e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=33 past=511 peaked=1 bitwise=1 cpu_max=0.00024292464
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=5.9530603e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=6.739051e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024375979
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=6.0579534e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=5.981286e-05
+PASS h=8 kvh=2 hd=256 window=512 slots=1024 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024375979
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00024397726
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=512 past=0 peaked=0 bitwise=1 cpu_max=0.00011537105
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=33 past=0 peaked=1 bitwise=1 cpu_max=3.7917612e-06
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=7 past=511 peaked=0 bitwise=1 cpu_max=0.00011756106
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=512 past=511 peaked=0 bitwise=1 cpu_max=0.00011742267
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=33 past=511 peaked=1 bitwise=1 cpu_max=0.00024031268
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=0.00011543967
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=0.00010125018
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024404893
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=3.0309545e-05
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=2.8346175e-05
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024298182
+PASS h=8 kvh=2 hd=256 window=512 slots=6656 seq=6144 past=1023 peaked=0 bitwise=1 cpu_max=5.5133623e-05
+PASS h=8 kvh=2 hd=512 window=0 slots=16384 seq=6144 past=1023 peaked=0 bitwise=1 cpu_max=5.6595902e-05
+PASS: 53 prefill cases; exact GPU parity, CPU FP64 reference, graph replay
+<end of output>
+Test time =   7.98 sec
+----------------------------------------------------------
+Test Passed.
+"AttentionPrefillTest" end time: Sep 19 15:21 CEST
+"AttentionPrefillTest" time elapsed: 00:00:07

@@ -4,6 +4,16 @@ Polymorphic CUDA inference engine for transformer models. Core component of **HE
 
 Built from scratch in C++/CUDA without PyTorch, TensorFlow, or llama.cpp. Everything from memory management to attention kernels is handwritten.
 
+## Performance work — 2026-09-19
+
+Measured Gemma 4 12B changes, validation and reproduction instructions:
+
+- [Architecture audit](informes/ARQUITECTURA_RENDIMIENTO_2026-09-19.md)
+- [KV reuse and CUDA Graphs](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md)
+- [Decode attention](informes/OPTIMIZACION_ATENCION_2026-09-19.md)
+- [Prefill attention](informes/OPTIMIZACION_PREFILL_2026-09-19.md)
+- [E4B prefill validation](informes/OPTIMIZACION_PREFILL_E4B_2026-09-19.md)
+
 ## What is this
 
 Héctor is the inference engine at the heart of HELIOS — a modular cognitive architecture designed for local AI inference with multi-model orchestration. The full system includes Héctor (inference), HEXOS (system monitoring), HERA (episodic memory), and a Cognitive Kernel that coordinates reasoning and communication across multiple models.

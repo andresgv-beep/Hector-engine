@@ -59,13 +59,16 @@ static std::string framed(const std::string& user) {
 }
 
 static std::map<std::string, std::string> suite(const std::string& path, bool graphs,
-                                              bool split = false) {
-    std::cout << "SUITE graphs=" << graphs << " split=" << split << std::endl;
+                                              bool split = false, bool prefill = false,
+                                              bool long_ring = false) {
+    std::cout << "SUITE graphs=" << graphs << " split=" << split
+              << " prefill=" << prefill << " long_ring=" << long_ring << std::endl;
     helios::Model::Config cfg;
     cfg.hnf_path = path;
-    cfg.max_seq_len = 4096;
+    cfg.max_seq_len = long_ring ? 12288 : 4096;
     cfg.use_cuda_graphs = graphs;
     cfg.use_split_attention = split;
+    cfg.use_coalesced_prefill = prefill;
     std::string error;
     auto model = helios::Model::load(cfg, &error);
     require(bool(model), "load: " + error);
@@ -97,11 +100,14 @@ static std::map<std::string, std::string> suite(const std::string& path, bool gr
     // rebuilding the exact edited prompt in a fresh cache.
     main.reset();
     std::string body = "Informe inicial del sistema.\n";
-    for (int i = 0; i < 128; ++i)
+    // Multimodal Gemma reserves room for a 6144-token image prefill even in
+    // text chats. The longer fixture crosses that larger local ring too.
+    const uint32_t ring_bound = long_ring ? 7168 : 1536;
+    for (int i = 0; i < (long_ring ? 512 : 128); ++i)
         body += "El servidor registra eventos de red, memoria, disco y conexiones activas.\n";
     const std::string instruction = "\nExplica cómo mantener estos servidores en funcionamiento.";
     outputs["long"] = turn(main, framed(body + instruction), graphs).text;
-    require(main.cache_position() > 1536, "fixture did not wrap the local ring");
+    require(main.cache_position() > ring_bound, "fixture did not wrap the local ring");
     const std::string edited = framed("Informe corregido del sistema.\n" +
         body.substr(body.find('\n') + 1) + instruction);
     auto changed = turn(main, edited, graphs);
@@ -121,7 +127,7 @@ static std::map<std::string, std::string> suite(const std::string& path, bool gr
     main.reset();
     turn(main, framed(body + instruction), graphs);
     auto incremental = turn(main, tail, graphs);
-    require(incremental.stats.prefill_reused > 1536, "lost a valid recent prefix");
+    require(incremental.stats.prefill_reused > ring_bound, "lost a valid recent prefix");
     outputs["tail_edit"] = incremental.text;
 
     main.reset();
@@ -137,13 +143,18 @@ static std::map<std::string, std::string> suite(const std::string& path, bool gr
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2) { std::cerr << "Usage: test_inference_session_gemma4 model.hnf\n"; return 2; }
+    if (argc < 2 || argc > 3 || (argc == 3 && std::string(argv[2]) != "--long-ring")) {
+        std::cerr << "Usage: test_inference_session_gemma4 model.hnf [--long-ring]\n"; return 2;
+    }
+    const bool long_ring = argc == 3;
     try {
-        const auto eager = suite(argv[1], false);
-        const auto graphed = suite(argv[1], true);
+        const auto eager = suite(argv[1], false, false, false, long_ring);
+        const auto graphed = suite(argv[1], true, false, false, long_ring);
         require(eager == graphed, "eager and captured sessions generated different text");
-        const auto split = suite(argv[1], true, true);
+        const auto split = suite(argv[1], true, true, false, long_ring);
         require(graphed == split, "split attention changed session output");
+        const auto prefill = suite(argv[1], true, true, true, long_ring);
+        require(split == prefill, "coalesced prefill changed session output");
         std::cout << "PASS: " << eager.size()
                   << " exact text comparisons; session isolation, ring reuse, reset, cancellation and destruction\n";
         return 0;

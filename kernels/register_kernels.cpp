@@ -947,7 +947,7 @@ void register_attention_kernels(Engine& engine) {
     
     // ATTENTION_PREFILL_CACHED — S_new queries sobre el cache completo (causal)
     {
-        engine.register_kernel(op::ATTENTION_PREFILL_CACHED(), [](ExecContext& ctx, const Command& cmd) {
+        engine.register_kernel(op::ATTENTION_PREFILL_CACHED(), [&engine](ExecContext& ctx, const Command& cmd) {
             TensorInfo* q = ctx.in(0);
             TensorInfo* k_cache = ctx.in(1);
             TensorInfo* v_cache = ctx.in(2);
@@ -971,7 +971,19 @@ void register_attention_kernels(Engine& engine) {
                     "ATTENTION_PREFILL_CACHED: unsupported head geometry");
             }
 
-            launch_attention_prefill_cached_fp16(
+            // Limit automatic dispatch to the measured Gemma 12B and E4B
+            // geometries. Other shapes retain the original implementation.
+            const bool coalesced = engine.config().use_coalesced_prefill &&
+                ((num_heads == 16 &&
+                ((num_kv_heads == 8 && head_dim == 256 && window_size == 1024) ||
+                 (num_kv_heads == 1 && head_dim == 512 && window_size == 0))) ||
+                 (num_heads == 8 && num_kv_heads == 2 &&
+                 ((head_dim == 256 && window_size == 512) ||
+                  (head_dim == 512 && window_size == 0))));
+            const auto launch = coalesced
+                ? launch_attention_prefill_cached_coalesced_fp16
+                : launch_attention_prefill_cached_fp16;
+            launch(
                 as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
                 as_fp16(output),
                 (int)seq_new, (int)past_len,

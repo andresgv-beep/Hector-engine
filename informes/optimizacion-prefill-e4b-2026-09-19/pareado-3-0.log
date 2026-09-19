@@ -1,0 +1,12 @@
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=0 trial=0 prompt=41 output=128 prefill_ms=95.233 decode_ms=1265.376 tok_s=101.156 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=3346210124819552155 bytes=644
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=0 trial=1 prompt=41 output=128 prefill_ms=51.820 decode_ms=1262.845 tok_s=101.358 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=3346210124819552155 bytes=644
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=128 trial=0 prompt=2089 output=128 prefill_ms=660.163 decode_ms=1498.682 tok_s=85.408 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=12648419669653998755 bytes=668
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=128 trial=1 prompt=2089 output=128 prefill_ms=660.296 decode_ms=1498.575 tok_s=85.414 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=12648419669653998755 bytes=668
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=384 trial=0 prompt=6185 output=128 prefill_ms=2505.950 decode_ms=1757.207 tok_s=72.843 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=6589255476552901116 bytes=655
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+BENCH prefill=0 repeat=384 trial=1 prompt=6185 output=128 prefill_ms=2506.035 decode_ms=1757.640 tok_s=72.825 used_MiB=8445.3 captures=1 replays=126 fallbacks=0 hash=6589255476552901116 bytes=655

@@ -1,0 +1,138 @@
+[  1%] Built target test_mini_json
+[  3%] Built target ck_dump
+[  4%] Building CXX object CMakeFiles/helios-engine.dir/kernels/register_kernels.cpp.o
+[  5%] Linking CXX static library libhelios-engine.a
+[ 30%] Built target helios-engine
+[ 33%] Linking CXX executable test_command
+[ 33%] Building CXX object CMakeFiles/test_engine.dir/tests/test_engine.cpp.o
+[ 33%] Linking CXX executable test_memory
+[ 33%] Linking CXX executable test_tensor
+[ 33%] Building CUDA object CMakeFiles/test_kernels.dir/tests/test_kernels.cu.o
+[ 34%] Building CUDA object CMakeFiles/test_hq31k.dir/tests/test_hq31k.cu.o
+[ 36%] Built target test_tensor
+[ 36%] Built target test_memory
+[ 37%] Built target test_command
+[ 37%] Building CUDA object CMakeFiles/test_hqs_wide.dir/tests/test_hqs_wide.cu.o
+[ 37%] Building CUDA object CMakeFiles/test_hq62_embedding.dir/tests/test_hq62_embedding.cu.o
+[ 38%] Building CUDA object CMakeFiles/test_hqs_symmetric.dir/tests/test_hqs_symmetric.cu.o
+[ 39%] Linking CXX executable test_engine
+[ 39%] Built target test_engine
+[ 40%] Building CXX object CMakeFiles/test_hnf_loader.dir/tests/test_hnf_loader.cpp.o
+[ 40%] Linking CXX executable test_hnf_loader
+[ 40%] Built target test_hnf_loader
+[ 40%] Building CXX object CMakeFiles/test_gemma4_metadata.dir/tests/test_gemma4_metadata.cpp.o
+[ 41%] Linking CXX executable test_hqs_wide
+[ 42%] Linking CXX executable test_hq62_embedding
+[ 42%] Built target test_hqs_wide
+[ 43%] Linking CXX executable test_hq31k
+[ 44%] Building CXX object CMakeFiles/test_gemma4_vision_metadata.dir/tests/test_gemma4_vision_metadata.cpp.o
+[ 44%] Built target test_hq62_embedding
+[ 45%] Linking CXX executable test_gemma4_vision_preprocess
+[ 45%] Built target test_hq31k
+[ 46%] Building CUDA object CMakeFiles/test_gemma4_vision_runner.dir/tests/test_gemma4_vision_runner.cu.o
+[ 47%] Built target test_gemma4_vision_preprocess
+[ 48%] Building CUDA object CMakeFiles/test_gemma4_multimodal.dir/tests/test_gemma4_multimodal.cu.o
+[ 49%] Linking CXX executable test_gemma4_metadata
+[ 49%] Built target test_gemma4_metadata
+[ 50%] Building CUDA object CMakeFiles/test_gemma4_primitives.dir/tests/test_gemma4_primitives.cu.o
+[ 51%] Linking CXX executable test_kernels
+[ 52%] Linking CXX executable test_hqs_symmetric
+[ 52%] Built target test_kernels
+[ 53%] Building CUDA object CMakeFiles/test_gemma4_ple.dir/tests/test_gemma4_ple.cu.o
+[ 53%] Built target test_hqs_symmetric
+[ 53%] Building CUDA object CMakeFiles/test_gemma4_graph.dir/tests/test_gemma4_graph.cu.o
+[ 53%] Linking CXX executable test_gemma4_vision_metadata
+[ 53%] Built target test_gemma4_vision_metadata
+[ 54%] Building CUDA object CMakeFiles/test_gemma4_kv.dir/tests/test_gemma4_kv.cu.o
+[ 54%] Linking CXX executable test_gemma4_vision_runner
+[ 54%] Linking CXX executable test_gemma4_primitives
+[ 54%] Built target test_gemma4_vision_runner
+[ 55%] Building CXX object CMakeFiles/test_gemma4_tokenizer.dir/tests/test_gemma4_tokenizer.cpp.o
+[ 55%] Built target test_gemma4_primitives
+[ 56%] Linking CXX executable test_chat_template
+[ 57%] Built target test_chat_template
+[ 57%] Linking CXX executable test_gemma4_multimodal
+[ 58%] Linking CXX executable test_ck_policy
+[ 58%] Built target test_ck_policy
+[ 58%] Built target test_gemma4_multimodal
+[ 59%] Building CXX object CMakeFiles/inspect_hnf.dir/test_real_hnf.cpp.o
+[ 60%] Building CXX object CMakeFiles/helios_model_probe.dir/tools/helios_model_probe.cpp.o
+[ 61%] Linking CXX executable test_gemma4_tokenizer
+[ 61%] Built target test_gemma4_tokenizer
+[ 61%] Building CUDA object CMakeFiles/test_attention_split.dir/tests/test_attention_split.cu.o
+[ 61%] Linking CXX executable helios_model_probe
+[ 61%] Built target helios_model_probe
+[ 62%] Building CUDA object CMakeFiles/test_attention_split_model.dir/tests/test_attention_split_model.cu.o
+[ 62%] Linking CXX executable inspect_hnf
+[ 62%] Built target inspect_hnf
+[ 63%] Linking CXX executable test_attention_prefill
+[ 63%] Built target test_attention_prefill
+[ 64%] Linking CXX executable test_gemma4_ple
+[ 65%] Linking CXX executable test_attention_prefill_model
+[ 65%] Built target test_gemma4_ple
+[ 66%] Built target test_attention_prefill_model
+[ 67%] Building CXX object CMakeFiles/test_graph_builder.dir/test_graph_builder.cpp.o
+[ 68%] Building CXX object CMakeFiles/test_generate.dir/test_generate.cpp.o
+[ 69%] Linking CXX executable test_gemma4_graph
+[ 69%] Built target test_gemma4_graph
+[ 70%] Building CXX object CMakeFiles/test_generate_kv.dir/test_generate_kv.cpp.o
+[ 71%] Linking CXX executable test_gemma4_kv
+[ 71%] Built target test_gemma4_kv
+[ 71%] Building CXX object CMakeFiles/test_tokenizer.dir/test_tokenizer.cpp.o
+[ 72%] Linking CXX executable test_graph_builder
+[ 73%] Linking CXX executable test_generate
+[ 73%] Built target test_graph_builder
+[ 73%] Built target test_generate
+[ 74%] Building CXX object CMakeFiles/test_generate_full.dir/test_generate_full.cpp.o
+[ 75%] Building CUDA object CMakeFiles/test_gemma4_generate.dir/tests/test_gemma4_generate.cu.o
+[ 76%] Linking CXX executable test_tokenizer
+[ 76%] Built target test_tokenizer
+[ 77%] Building CUDA object CMakeFiles/gemma4_dump_logits.dir/tools/gemma4_dump_logits.cu.o
+[ 78%] Linking CXX executable test_generate_kv
+[ 78%] Built target test_generate_kv
+[ 78%] Building CUDA object CMakeFiles/gemma4_multimodal_dump.dir/tools/gemma4_multimodal_dump.cu.o
+[ 79%] Linking CXX executable test_attention_split
+[ 79%] Built target test_attention_split
+[ 79%] Building CUDA object CMakeFiles/gemma4_calibrate.dir/tools/gemma4_calibrate.cu.o
+[ 79%] Linking CXX executable test_generate_full
+[ 79%] Built target test_generate_full
+[ 80%] Building CXX object CMakeFiles/test_multimodal.dir/test_multimodal.cpp.o
+[ 81%] Linking CXX executable test_attention_split_model
+[ 81%] Built target test_attention_split_model
+[ 82%] Building CXX object CMakeFiles/test_generate_modal.dir/test_generate_modal.cpp.o
+[ 83%] Linking CXX executable test_multimodal
+[ 83%] Built target test_multimodal
+[ 84%] Building CXX object CMakeFiles/text_code_relay.dir/tools/text_code_relay.cpp.o
+[ 84%] Linking CXX executable test_generate_modal
+[ 84%] Built target test_generate_modal
+[ 84%] Building CXX object CMakeFiles/test_smoke.dir/test_smoke.cpp.o
+[ 85%] Linking CXX executable gemma4_dump_logits
+[ 86%] Linking CXX executable test_gemma4_generate
+[ 86%] Built target gemma4_dump_logits
+[ 86%] Building CXX object CMakeFiles/test_chat.dir/test_chat.cpp.o
+[ 86%] Built target test_gemma4_generate
+[ 87%] Building CXX object CMakeFiles/helios_chat.dir/helios_chat.cpp.o
+[ 88%] Linking CXX executable text_code_relay
+[ 88%] Built target text_code_relay
+[ 89%] Building CXX object CMakeFiles/helios_runtime.dir/tools/helios_runtime.cpp.o
+[ 90%] Linking CXX executable gemma4_multimodal_dump
+[ 90%] Built target gemma4_multimodal_dump
+[ 91%] Building CXX object CMakeFiles/helios_formatted.dir/tools/helios_formatted.cpp.o
+[ 92%] Linking CXX executable gemma4_calibrate
+[ 92%] Built target gemma4_calibrate
+[ 93%] Building CXX object CMakeFiles/sesiones_test.dir/tools/sesiones_test.cpp.o
+[ 94%] Linking CXX executable helios_formatted
+[ 94%] Built target helios_formatted
+[ 95%] Building CXX object CMakeFiles/test_inference_session_gemma4.dir/tests/test_inference_session_gemma4.cpp.o
+[ 96%] Linking CXX executable sesiones_test
+[ 96%] Built target sesiones_test
+[ 97%] Linking CXX executable test_chat
+[ 98%] Linking CXX executable test_inference_session_gemma4
+[ 99%] Linking CXX executable test_smoke
+[ 99%] Built target test_chat
+[ 99%] Built target test_inference_session_gemma4
+[ 99%] Built target test_smoke
+[100%] Linking CXX executable helios_runtime
+[100%] Built target helios_runtime
+[100%] Linking CXX executable helios_chat
+[100%] Built target helios_chat

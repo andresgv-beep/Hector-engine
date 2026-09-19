@@ -1,0 +1,25 @@
+[  7%] Building CXX object CMakeFiles/helios-engine.dir/src/hnf_loader.cpp.o
+[  7%] Building CXX object CMakeFiles/helios-engine.dir/src/engine.cpp.o
+[  7%] Building CXX object CMakeFiles/helios-engine.dir/src/model_capabilities.cpp.o
+[ 10%] Building CXX object CMakeFiles/helios-engine.dir/src/multimodal_adapter.cpp.o
+[ 10%] Building CXX object CMakeFiles/helios-engine.dir/src/gemma4_ple.cpp.o
+[ 14%] Building CXX object CMakeFiles/helios-engine.dir/src/mapped_weight_pipeline.cpp.o
+[ 17%] Building CXX object CMakeFiles/helios-engine.dir/src/gemma4_multimodal.cpp.o
+[ 21%] Building CXX object CMakeFiles/helios-engine.dir/src/gemma4_validator.cpp.o
+[ 25%] Building CXX object CMakeFiles/helios-engine.dir/src/gemma4_vision_validator.cpp.o
+[ 28%] Building CXX object CMakeFiles/helios-engine.dir/src/gemma4_vision_runner.cpp.o
+[ 32%] Building CXX object CMakeFiles/helios-engine.dir/src/graph_builder.cpp.o
+[ 35%] Building CXX object CMakeFiles/helios-engine.dir/src/sampler.cpp.o
+[ 39%] Building CXX object CMakeFiles/helios-engine.dir/src/inference_session.cpp.o
+[ 42%] Building CUDA object CMakeFiles/helios-engine.dir/kernels/attention.cu.o
+[ 42%] Building CUDA object CMakeFiles/helios-engine.dir/kernels/gemma4_vision.cu.o
+[ 46%] Building CXX object CMakeFiles/helios-engine.dir/kernels/register_kernels.cpp.o
+[ 50%] Linking CXX static library libhelios-engine.a
+[ 96%] Built target helios-engine
+[ 96%] Building CUDA object CMakeFiles/test_attention_prefill.dir/tests/test_attention_prefill.cu.o
+[100%] Linking CXX executable test_attention_prefill
+[100%] Built target test_attention_prefill
+[ 93%] Built target helios-engine
+[ 96%] Building CUDA object CMakeFiles/test_attention_prefill_model.dir/tests/test_attention_prefill_model.cu.o
+[100%] Linking CXX executable test_attention_prefill_model
+[100%] Built target test_attention_prefill_model

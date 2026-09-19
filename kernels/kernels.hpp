@@ -484,6 +484,13 @@ void launch_attention_prefill_cached_fp16(
     int head_dim, int max_seq_len, float scale, int window_size,
     cudaStream_t stream, int cache_slots = 0);
 
+// Same FP32 arithmetic/partitioning, coalesced shared-memory merge and ring walk.
+void launch_attention_prefill_cached_coalesced_fp16(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    int seq_new, int past_len, int num_heads, int num_kv_heads,
+    int head_dim, int max_seq_len, float scale, int window_size,
+    cudaStream_t stream, int cache_slots = 0);
+
 // Device-pointer variant: seq_len (total_seq) leído de device (CUDA Graph replay)
 void launch_attention_cached_fp16_dp(
     const half* q,

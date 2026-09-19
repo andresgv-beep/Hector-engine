@@ -1,0 +1,44 @@
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00024222002
+BENCH hd=256 kvh=8 window=1024 seq=7 past=0 ref_ms=0.006477 opt_ms=0.005530 speedup=1.1713
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=0 peaked=0 bitwise=1 cpu_max=0.00016678982
+BENCH hd=256 kvh=8 window=1024 seq=512 past=0 ref_ms=2.025641 opt_ms=1.742438 speedup=1.1625
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=0 peaked=1 bitwise=1 cpu_max=1.0252719e-06
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=5.3553734e-05
+BENCH hd=256 kvh=8 window=1024 seq=7 past=1023 ref_ms=0.084189 opt_ms=0.076179 speedup=1.1051
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=2.7718354e-05
+BENCH hd=256 kvh=8 window=1024 seq=512 past=1023 ref_ms=8.009817 opt_ms=7.234253 speedup=1.1072
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024270786
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=1535 peaked=0 bitwise=1 cpu_max=9.2873526e-05
+BENCH hd=256 kvh=8 window=1024 seq=7 past=1535 ref_ms=0.084378 opt_ms=0.076262 speedup=1.1064
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=1535 peaked=0 bitwise=1 cpu_max=5.524847e-05
+BENCH hd=256 kvh=8 window=1024 seq=512 past=1535 ref_ms=7.967975 opt_ms=7.135744 speedup=1.1166
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=1535 peaked=1 bitwise=1 cpu_max=0.00024717236
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=9.9593176e-05
+BENCH hd=256 kvh=8 window=1024 seq=7 past=6144 ref_ms=0.084582 opt_ms=0.076384 speedup=1.1073
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=1.8342054e-05
+BENCH hd=256 kvh=8 window=1024 seq=512 past=6144 ref_ms=7.924531 opt_ms=7.233127 speedup=1.0956
+PASS h=16 kvh=8 hd=256 window=1024 slots=1536 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024717236
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=0 peaked=0 bitwise=1 cpu_max=0.00024346593
+BENCH hd=512 kvh=1 window=0 seq=7 past=0 ref_ms=0.006224 opt_ms=0.005530 speedup=1.1256
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=0 peaked=0 bitwise=1 cpu_max=9.3521216e-05
+BENCH hd=512 kvh=1 window=0 seq=512 past=0 ref_ms=2.102989 opt_ms=2.071757 speedup=1.0151
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=0 peaked=1 bitwise=1 cpu_max=2.1385116e-12
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=1023 peaked=0 bitwise=1 cpu_max=0.00011902007
+BENCH hd=512 kvh=1 window=0 seq=7 past=1023 ref_ms=0.105693 opt_ms=0.107408 speedup=0.9840
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=1023 peaked=0 bitwise=1 cpu_max=5.7040755e-05
+BENCH hd=512 kvh=1 window=0 seq=512 past=1023 ref_ms=9.595904 opt_ms=9.734758 speedup=0.9857
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=1023 peaked=1 bitwise=1 cpu_max=0.00024331692
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=1535 peaked=0 bitwise=1 cpu_max=0.00010573473
+BENCH hd=512 kvh=1 window=0 seq=7 past=1535 ref_ms=0.156045 opt_ms=0.158925 speedup=0.9819
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=1535 peaked=0 bitwise=1 cpu_max=5.2948077e-05
+BENCH hd=512 kvh=1 window=0 seq=512 past=1535 ref_ms=13.417370 opt_ms=13.638861 speedup=0.9838
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=1535 peaked=1 bitwise=1 cpu_max=3.0170758e-05
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=7 past=6144 peaked=0 bitwise=1 cpu_max=4.5752015e-05
+BENCH hd=512 kvh=1 window=0 seq=7 past=6144 ref_ms=0.682496 opt_ms=0.688858 speedup=0.9908
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=512 past=6144 peaked=0 bitwise=1 cpu_max=2.577978e-05
+BENCH hd=512 kvh=1 window=0 seq=512 past=6144 ref_ms=47.240601 opt_ms=47.981873 speedup=0.9846
+PASS h=16 kvh=1 hd=512 window=0 slots=16384 seq=33 past=6144 peaked=1 bitwise=1 cpu_max=0.00024255477
+PASS h=4 kvh=4 hd=64 window=0 slots=1024 seq=1 past=0 peaked=1 bitwise=1 cpu_max=0
+PASS h=8 kvh=2 hd=128 window=512 slots=640 seq=128 past=639 peaked=1 bitwise=1 cpu_max=0.00024381376
+PASS h=4 kvh=1 hd=96 window=64 slots=128 seq=65 past=64 peaked=0 bitwise=1 cpu_max=8.6392728e-05
+PASS: 27 prefill cases; exact GPU parity, CPU FP64 reference, graph replay

@@ -1,0 +1,8 @@
+[ 96%] Built target helios-engine
+[ 96%] Building CUDA object CMakeFiles/test_attention_prefill.dir/tests/test_attention_prefill.cu.o
+[100%] Linking CXX executable test_attention_prefill
+[100%] Built target test_attention_prefill
+[ 93%] Built target helios-engine
+[ 96%] Building CUDA object CMakeFiles/test_attention_prefill_model.dir/tests/test_attention_prefill_model.cu.o
+[100%] Linking CXX executable test_attention_prefill_model
+[100%] Built target test_attention_prefill_model

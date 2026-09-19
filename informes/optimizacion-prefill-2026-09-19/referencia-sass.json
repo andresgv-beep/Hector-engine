@@ -1,0 +1,9 @@
+{
+  "reference_sass_identical": true,
+  "sha256_before": "1c6c0e5e4137fcc0d6c835966427de531989aca82f4e4ece4b600964231cf0ce",
+  "sha256_after": "1c6c0e5e4137fcc0d6c835966427de531989aca82f4e4ece4b600964231cf0ce",
+  "base_commit": "2e4f2f581bc5ae318dfeb68be5e38135b8e6ab35",
+  "compiler": "CUDA 13.1 nvcc",
+  "flags": "-std=c++17 -arch=sm_89 --use_fast_math -O3 -DNDEBUG",
+  "comparison": "Instructions and encodings for attention_prefill_cached_kernel; whitespace stripped"
+}

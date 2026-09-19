@@ -1,0 +1,5 @@
+ Function _ZN6helios7kernels34attention_prefill_coalesced_kernelEPK6__halfS3_S3_PS1_iiiiiiifi:
+  REG:64 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels31attention_prefill_cached_kernelEPK6__halfS3_S3_PS1_iiiiiiifi:
+  REG:80 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:420 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN6helios7kernels14rope_kernel_dpEP6__halfiiiiiPKiff:

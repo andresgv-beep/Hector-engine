@@ -1,0 +1,3 @@
+[  3%] Building CXX object CMakeFiles/helios-engine.dir/kernels/register_kernels.cpp.o
+[  7%] Linking CXX static library libhelios-engine.a
+[100%] Built target helios-engine

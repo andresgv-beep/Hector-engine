@@ -411,6 +411,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         }
         s.engine_config.stream = s.compute_stream.handle;
         s.engine_config.use_split_attention = config.use_split_attention;
+        s.engine_config.use_coalesced_prefill = config.use_coalesced_prefill;
         s.use_cuda_graphs = config.use_cuda_graphs;
         s.engine = std::make_unique<Engine>(s.engine_config);
         kernels::register_all_kernels(*s.engine);

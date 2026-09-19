@@ -47,6 +47,7 @@ public:
         float temperature = 0.7f;   // base; cada turno puede cambiarla
         bool use_cuda_graphs = true; // replay frente a ejecución normal para A/B
         bool use_split_attention = true; // solo geometrías/longitudes validadas; false para A/B
+        bool use_coalesced_prefill = true; // geometrías Gemma validadas; false para A/B
     };
 
     struct Info {

@@ -1,0 +1,12 @@
+-- CUDA include dir: /home/andres/opt/cuda13/usr/local/cuda-13.1/targets/x86_64-linux/include;/home/andres/opt/cuda13/usr/local/cuda-13.1/targets/x86_64-linux/include/cccl
+-- libpng not found: gemma4_vision_chat V6 will not be built
+-- 
+-- === HELIOS ENGINE ===
+-- Build type: Release
+-- CUDA architectures: native
+-- C++ compiler: /usr/bin/c++
+-- CUDA compiler: /home/andres/opt/cuda13/usr/local/cuda-13.1/bin/nvcc
+-- 
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/andres/Documentos/GitHub/Hector-engine/build
