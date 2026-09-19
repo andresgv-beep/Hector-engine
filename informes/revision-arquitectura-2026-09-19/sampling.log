@@ -1,0 +1,10 @@
+SAMPLER vocab=151936 temperature=0.0 top_k=0 median_ms=0.090661
+SAMPLER vocab=151936 temperature=0.7 top_k=16 median_ms=0.174001
+SAMPLER vocab=151936 temperature=0.7 top_k=64 median_ms=0.972387
+SAMPLER vocab=151936 temperature=0.7 top_k=65 median_ms=8.600050
+SAMPLER vocab=151936 temperature=0.7 top_k=128 median_ms=10.492313
+SAMPLER vocab=262144 temperature=0.0 top_k=0 median_ms=0.130801
+SAMPLER vocab=262144 temperature=0.7 top_k=16 median_ms=0.223011
+SAMPLER vocab=262144 temperature=0.7 top_k=64 median_ms=0.968567
+SAMPLER vocab=262144 temperature=0.7 top_k=65 median_ms=13.450803
+SAMPLER vocab=262144 temperature=0.7 top_k=128 median_ms=16.266423

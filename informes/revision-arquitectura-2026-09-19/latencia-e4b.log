@@ -1,0 +1,15 @@
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+META heads=8 kv_heads=2 hd_max=512 layers=42 shared=18 vision_metadata=1 scratch512_MiB=74.000 scratch6144_MiB=888.000
+KV_FORMULA context=16384 chunk=512 MiB=296.000
+KV_FORMULA context=16384 chunk=6144 MiB=516.000
+OWNED_KV local_layers=20 global_layers=4
+MEM phase=initial MiB=962.562
+MEM phase=model_loaded MiB=7936.500 multimodal=1
+MEM phase=main_attached MiB=8452.500
+MEM phase=aux_attached MiB=8508.500
+TURN mode=latency trial=0 prompt=6185 tokens=128 prefill_ms=2716.829 decode_ms=2008.013 first_ms=2724.940 total_ms=4732.953 reason=max_tokens cache=6313 bytes=655
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+TURN mode=latency trial=1 prompt=6185 tokens=128 prefill_ms=2695.017 decode_ms=1997.488 first_ms=2703.450 total_ms=4700.938 reason=max_tokens cache=6313 bytes=655
+MEM phase=after_turn MiB=8528.312
+MEM phase=after_session_destroy MiB=8012.312
+MEM phase=after_model_destroy MiB=1042.312

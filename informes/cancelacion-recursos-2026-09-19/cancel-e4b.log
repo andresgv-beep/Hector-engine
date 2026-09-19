@@ -1,0 +1,21 @@
+result reason=cancelled prefill=0 cache=0 before=0 wall_ms=0.00265 queue_ms=4e-05 ttft=-1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=max_tokens prefill=36 cache=52 before=0 wall_ms=280.03 queue_ms=0.00032 ttft=94.6569
+result reason=cancelled prefill=0 cache=52 before=52 wall_ms=0.05008 queue_ms=0.00016 ttft=-1
+result reason=cancelled prefill=512 cache=52 before=52 wall_ms=138.263 queue_ms=0.00041 ttft=-1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=max_tokens prefill=1 cache=52 before=35 wall_ms=193.23 queue_ms=0.00037 ttft=13.0308
+result reason=cancelled prefill=8192 cache=0 before=52 wall_ms=3921.59 queue_ms=0.00038 ttft=-1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=max_tokens prefill=36 cache=52 before=0 wall_ms=237.156 queue_ms=0.00037 ttft=58.5173
+result reason=cancelled prefill=36 cache=0 before=0 wall_ms=58.3461 queue_ms=0.0004 ttft=-1
+result reason=cancelled prefill=36 cache=0 before=0 wall_ms=57.9678 queue_ms=0.00035 ttft=-1
+result reason=cancelled prefill=0 cache=0 before=0 wall_ms=30.3614 queue_ms=30.3412 ttft=-1
+result reason=cancelled prefill=512 cache=0 before=0 wall_ms=162.124 queue_ms=0.00039 ttft=-1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=cancelled prefill=36 cache=40 before=0 wall_ms=106.023 queue_ms=0.00015 ttft=58.0428
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=max_tokens prefill=1 cache=52 before=35 wall_ms=190.653 queue_ms=0.00037 ttft=13.8918
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+result reason=context_full prefill=36 cache=124 before=0 wall_ms=1036.96 queue_ms=0.00043 ttft=59.2192
+PASS cancellation: before work, populated KV, chunk rollback, ring reset, last chunk, final callback, waiting session, decode retry and context exhaustion

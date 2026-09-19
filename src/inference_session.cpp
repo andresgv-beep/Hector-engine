@@ -78,6 +78,7 @@ const char* InferenceSession::finish_reason_name(FinishReason r) {
         case FinishReason::MaxTokens: return "max_tokens";
         case FinishReason::Stop:      return "stop";
         case FinishReason::Cancelled: return "cancelled";
+        case FinishReason::ContextFull: return "context_full";
     }
     return "stop";
 }
@@ -117,7 +118,7 @@ struct Model::Impl {
     // turno excluye a otro. Serializar es la respuesta honesta mientras el
     // scratch sea comun: fingir concurrencia daria resultados corruptos en
     // vez de lentos.
-    std::mutex en_uso;
+    std::timed_mutex en_uso;
 };
 
 Model::Model() : impl_(std::make_unique<Impl>()) {}
@@ -163,6 +164,8 @@ struct InferenceSession::Impl {
     // arriesgar un contexto corrupto.
     std::vector<int32_t> kv_tokens;
     bool kv_tracked = true;
+    // Snapshot seguro para una petición cancelada mientras espera el modelo.
+    std::atomic<uint32_t> published_position{0};
 
     // Prefijo propio en el registro de tensores del motor. Sin esto, la
     // segunda sesion registraria "_kv.layer0.k" encima de la primera y las dos
@@ -180,7 +183,7 @@ struct InferenceSession::Impl {
           think_open(M.think_open), think_close(M.think_close) {}
 
     ~Impl() {
-        std::lock_guard<std::mutex> lock(M.en_uso);
+        std::lock_guard<std::timed_mutex> lock(M.en_uso);
         engine->sync();
         engine->invalidate_graph();
         // External tensor views must not outlive this session's allocations.
@@ -198,6 +201,7 @@ struct InferenceSession::Impl {
     }
     void advance(uint32_t n) {
         if (is_gemma4) gemma_kv_cache.advance(n); else kv_cache.advance(n);
+        published_position.store(position(), std::memory_order_relaxed);
     }
     void rewind(uint32_t p) {
         if (is_gemma4 && !gemma_kv_cache.rewind_to(p)) {
@@ -206,11 +210,13 @@ struct InferenceSession::Impl {
         }
         if (!is_gemma4) kv_cache.rewind_to(p);
         if (kv_tokens.size() > p) kv_tokens.resize(p);
+        published_position.store(position(), std::memory_order_relaxed);
     }
     void clear() {
         if (is_gemma4) gemma_kv_cache.reset(); else kv_cache.reset();
         kv_tokens.clear();
         kv_tracked = true;
+        published_position.store(0, std::memory_order_relaxed);
     }
     // El seguimiento solo vale si describe el KV entero. La ruta visual expande
     // el marcador a soft tokens que no son del tokenizador, así que ahí se
@@ -230,7 +236,9 @@ struct InferenceSession::Impl {
                                 bool con_adjunto,
                                 std::string* error_code, std::string* error);
 
-    int32_t forward_batch(const std::vector<int32_t>& ids, cudaStream_t stream);
+    std::optional<int32_t> forward_batch(const std::vector<int32_t>& ids,
+        cudaStream_t stream, const std::atomic<bool>& cancel,
+        uint32_t& processed, const PrefillProgressCallback& on_progress);
     int32_t forward_one(int32_t token, cudaStream_t stream);
 
     SamplingConfig build_sampling(float temperature) const {
@@ -343,13 +351,25 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
                           sample_config, stream);
 }
 
-int32_t InferenceSession::Impl::forward_batch(const std::vector<int32_t>& ids,
-                                              cudaStream_t stream) {
+std::optional<int32_t> InferenceSession::Impl::forward_batch(
+        const std::vector<int32_t>& ids, cudaStream_t stream,
+        const std::atomic<bool>& cancel, uint32_t& processed,
+        const PrefillProgressCallback& on_progress) {
     int32_t next = 0;
     size_t done = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const auto report = [&]() {
+        processed = static_cast<uint32_t>(done);
+        if (on_progress) on_progress(processed, static_cast<uint32_t>(ids.size()),
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - start).count());
+    };
     while (done < ids.size()) {
+        if (cancel.load(std::memory_order_relaxed)) return std::nullopt;
         size_t n = std::min(static_cast<size_t>(kPrefillChunk), ids.size() - done);
-        if (n == 1) { next = forward_one(ids[done], stream); done += 1; continue; }
+        if (n == 1) {
+            next = forward_one(ids[done], stream); done += 1; report(); continue;
+        }
 
         auto* input_info = engine->tensors().get("input_tokens");
         input_info->shape = {1, static_cast<uint32_t>(n)};
@@ -381,8 +401,10 @@ int32_t InferenceSession::Impl::forward_batch(const std::vector<int32_t>& ids,
         next = sampler.sample((const half*)logits->ptr, model_config.vocab_size(),
                               sample_config, stream);
         done += n;
+        report();
     }
-    return next;
+    return cancel.load(std::memory_order_relaxed) ? std::nullopt
+                                                : std::optional<int32_t>(next);
 }
 
 InferenceSession::InferenceSession() = default;
@@ -391,10 +413,12 @@ InferenceSession::~InferenceSession() = default;
 const InferenceSession::ModelInfo& InferenceSession::info() const {
     return impl_->info;
 }
-uint32_t InferenceSession::cache_position() const { return impl_->position(); }
+uint32_t InferenceSession::cache_position() const {
+    return impl_->published_position.load(std::memory_order_relaxed);
+}
 
 void InferenceSession::reset() {
-    std::lock_guard<std::mutex> lock(impl_->M.en_uso);
+    std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
     impl_->engine->invalidate_graph();
     impl_->decode_cb_built = false;
     impl_->clear();
@@ -505,7 +529,7 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
         impl_ = std::make_unique<Impl>(std::move(model));
         auto& s = *impl_;
         auto& M = s.M;
-        std::lock_guard<std::mutex> lock(M.en_uso);
+        std::lock_guard<std::timed_mutex> lock(M.en_uso);
 
         // Prefijo propio. La primera sesion conserva "_kv" para que la ruta ya
         // certificada registre exactamente los mismos nombres que antes.
@@ -601,19 +625,41 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                 TurnStats* stats,
                                 FinishReason* reason,
                                 std::string* error_code,
-                                std::string* error) {
+                                std::string* error,
+                                const PrefillProgressCallback& on_prefill_progress) {
     // Las sesiones comparten los buffers de trabajo del grafo: dos turnos a la
     // vez se pisarian los activaciones. Se serializan. Es una espera, no una
     // corrupcion — y cuando el scratch sea por sesion, esta linea se cae sola.
-    std::lock_guard<std::mutex> en_serie(impl_->M.en_uso);
+    using clock = std::chrono::steady_clock;
+    const auto started = clock::now();
+    *stats = TurnStats{};
+    *reason = FinishReason::Eos;
+    error_code->clear();
+    error->clear();
+    std::unique_lock<std::timed_mutex> en_serie(impl_->M.en_uso, std::defer_lock);
+    for (;;) {
+        if (cancel_flag.load(std::memory_order_relaxed)) {
+            *reason = FinishReason::Cancelled;
+            stats->cache_position_before = stats->cache_position = cache_position();
+            stats->queue_ms = std::chrono::duration<double, std::milli>(clock::now() - started).count();
+            return true;
+        }
+        if (en_serie.try_lock_for(std::chrono::milliseconds(5))) break;
+    }
+    stats->queue_ms = std::chrono::duration<double, std::milli>(clock::now() - started).count();
     auto& s = *impl_;
+    const uint32_t antes = s.position();
+    stats->cache_position_before = stats->cache_position = antes;
+    if (cancel_flag.load(std::memory_order_relaxed)) {
+        *reason = FinishReason::Cancelled;
+        return true;
+    }
     // Engine owns a single executable graph. Rebind it at every turn so no
     // session can replay another session's KV pointers or stale scratch shapes.
     s.engine->invalidate_graph();
     s.decode_cb_built = false;
     s.graph_unavailable = false;
     s.graph_captures = s.graph_replays = s.graph_fallbacks = 0;
-    *stats = TurnStats{};
     struct GraphStatsGuard {
         Impl& session;
         TurnStats& stats;
@@ -623,9 +669,6 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             stats.decode_graph_fallbacks = session.graph_fallbacks;
         }
     } graph_stats{s, *stats};
-    using clock = std::chrono::high_resolution_clock;
-
-    const uint32_t antes = s.position();
     stats->cache_position_before = antes;
     stats->cache_position = antes;
     stats->stopped_on_token = false;
@@ -684,6 +727,10 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     // costura, y ese error no se ve, se nota semanas después. Aquí se tokeniza el
     // prompt entero igual que siempre y solo se deja de alimentar el prefijo que
     // ya coincide, retrocediendo el KV a donde dejan de parecerse.
+    if (cancel_flag.load(std::memory_order_relaxed)) {
+        *reason = FinishReason::Cancelled;
+        return true;
+    }
     uint32_t reutilizados = 0;
     if (gen.preformatted && gen.reuse_prefix && attachments.empty() && s.prefix_usable()) {
         const size_t tope = std::min(s.kv_tokens.size(), ids.size());
@@ -732,6 +779,8 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         pending.clear();
         if (!chunk.empty()) {
             visible += chunk;
+            if (stats->first_token_ms < 0) stats->first_token_ms =
+                std::chrono::duration<double, std::milli>(clock::now() - started).count();
             if (on_text) on_text(chunk);
         }
     };
@@ -739,7 +788,8 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     try {
         auto t0 = clock::now();
         int32_t next = 0;
-        if (!attachments.empty()) {
+        bool prefill_cancelled = cancel_flag.load(std::memory_order_relaxed);
+        if (!prefill_cancelled && !attachments.empty()) {
             // El adaptador expande el placeholder y prefillea; la sesión solo
             // avanza su posición lógica si la llamada tuvo éxito.
             MultimodalTurnInput turn;
@@ -775,13 +825,23 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                     s.model_config.vocab_size(),
                                     s.sample_config, stream);
             stats->prefill_tokens = pr.sequence_tokens;
-        } else {
-            next = s.forward_batch(ids, stream);
-            stats->prefill_tokens = static_cast<uint32_t>(ids.size());
+        } else if (!prefill_cancelled) {
+            auto result = s.forward_batch(ids, stream, cancel_flag,
+                                         stats->prefill_tokens, on_prefill_progress);
+            prefill_cancelled = !result.has_value();
+            if (result) next = *result;
         }
         auto t1 = clock::now();
         stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
         if (on_prefill) on_prefill(stats->prefill_tokens, stats->prefill_ms);
+        if (prefill_cancelled || cancel_flag.load(std::memory_order_relaxed)) {
+            *reason = FinishReason::Cancelled;
+            // No cerrar una entrada incompleta. El anillo decide si puede
+            // recuperar base; si no, rewind vacía el KV para el reintento.
+            s.rewind(base);
+            stats->cache_position = s.position();
+            return true;
+        }
 
         const int hard_cap = gen.max_visible_tokens + gen.max_thinking_tokens + 64;
         bool natural_stop = false;
@@ -801,7 +861,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 break;
             }
             if (s.position() + 4 >= s.kv_config.max_seq_len) {
-                *reason = FinishReason::Stop;
+                *reason = FinishReason::ContextFull;
                 break;
             }
 
@@ -826,6 +886,8 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                     std::string chunk = pending.substr(0, cut);
                     pending.erase(0, cut);
                     visible += chunk;
+                    if (stats->first_token_ms < 0) stats->first_token_ms =
+                        std::chrono::duration<double, std::milli>(clock::now() - started).count();
                     if (on_text) on_text(chunk);
                 }
                 visible_tokens++;
@@ -849,6 +911,11 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             *reason = FinishReason::MaxTokens;
         }
         flush_pending();
+        if (*reason == FinishReason::Cancelled && generated == 0) {
+            s.rewind(base);
+            stats->cache_position = s.position();
+            return true;
+        }
 
         // CERRAR EL TURNO, igual que el oráculo: el terminal muestreado aún no
         // está en KV. Gemma 4 necesita <turn|> siempre; ChatML solo cuando el

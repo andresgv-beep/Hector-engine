@@ -1,0 +1,13 @@
+META heads=16 kv_heads=8 hd_max=512 layers=48 shared=0 vision_metadata=0 scratch512_MiB=87.750 scratch6144_MiB=1053.000
+KV_FORMULA context=16384 chunk=512 MiB=736.000
+KV_FORMULA context=16384 chunk=6144 MiB=2496.000
+OWNED_KV local_layers=40 global_layers=8
+MEM phase=initial MiB=962.188
+MEM phase=model_loaded MiB=8448.062 multimodal=0
+MEM phase=main_attached MiB=9184.062
+MEM phase=aux_attached MiB=9520.062
+TURN mode=cancel trial=0 prompt=6185 tokens=0 prefill_ms=7731.364 decode_ms=0.001 first_ms=-1.000 total_ms=7739.566 reason=cancelled cache=6185 bytes=0
+TURN mode=cancel trial=1 prompt=6185 tokens=0 prefill_ms=7757.287 decode_ms=0.001 first_ms=-1.000 total_ms=7766.535 reason=cancelled cache=6185 bytes=0
+MEM phase=after_turn MiB=9310.312
+MEM phase=after_session_destroy MiB=8574.312
+MEM phase=after_model_destroy MiB=1090.312

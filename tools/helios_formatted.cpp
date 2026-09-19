@@ -1,5 +1,5 @@
 // Puente opt-in de prompts preformateados. Protocolo interno de longitud explícita.
-// Reconstruye KV en cada petición. No contiene nombres ni ejecutores de herramientas.
+// Reutiliza prefijos. No contiene nombres ni ejecutores de herramientas.
 #include "inference_session.hpp"
 #include <atomic>
 #include <chrono>
@@ -22,12 +22,12 @@ int main(int argc, char** argv) {
     // preámbulo o una extracción —prompt corto y propio, que no es la
     // conversación— no pise el KV de la conversación y la deje sin prefijo que
     // reaprovechar. Su ventana es pequeña porque esos prompts lo son.
-    helios::InferenceSession session, auxiliar;
+    helios::InferenceSession session;
+    std::unique_ptr<helios::InferenceSession> auxiliar;
     if (!session.attach(modelo,&error)) { std::cerr<<error; return 1; }
     // Las generaciones auxiliares son avisos y extracciones breves. Darles 2K
     // duplicaba innecesariamente el anillo KV de las capas locales; 1K cubre
     // esos prompts y deja más margen para el modelo principal en tarjetas de 12 GB.
-    if (!auxiliar.attach(modelo,&error,1024)) { std::cerr<<error; return 1; }
     std::printf("READY\n"); std::fflush(stdout);
     std::string header;
     while (std::getline(std::cin,header)) {
@@ -72,7 +72,20 @@ int main(int argc, char** argv) {
         gen.temperature=0; gen.max_visible_tokens=3072; gen.max_thinking_tokens=0;
         gen.preformatted=true; gen.close_turn=false; gen.stop_tokens={argv[3]};
         gen.reuse_prefix=true;
-        auto& s_activa = es_auxiliar ? auxiliar : session;
+        // Reservar el KV auxiliar solo al primer uso. Un fallo no invalida el
+        // chat principal y conserva el encuadre del protocolo para reintentar.
+        if (es_auxiliar && !auxiliar) {
+            auto candidate = std::make_unique<helios::InferenceSession>();
+            if (!candidate->attach(modelo, &error, 1024)) {
+                const std::string message = "ERROR: auxiliary_attach_failed " + error;
+                std::printf("%zu 0 0 0 error 0 0\n", message.size());
+                std::fwrite(message.data(), 1, message.size(), stdout);
+                std::fflush(stdout);
+                continue;
+            }
+            auxiliar = std::move(candidate);
+        }
+        auto& s_activa = es_auxiliar ? *auxiliar : session;
         if(px) s_activa.reset();
         helios::InferenceSession::TurnStats stats;
         helios::InferenceSession::FinishReason reason;

@@ -14,6 +14,7 @@
 // cancelación no podría llegar nunca.
 
 #include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <deque>
 #include <map>
@@ -113,9 +114,9 @@ std::string g_pausa_pendiente;       // sesión a la que hay que anunciar pausa
 //
 // Solo una genera a la vez, y es a propósito: comparten los buffers de trabajo
 // del grafo. Cuando llega un turno para otra sesión, la que estuviera
-// generando se cancela y se queda EXACTAMENTE como estaba — su KV, su
-// muestreador y su posición no se tocan. Pausar no es reiniciar: reanudarla
-// después es seguir la frase, no rehacer el contexto.
+// generando se cancela en un límite seguro. Durante decode conserva lo
+// generado; durante prefill vuelve al inicio efectivo o vacía el anillo si
+// ya perdió esa ventana. El estado final indica si hace falta reenviar contexto.
 //
 // Una sesión pausada no consume GPU porque no ejecuta nada; lo que sí ocupa es
 // la VRAM de su KV, y eso no lo arregla pausar. Es el techo real al número de
@@ -204,18 +205,29 @@ void hilo_lector() {
         if (p.tipo == "cancel") {
             std::string objetivo;
             if (const auto* t = p.doc.get("target")) objetivo = t->str();
+            bool active = false;
             {
                 std::lock_guard<std::mutex> l(g_cola_mtx);
-                g_cancel_pend.push_back({p.id, objetivo});
+                active = !g_turno_activo.empty() && objetivo == g_turno_activo;
+                if (active) {
+                    g_cancel_pend.push_back({p.id, objetivo});
+                    g_cancelar.store(true);
+                }
             }
-            g_cancelar.store(true);
+            if (!active) emit_error(p.id, "not_active", "el turno objetivo no está activo", 0, 0, 0);
+            continue;
+        }
+        if (p.tipo == "attachment_drop") {
+            const auto* id = p.doc.get("attachment_id");
+            { std::lock_guard<std::mutex> l(g_cola_mtx);
+              if (id) g_adjuntos.erase(id->str()); }
+            emit_result(p.id, true, 0, 0, 0);
             continue;
         }
         // CONMUTACIÓN. Si llega trabajo para otra sesión mientras una está
         // generando, se cancela la de ahora. La cancelación es la que ya
-        // existe: para en un límite de token, conserva lo emitido y deja el KV
-        // y el muestreador exactamente donde estaban. Pausar es eso — no
-        // reiniciar, no reconstruir, no perder la frase a medias.
+        // existe: para entre tandas de prefill o en un límite de token de decode.
+        // El dueño de la sesión devuelve la posición real del KV tras cancelar.
         //
         // Se señala aquí, desde el lector, para que la espera del usuario sea
         // corta; quien manda de verdad es el hilo dueño, que confirma el
@@ -292,12 +304,12 @@ int main(int argc, char** argv) {
     // Las sesiones se crean bajo demanda. `unique_ptr` porque InferenceSession
     // no es copiable y el mapa tiene que poder crecer sin invalidar nada.
     std::map<std::string, std::unique_ptr<InferenceSession>> sesiones;
-    auto sesion_de = [&](const std::string& id) -> InferenceSession* {
+    auto sesion_de = [&](const std::string& id, uint32_t capacity = 0) -> InferenceSession* {
         auto it = sesiones.find(id);
         if (it != sesiones.end()) return it->second.get();
         auto nueva = std::make_unique<InferenceSession>();
         std::string e;
-        if (!nueva->attach(pesos, &e)) {
+        if (!nueva->attach(pesos, &e, capacity)) {
             std::fprintf(stderr, "[runtime] no pude abrir la sesión %s: %s\n",
                          id.c_str(), e.c_str());
             return nullptr;
@@ -344,53 +356,70 @@ int main(int argc, char** argv) {
         // sigue valiendo palabra por palabra.
         std::string sid = kSesionPorDefecto;
         if (const auto* v = p.doc.get("session")) sid = v->str();
-        InferenceSession* ses = sesion_de(sid);
+        uint32_t capacity = 0;
+        if (p.tipo == "session_open") {
+            if (const auto* v = p.doc.get("max_seq_len")) {
+                const double n = v->num(0);
+                if (!std::isfinite(n) || n < 1 || n > info.max_seq_len || n != static_cast<uint32_t>(n)) {
+                    emit_error(p.id, "invalid_context", "max_seq_len fuera de rango", 0, 0, info.max_seq_len);
+                    continue;
+                }
+                capacity = static_cast<uint32_t>(n);
+            }
+            auto existing = sesiones.find(sid);
+            if (capacity && existing != sesiones.end() && existing->second->info().max_seq_len != capacity) {
+                emit_error(p.id, "session_exists", "la sesión ya tiene otra capacidad", 0, 0, info.max_seq_len);
+                continue;
+            }
+        }
+        InferenceSession* ses = sesion_de(sid, capacity);
         if (!ses) {
             emit_error(p.id, "session_unavailable",
                        "no pude abrir la sesión " + sid, 0, 0, info.max_seq_len);
             continue;
         }
         InferenceSession& session = *ses;
+        const uint32_t session_capacity = session.info().max_seq_len;
 
         if (p.tipo == "session_close") {
             if (sid == kSesionPorDefecto) {
                 emit_error(p.id, "session_undeletable",
                            "la sesión por defecto no se cierra", 0, 0,
-                           info.max_seq_len);
+                           session_capacity);
                 continue;
             }
             const uint32_t pos = session.cache_position();
             sesiones.erase(sid);
             emit("{\"type\":\"session_closed\",\"session\":\"" +
                  json_escape(sid) + "\"}");
-            emit_result(p.id, true, pos, 0, info.max_seq_len);
+            emit_result(p.id, true, pos, 0, session_capacity);
             continue;
         }
         if (p.tipo == "session_open") {
             emit_result(p.id, true, session.cache_position(),
-                        session.cache_position(), info.max_seq_len);
+                        session.cache_position(), session_capacity);
             continue;
         }
 
         const uint32_t antes = session.cache_position();
 
         if (p.tipo == "shutdown") {
-            emit_result(p.id, true, antes, antes, info.max_seq_len);
+            emit_result(p.id, true, antes, antes, session_capacity);
             g_cerrar.store(true);
             break;
         }
         if (p.tipo == "status") {
-            emit_result(p.id, true, antes, antes, info.max_seq_len);
+            emit_result(p.id, true, antes, antes, session_capacity);
             continue;
         }
         if (p.tipo == "reset") {
             session.reset();
-            emit_result(p.id, true, antes, session.cache_position(), info.max_seq_len);
+            emit_result(p.id, true, antes, session.cache_position(), session_capacity);
             continue;
         }
         if (p.tipo != "turn") {
             emit_error(p.id, "unknown_request", "tipo no soportado: " + p.tipo,
-                       antes, antes, info.max_seq_len);
+                       antes, antes, session_capacity);
             continue;
         }
 
@@ -405,7 +434,7 @@ int main(int argc, char** argv) {
         }
         if (messages.empty()) {
             emit_error(p.id, "empty_turn", "el turno no trae mensajes",
-                       antes, antes, info.max_seq_len);
+                       antes, antes, session_capacity);
             continue;
         }
 
@@ -430,12 +459,13 @@ int main(int argc, char** argv) {
         if (adjunto_malo) {
             emit_error(p.id, "unknown_attachment",
                        "adjunto inexistente o ya consumido",
-                       antes, antes, info.max_seq_len);
+                       antes, antes, session_capacity);
             continue;
         }
 
         InferenceSession::GenConfig gen;
         gen.temperature = temp;
+        bool progress_requested = false;
         if (const auto* g = p.doc.get("generation")) {
             if (const auto* v = g->get("temperature"))
                 gen.temperature = (float)v->num(gen.temperature);
@@ -443,18 +473,28 @@ int main(int argc, char** argv) {
                 gen.max_visible_tokens = (int)v->num(gen.max_visible_tokens);
             if (const auto* v = g->get("max_thinking_tokens"))
                 gen.max_thinking_tokens = (int)v->num(gen.max_thinking_tokens);
+            if (const auto* v = g->get("prefill_progress"))
+                progress_requested = v->boo(false);
+            if (const auto* v = g->get("preformatted"))
+                gen.preformatted = v->boo(false);
+            if (const auto* v = g->get("reuse_prefix"))
+                gen.reuse_prefix = v->boo(false);
+            if (const auto* v = g->get("close_turn"))
+                gen.close_turn = v->boo(true);
+            if (const auto* arr = g->get("stop_tokens"); arr && arr->is_array())
+                for (const auto& v : *arr->array) gen.stop_tokens.push_back(v.str());
         }
 
         {
             std::lock_guard<std::mutex> l(g_cola_mtx);
+            g_cancelar.store(false);
             g_turno_activo = p.id;
             g_sesion_generando = sid;
         }
-        g_cancelar.store(false);
+        if (progress_requested) emit("{\"type\":\"turn_started\",\"request_id\":\"" +
+                                     json_escape(p.id) + "\"}");
 
         std::string acumulado;
-        auto t_pref = std::chrono::high_resolution_clock::now();
-        bool prefill_emitido = false;
         InferenceSession::TurnStats st;
         InferenceSession::FinishReason reason;
         std::string code;
@@ -470,20 +510,26 @@ int main(int argc, char** argv) {
         };
 
         auto on_prefill = [&](uint32_t tokens, double ms) {
-            prefill_emitido = true;
             emit("{\"type\":\"prefill\",\"request_id\":\"" + json_escape(p.id) +
                  "\",\"tokens\":" + std::to_string(tokens) +
                  ",\"ms\":" + std::to_string(ms) + "}");
         };
-        (void)t_pref;
 
         std::string msg;
+        InferenceSession::PrefillProgressCallback on_progress;
+        if (progress_requested) on_progress = [&](uint32_t done, uint32_t total, double ms) {
+            emit("{\"type\":\"prefill_progress\",\"request_id\":\"" + json_escape(p.id) +
+                 "\",\"processed_tokens\":" + std::to_string(done) +
+                 ",\"total_tokens\":" + std::to_string(total) +
+                 ",\"ms\":" + std::to_string(ms) + "}");
+        };
         const bool ok = session.run_turn(messages, adjuntos, gen, on_text,
                                          on_think, on_prefill, g_cancelar,
-                                         &st, &reason, &code, &msg);
-        if (ok) {
-            // Se consume solo si el turno salió bien: si falló, el cliente
-            // puede reintentar sin volver a subir los píxeles.
+                                         &st, &reason, &code, &msg, on_progress);
+        if (ok && !(reason == InferenceSession::FinishReason::Cancelled &&
+                    st.generated_tokens == 0)) {
+            // Fallo/cancelación sin generación permiten reintentar el adjunto
+            // sin volver a subir los píxeles.
             std::lock_guard<std::mutex> l(g_cola_mtx);
             for (const auto& id : ids_usados) g_adjuntos.erase(id);
         }
@@ -502,7 +548,7 @@ int main(int argc, char** argv) {
             const bool aplico = (c.objetivo == p.id) &&
                                 reason == InferenceSession::FinishReason::Cancelled;
             emit_result(c.id, aplico, st.cache_position_before,
-                        st.cache_position, info.max_seq_len);
+                        st.cache_position, session_capacity);
         }
 
         if (!ok) {
@@ -520,7 +566,7 @@ int main(int argc, char** argv) {
                  "\",\"code\":\"" + json_escape(code) +
                  "\",\"message\":\"" + json_escape(msg) + "\"," +
                  state_json(st.cache_position_before, st.cache_position,
-                            info.max_seq_len) + extra + "}");
+                            session_capacity) + extra + "}");
             anunciar_pausa(pausar);
             continue;
         }
@@ -530,15 +576,18 @@ int main(int argc, char** argv) {
              "\",\"finish_reason\":\"" +
              InferenceSession::finish_reason_name(reason) +
              "\",\"usage\":{\"prefill_tokens\":" + std::to_string(st.prefill_tokens) +
+             ",\"prefill_reused\":" + std::to_string(st.prefill_reused) +
              ",\"generated_tokens\":" + std::to_string(st.generated_tokens) +
              ",\"thinking_tokens\":" + std::to_string(st.thinking_tokens) +
              "},\"timings\":{\"prefill_ms\":" + std::to_string(st.prefill_ms) +
+             ",\"queue_ms\":" + std::to_string(st.queue_ms) +
+             ",\"first_token_ms\":" + std::to_string(st.first_token_ms) +
              ",\"decode_ms\":" + std::to_string(st.decode_ms) +
              ",\"tokens_per_second\":" +
              std::to_string(st.decode_ms > 0
                  ? st.generated_tokens * 1000.0 / st.decode_ms : 0.0) +
              "}," + state_json(st.cache_position_before, st.cache_position,
-                               info.max_seq_len) + "}");
+                               session_capacity) + "}");
 
         // AHORA sí está pausada: run_turn ha vuelto y su terminal ya salió.
         // El orden que ve quien lee la traza es el orden de lo que pasó:

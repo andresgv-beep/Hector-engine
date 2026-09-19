@@ -1,0 +1,103 @@
+SUITE graphs=0 split=0 prefill=0 long_ring=1
+  tokens=48 prefill=23 reused=0 captures=0 replays=0
+  tokens=48 prefill=21 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=22 captures=0 replays=0
+  tokens=48 prefill=15 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=22 captures=0 replays=0
+  tokens=48 prefill=8216 reused=0 captures=0 replays=0
+  tokens=48 prefill=8217 reused=0 captures=0 replays=0
+  tokens=48 prefill=8217 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=8216 captures=0 replays=0
+  tokens=48 prefill=8216 reused=0 captures=0 replays=0
+  tokens=48 prefill=10 reused=8205 captures=0 replays=0
+  tokens=8 prefill=23 reused=0 captures=0 replays=0
+  tokens=48 prefill=1 reused=22 captures=0 replays=0
+  tokens=48 prefill=23 reused=0 captures=0 replays=0
+SUITE graphs=1 split=0 prefill=0 long_ring=1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=21 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=15 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=8216 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=10 reused=8205 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=8 prefill=23 reused=0 captures=1 replays=6
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+SUITE graphs=1 split=1 prefill=0 long_ring=1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=21 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=15 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=8216 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=10 reused=8205 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=8 prefill=23 reused=0 captures=1 replays=6
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+SUITE graphs=1 split=1 prefill=1 long_ring=1
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=21 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=15 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8217 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=8216 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=8216 reused=0 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=10 reused=8205 captures=1 replays=46
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=8 prefill=23 reused=0 captures=1 replays=6
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=1 reused=22 captures=1 replays=47
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+  tokens=48 prefill=23 reused=0 captures=1 replays=46
+PASS: 12 exact text comparisons; session isolation, ring reuse, reset, cancellation and destruction

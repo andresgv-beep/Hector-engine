@@ -1,0 +1,53 @@
+{"type": "ready", "protocol": 2, "model": {"architecture": "gemma4", "max_seq_len": 16384, "multimodal": true, "vision_adapter": "helios.gemma4.vision.v1"}}
+{"type": "session_opened", "session": "0"}
+{"type": "prefill_progress", "request_id": "long", "processed_tokens": 512, "total_tokens": 6158, "ms": 160.944263}
+{"type": "error", "request_id": "wrong", "code": "not_active", "message": "el turno objetivo no está activo", "model_state": {"cache_position_before": 0, "cache_position": 0, "max_seq_len": 0}}
+{"type": "prefill_progress", "request_id": "long", "processed_tokens": 1024, "total_tokens": 6158, "ms": 320.392301}
+{"type": "prefill", "request_id": "long", "tokens": 1024, "ms": 320.635133}
+{"type": "result", "request_id": "cancel-long", "ok": true, "model_state": {"cache_position_before": 0, "cache_position": 0, "max_seq_len": 16384}}
+{"type": "completed", "request_id": "long", "visible_text": "", "finish_reason": "cancelled", "usage": {"prefill_tokens": 1024, "prefill_reused": 0, "generated_tokens": 0, "thinking_tokens": 0}, "timings": {"prefill_ms": 320.635133, "queue_ms": 0.00038, "first_token_ms": -1.0, "decode_ms": 0.0, "tokens_per_second": 0.0}, "model_state": {"cache_position_before": 0, "cache_position": 0, "max_seq_len": 16384}}
+CANCEL_ROUNDTRIP_MS 0.23261299793375656
+{"type": "prefill_progress", "request_id": "first", "processed_tokens": 23, "total_tokens": 23, "ms": 56.485637}
+{"type": "prefill", "request_id": "first", "tokens": 23, "ms": 56.680729}
+{"type": "text_delta", "request_id": "first", "text": "Una"}
+{"type": "text_delta", "request_id": "first", "text": " base"}
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+{"type": "text_delta", "request_id": "first", "text": " de"}
+{"type": "text_delta", "request_id": "first", "text": " datos"}
+{"type": "text_delta", "request_id": "first", "text": " rel"}
+{"type": "text_delta", "request_id": "first", "text": "acional"}
+{"type": "text_delta", "request_id": "first", "text": " organiza"}
+{"type": "text_delta", "request_id": "first", "text": " la"}
+{"type": "text_delta", "request_id": "first", "text": " información"}
+{"type": "text_delta", "request_id": "first", "text": " en"}
+{"type": "text_delta", "request_id": "first", "text": " **"}
+{"type": "text_delta", "request_id": "first", "text": "tab"}
+{"type": "text_delta", "request_id": "first", "text": "las"}
+{"type": "text_delta", "request_id": "first", "text": "**,"}
+{"type": "text_delta", "request_id": "first", "text": " donde"}
+{"type": "text_delta", "request_id": "first", "text": " cada"}
+{"type": "completed", "request_id": "first", "visible_text": "Una base de datos relacional organiza la información en **tablas**, donde cada", "finish_reason": "max_tokens", "usage": {"prefill_tokens": 23, "prefill_reused": 0, "generated_tokens": 16, "thinking_tokens": 0}, "timings": {"prefill_ms": 56.680729, "queue_ms": 0.00048, "first_token_ms": 56.76568, "decode_ms": 182.136804, "tokens_per_second": 87.846057}, "model_state": {"cache_position_before": 0, "cache_position": 39, "max_seq_len": 16384}}
+{"type": "prefill_progress", "request_id": "repeat", "processed_tokens": 1, "total_tokens": 1, "ms": 12.321268}
+{"type": "prefill", "request_id": "repeat", "tokens": 1, "ms": 12.328649}
+{"type": "text_delta", "request_id": "repeat", "text": "Una"}
+[engine] CUDA Graph capturado (1164 comandos) — decode en modo replay
+{"type": "text_delta", "request_id": "repeat", "text": " base"}
+{"type": "text_delta", "request_id": "repeat", "text": " de"}
+{"type": "text_delta", "request_id": "repeat", "text": " datos"}
+{"type": "text_delta", "request_id": "repeat", "text": " rel"}
+{"type": "text_delta", "request_id": "repeat", "text": "acional"}
+{"type": "text_delta", "request_id": "repeat", "text": " organiza"}
+{"type": "text_delta", "request_id": "repeat", "text": " la"}
+{"type": "text_delta", "request_id": "repeat", "text": " información"}
+{"type": "text_delta", "request_id": "repeat", "text": " en"}
+{"type": "text_delta", "request_id": "repeat", "text": " **"}
+{"type": "text_delta", "request_id": "repeat", "text": "tab"}
+{"type": "text_delta", "request_id": "repeat", "text": "las"}
+{"type": "text_delta", "request_id": "repeat", "text": "**,"}
+{"type": "text_delta", "request_id": "repeat", "text": " donde"}
+{"type": "text_delta", "request_id": "repeat", "text": " cada"}
+{"type": "completed", "request_id": "repeat", "visible_text": "Una base de datos relacional organiza la información en **tablas**, donde cada", "finish_reason": "max_tokens", "usage": {"prefill_tokens": 1, "prefill_reused": 22, "generated_tokens": 16, "thinking_tokens": 0}, "timings": {"prefill_ms": 12.328649, "queue_ms": 0.00038, "first_token_ms": 13.277649, "decode_ms": 177.126531, "tokens_per_second": 90.330906}, "model_state": {"cache_position_before": 22, "cache_position": 39, "max_seq_len": 16384}}
+{"type": "error", "request_id": "invalid-stop", "code": "invalid_stop_token", "message": "token de parada inexistente", "model_state": {"cache_position_before": 39, "cache_position": 39, "max_seq_len": 16384}}
+[runtime] fin
+{"type": "result", "request_id": "end", "ok": true, "model_state": {"cache_position_before": 39, "cache_position": 39, "max_seq_len": 16384}}
+PASS runtime: targeted cancel, chunk progress, streaming order, timings and prefix reuse

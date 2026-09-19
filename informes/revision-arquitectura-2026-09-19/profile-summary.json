@@ -1,0 +1,56 @@
+{
+  "prefill": {
+    "kernel_sum_ms": 7669.338523,
+    "groups": {
+      "attention": {
+        "ms": 4683.133897,
+        "percent": 61.06307451360365
+      },
+      "dequant": {
+        "ms": 1467.087225,
+        "percent": 19.129253723776458
+      },
+      "gemm": {
+        "ms": 1323.115202,
+        "percent": 17.25201199597641
+      },
+      "rmsnorm": {
+        "ms": 69.448139,
+        "percent": 0.9055297114833067
+      },
+      "other": {
+        "ms": 103.695689,
+        "percent": 1.352081260841744
+      },
+      "gemv": {
+        "ms": 22.858371,
+        "percent": 0.29804879431842496
+      }
+    }
+  },
+  "decode": {
+    "kernel_sum_ms": 3652.393491,
+    "groups": {
+      "gemv": {
+        "ms": 2607.148377,
+        "percent": 71.38191389904654,
+        "ms_per_generated_token": 20.3683466953125
+      },
+      "attention": {
+        "ms": 765.00871,
+        "percent": 20.945407768497198,
+        "ms_per_generated_token": 5.976630546875
+      },
+      "rmsnorm": {
+        "ms": 209.694165,
+        "percent": 5.741280766070668,
+        "ms_per_generated_token": 1.6382356640625
+      },
+      "other": {
+        "ms": 70.542239,
+        "percent": 1.9313975663855985,
+        "ms_per_generated_token": 0.5511112421875
+      }
+    }
+  }
+}

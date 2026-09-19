@@ -1,0 +1,10 @@
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+{"aux": false, "header": ["31", "353", "6", "0", "eos", "15", "0"], "text": "<|channel>thought\n<channel|>OK."}
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+{"aux": true, "header": ["31", "313", "6", "0", "eos", "15", "0"], "text": "<|channel>thought\n<channel|>SI."}
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+{"aux": true, "header": ["31", "164", "6", "0", "eos", "1", "14"], "text": "<|channel>thought\n<channel|>SI."}
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+{"aux": false, "header": ["31", "165", "6", "0", "eos", "1", "14"], "text": "<|channel>thought\n<channel|>OK."}
+{"ready_MiB": 8416.0, "main_warm_MiB": 8550.0, "first_aux_MiB": 8886.0, "second_aux_MiB": 8886.0, "lazy_aux_delta_MiB": 336.0}
+PASS formatted: lazy auxiliary KV, no second allocation, legacy framing, main prefix/output intact

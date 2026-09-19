@@ -8,6 +8,8 @@ Built from scratch in C++/CUDA without PyTorch, TensorFlow, or llama.cpp. Everyt
 
 Measured Gemma 4 12B changes, validation and reproduction instructions:
 
+- [Cancellation, progress and lazy auxiliary KV](informes/CANCELACION_RECURSOS_2026-09-19.md) — implementation following the architecture review.
+- [Architecture review: measurements and next priorities](informes/REVISION_ARQUITECTURA_ACTUAL_2026-09-19.md) — baseline `ceadd0b`; subsequent implementation is tracked in the report above.
 - [Architecture audit](informes/ARQUITECTURA_RENDIMIENTO_2026-09-19.md)
 - [KV reuse and CUDA Graphs](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md)
 - [Decode attention](informes/OPTIMIZACION_ATENCION_2026-09-19.md)

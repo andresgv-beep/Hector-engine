@@ -1,0 +1,23 @@
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+META heads=16 kv_heads=8 hd_max=512 layers=48 shared=0 vision_metadata=0 scratch512_MiB=87.750 scratch6144_MiB=1053.000
+KV_FORMULA context=16384 chunk=512 MiB=736.000
+KV_FORMULA context=16384 chunk=6144 MiB=2496.000
+OWNED_KV local_layers=40 global_layers=8
+MEM phase=initial MiB=978.812
+MEM phase=model_loaded MiB=8464.125 multimodal=0
+MEM phase=main_attached MiB=9200.125
+MEM phase=aux_attached MiB=9536.125
+TURN mode=profile-prefill trial=0 prompt=6185 tokens=128 prefill_ms=7809.728 decode_ms=3719.991 first_ms=7817.827 total_ms=11537.818 reason=max_tokens cache=6313 bytes=720
+Capture range started in the application.
+Capture range ended in the application.
+Generating '/tmp/nsys-report-79c7.qdstrm'
+[1/1] [0%                          ] hector-current-prefill.nsys-repProcessing events...
+[1/1] [0%                          ] hector-current-prefill.nsys-rep[1/1] [7%                          ] hector-current-prefill.nsys-rep[1/1] [5%                          ] hector-current-prefill.nsys-rep[1/1] [===24%                      ] hector-current-prefill.nsys-rep[1/1] [==20%                       ] hector-current-prefill.nsys-rep[1/1] [==19%                       ] hector-current-prefill.nsys-rep[1/1] [======35%                   ] hector-current-prefill.nsys-rep[1/1] [===========51%              ] hector-current-prefill.nsys-rep[1/1] [===============67%          ] hector-current-prefill.nsys-rep[1/1] [====================83%     ] hector-current-prefill.nsys-rep[1/1] [====================84%     ] hector-current-prefill.nsys-rep[1/1] [========================100%] hector-current-prefill.nsys-rep[1/1] [========================100%] hector-current-prefill.nsys-rep
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+TURN mode=profile-prefill trial=1 prompt=6185 tokens=128 prefill_ms=7713.463 decode_ms=5340.589 first_ms=9832.398 total_ms=13443.247 reason=max_tokens cache=6313 bytes=720
+MEM phase=after_turn MiB=9336.375
+MEM phase=after_session_destroy MiB=8600.375
+MEM phase=after_model_destroy MiB=1116.375
+MEM phase=after_blas_cleanup MiB=992.375
+Generated:
+    /tmp/hector-current-prefill.nsys-rep

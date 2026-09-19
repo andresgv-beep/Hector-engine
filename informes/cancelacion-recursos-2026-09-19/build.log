@@ -1,0 +1,55 @@
+[  2%] Built target ck_dump
+[  3%] Built target test_mini_json
+[ 29%] Built target helios-engine
+[ 34%] Built target test_kernels
+[ 34%] Built target test_engine
+[ 35%] Built target test_command
+[ 35%] Built target test_tensor
+[ 37%] Built target test_hq31k
+[ 39%] Built target test_memory
+[ 42%] Built target test_hnf_loader
+[ 42%] Built target test_gemma4_metadata
+[ 42%] Built target test_hqs_symmetric
+[ 43%] Built target test_hq62_embedding
+[ 44%] Built target test_gemma4_vision_metadata
+[ 46%] Built target test_hqs_wide
+[ 48%] Built target test_gemma4_vision_preprocess
+[ 50%] Built target test_gemma4_multimodal
+[ 52%] Built target test_gemma4_vision_runner
+[ 52%] Built target test_gemma4_ple
+[ 53%] Built target test_gemma4_primitives
+[ 54%] Built target test_gemma4_graph
+[ 57%] Built target test_gemma4_tokenizer
+[ 57%] Built target test_ck_policy
+[ 59%] Built target inspect_hnf
+[ 61%] Built target test_gemma4_kv
+[ 63%] Built target test_chat_template
+[ 65%] Built target helios_model_probe
+[ 71%] Built target test_attention_split_model
+[ 71%] Built target test_attention_split
+[ 71%] Built target test_attention_prefill_model
+[ 73%] Built target test_graph_builder
+[ 73%] Built target test_attention_prefill
+[ 75%] Built target test_generate
+[ 79%] Built target test_generate_full
+[ 81%] Built target test_generate_kv
+[ 82%] Built target test_tokenizer
+[ 83%] Built target test_gemma4_generate
+[ 83%] Built target gemma4_dump_logits
+[ 84%] Built target gemma4_multimodal_dump
+[ 87%] Built target test_generate_modal
+[ 87%] Built target test_multimodal
+[ 88%] Built target gemma4_calibrate
+[ 90%] Built target text_code_relay
+[ 91%] Built target test_smoke
+[ 92%] Built target test_chat
+[ 94%] Built target helios_formatted
+[ 94%] Built target sesiones_test
+[ 94%] Building CXX object CMakeFiles/helios_runtime.dir/tools/helios_runtime.cpp.o
+[ 96%] Built target test_inference_session_gemma4
+[ 98%] Built target helios_chat
+[ 99%] Building CXX object CMakeFiles/test_inference_cancellation.dir/tests/test_inference_cancellation.cpp.o
+[ 99%] Linking CXX executable test_inference_cancellation
+[ 99%] Built target test_inference_cancellation
+[100%] Linking CXX executable helios_runtime
+[100%] Built target helios_runtime

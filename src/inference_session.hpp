@@ -113,7 +113,7 @@ public:
         size_t row_stride_bytes = 0;
     };
 
-    enum class FinishReason { Eos, MaxTokens, Stop, Cancelled };
+    enum class FinishReason { Eos, MaxTokens, Stop, Cancelled, ContextFull };
     static const char* finish_reason_name(FinishReason r);
 
     struct TurnStats {
@@ -130,6 +130,9 @@ public:
         uint32_t decode_graph_captures = 0;
         uint32_t decode_graph_replays = 0;
         uint32_t decode_graph_fallbacks = 0;
+        double queue_ms = 0.0;
+        // Desde run_turn hasta el primer fragmento visible; -1 si no lo hubo.
+        double first_token_ms = -1.0;
     };
 
     // Fragmento de texto VISIBLE, siempre UTF-8 completo: el protocolo lo
@@ -141,6 +144,10 @@ public:
     // protocolo exige que su evento preceda a cualquier text_delta y con
     // cifras verdaderas, no ceros de relleno.
     using PrefillCallback = std::function<void(uint32_t tokens, double ms)>;
+    // Progreso por tanda de texto completada; total excluye el prefijo reutilizado.
+    // No sustituye al evento final on_prefill. Puede señalar cancel_flag.
+    using PrefillProgressCallback =
+        std::function<void(uint32_t processed, uint32_t total, double ms)>;
 
     InferenceSession();
     ~InferenceSession();
@@ -183,7 +190,12 @@ public:
     // visible, se intenta volver a `cache_position_before`; si el anillo ya
     // perdió esa ventana, se vacía el KV y el llamante debe reenviar el historial.
     // Un error de ejecución visual también vacía el KV. La posición resultante
-    // se devuelve en stats. La cancelación conserva exactamente lo emitido.
+    // se devuelve en stats. Cancelar antes de ejecutar no cambia el KV. Durante
+    // prefill se vuelve al inicio efectivo, o se vacía si el anillo lo perdió.
+    // Durante decode se conserva lo generado y se respeta close_turn.
+    // La cancelación visual se comprueba antes/después del adaptador; no
+    // interrumpe su operación interna. Los callbacks se ejecutan bajo el cerrojo
+    // del modelo: pueden señalar cancelación, pero no ejecutar/resetear sesiones.
     // `attachments` vacío = turno de solo texto. Si no hay adaptador visual
     // en el HNF, un turno con adjunto falla con `unsupported_attachment`.
     bool run_turn(const std::vector<ChatMessage>& messages,
@@ -196,7 +208,8 @@ public:
                   TurnStats* stats,
                   FinishReason* reason,
                   std::string* error_code,
-                  std::string* error);
+                  std::string* error,
+                  const PrefillProgressCallback& on_prefill_progress = {});
 
 private:
     struct Impl;
