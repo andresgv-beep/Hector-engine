@@ -1,0 +1,19 @@
+--- inference_session.cpp
++++ inference_session.cpp
+@@ -357,6 +357,7 @@
+     std::shared_ptr<Model> m(new Model());
+     auto& s = *m->impl_;
+     try {
++        cudaStreamCreate(&s.engine_config.stream); // SOLO experimento aislado: stream vive hasta salir del proceso
+         s.engine = std::make_unique<Engine>(s.engine_config);
+         kernels::register_all_kernels(*s.engine);
+ 
+@@ -550,6 +551,8 @@
+     // corrupcion — y cuando el scratch sea por sesion, esta linea se cae sola.
+     std::lock_guard<std::mutex> en_serie(impl_->M.en_uso);
+     auto& s = *impl_;
++    s.engine->invalidate_graph();
++    s.decode_cb_built = false; // reconstruir formas/punteros al inicio de cada turno
+     using clock = std::chrono::high_resolution_clock;
+ 
+     const uint32_t antes = s.position();

@@ -4,11 +4,11 @@
 // ============================================================================
 //
 // CACHED ATTENTION v2 (decode, M=1):
-//   4 warps per head (was 1) — each warp processes seq_len/4 positions
+//   16 warps per head — each warp processes seq_len/16 positions
 //   - Q in registers (same as v1)
 //   - Each warp does online softmax on its chunk
-//   - Shared memory merge of 4 partial results
-//   - Supports GQA, head_dim up to 256
+//   - Shared memory merge of 16 partial results
+//   - Supports GQA, head_dim up to 512
 //
 //   Why 4 warps: seq_len grows during generation. With 128 tokens:
 //     v1: 1 warp loops 128 times — serial bottleneck
@@ -146,6 +146,8 @@ constexpr int ATTN_WARPS = 16;  // Warps per head
 constexpr int ATTN_BLOCK = ATTN_WARPS * WARP_SIZE;  // 512 threads per block
 constexpr int MAX_HD_PER_THREAD = 16;  // head_dim up to 512 (Gemma 4 global)
 constexpr int MAX_HD2_PER_THREAD = 8;  // idem in half2 units
+constexpr int SPLIT_WARPS = 1;
+constexpr int SPLIT_BLOCKS = ATTN_WARPS / SPLIT_WARPS;
 
 // Shared memory layout for merge:
 //   float partial_max[ATTN_WARPS]
@@ -337,6 +339,7 @@ void launch_attention_cached_fp16(
 }
 
 // Device-pointer version: reads seq_len (total_seq) from device memory
+template<bool Split = false>
 __global__ void attention_cached_v2_kernel_dp(
     const half* __restrict__ Q,
     const half* __restrict__ K_cache,
@@ -350,12 +353,14 @@ __global__ void attention_cached_v2_kernel_dp(
     int max_seq_len,
     float scale,
     int window_size,
-    int cache_slots
+    int cache_slots,
+    float* __restrict__ partials
 ) {
     int seq_len = *d_seq_len;
     
-    const int head_id = blockIdx.x;
-    const int warp_id = threadIdx.x / WARP_SIZE;
+    const int head_id = Split ? blockIdx.x / SPLIT_BLOCKS : blockIdx.x;
+    const int warp_id = Split ? (blockIdx.x % SPLIT_BLOCKS) * SPLIT_WARPS + threadIdx.x / WARP_SIZE
+                              : threadIdx.x / WARP_SIZE;
     const int lane = threadIdx.x % WARP_SIZE;
     
     const int b = head_id / num_heads;
@@ -398,9 +403,10 @@ __global__ void attention_cached_v2_kernel_dp(
     #pragma unroll
     for (int i = 0; i < MAX_HD2_PER_THREAD; i++) acc[i] = make_float2(0.0f, 0.0f);
 
+    int physical_slot = Split ? pos_start % cache_slots : 0;
     for (int pos = pos_start; pos < pos_end; pos++) {
         const int kv_base2 =
-            (kv_batch_base + (pos % cache_slots) * num_kv_heads * head_dim + kv_head_offset) >> 1;
+            (kv_batch_base + (Split ? physical_slot : pos % cache_slots) * num_kv_heads * head_dim + kv_head_offset) >> 1;
 
         float dot = 0.0f;
         #pragma unroll
@@ -436,6 +442,27 @@ __global__ void attention_cached_v2_kernel_dp(
             }
         }
         running_max = new_max;
+        if constexpr (Split) {
+            if (++physical_slot == cache_slots) physical_slot = 0;
+        }
+    }
+
+    // Keep exactly the same partitions and arithmetic as the reference.
+    // Each warp can run on a different SM instead of sharing one large CTA.
+    if constexpr (Split) {
+        constexpr int stride = MAX_HD_PER_THREAD * WARP_SIZE;
+        float* base = partials + head_id * (2 * ATTN_WARPS + ATTN_WARPS * stride);
+        if (lane == 0) {
+            base[warp_id] = running_max;
+            base[ATTN_WARPS + warp_id] = running_sum;
+        }
+        float* dst = base + 2 * ATTN_WARPS + warp_id * stride;
+        #pragma unroll
+        for (int i = 0; i < MAX_HD2_PER_THREAD; ++i) {
+            dst[lane * MAX_HD_PER_THREAD + i * 2] = acc[i].x;
+            dst[lane * MAX_HD_PER_THREAD + i * 2 + 1] = acc[i].y;
+        }
+        return;
     }
 
     extern __shared__ float s_mem[];
@@ -462,7 +489,7 @@ __global__ void attention_cached_v2_kernel_dp(
         for (int w = 1; w < ATTN_WARPS; w++) {
             global_max = fmaxf(global_max, s_max[w]);
         }
-        
+
         float merged_acc[MAX_HD_PER_THREAD];
         #pragma unroll
         for (int i = 0; i < MAX_HD_PER_THREAD; i++) merged_acc[i] = 0.0f;
@@ -507,11 +534,83 @@ void launch_attention_cached_fp16_dp(
     int num_blocks = batch_size * num_heads;
     size_t smem = (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
     
-    attention_cached_v2_kernel_dp<<<num_blocks, ATTN_BLOCK, smem, stream>>>(
+    attention_cached_v2_kernel_dp<false><<<num_blocks, ATTN_BLOCK, smem, stream>>>(
         q, k_cache, v_cache, output,
         batch_size, d_seq_len, num_heads, num_kv_heads, head_dim,
-        max_seq_len, scale, window_size, cache_slots
+        max_seq_len, scale, window_size, cache_slots, nullptr
     );
+}
+
+
+// Same FP32 merge order as the reference, after the independent warp CTAs.
+__global__ void attention_cached_split_merge(
+    const float* partials, half* output, int num_heads, int head_dim) {
+    const int head_id = blockIdx.x;
+    const int b = head_id / num_heads;
+    const int h = head_id % num_heads;
+    const int lane = threadIdx.x;
+    const int hd2 = head_dim >> 1;
+    constexpr int acc_stride = MAX_HD_PER_THREAD * WARP_SIZE;
+    const float* s_max = partials + head_id * (2 * ATTN_WARPS + ATTN_WARPS * acc_stride);
+    const float* s_sum = s_max + ATTN_WARPS;
+    const float* s_acc = s_sum + ATTN_WARPS;
+    {
+        float global_max = s_max[0];
+        for (int w = 1; w < ATTN_WARPS; w++) {
+            global_max = fmaxf(global_max, s_max[w]);
+        }
+
+        float merged_acc[MAX_HD_PER_THREAD];
+        #pragma unroll
+        for (int i = 0; i < MAX_HD_PER_THREAD; i++) merged_acc[i] = 0.0f;
+        float merged_sum = 0.0f;
+
+        for (int w = 0; w < ATTN_WARPS; w++) {
+            float correction = expf(s_max[w] - global_max);
+            float w_sum = s_sum[w] * correction;
+            merged_sum += w_sum;
+
+            #pragma unroll
+            for (int i = 0; i < MAX_HD_PER_THREAD; i++) {
+                merged_acc[i] += s_acc[w * acc_stride + lane * MAX_HD_PER_THREAD + i] * correction;
+            }
+        }
+
+        float inv_sum = (merged_sum > 0.0f) ? (1.0f / merged_sum) : 0.0f;
+        // Salida vectorizada: cada lane escribe sus pares (mismo orden que
+        // se guardaron: merged_acc[2i], merged_acc[2i+1] = dimensión d2*2, +1)
+        const int out_base2 = (b * num_heads * head_dim + h * head_dim) >> 1;
+        half2* out2 = reinterpret_cast<half2*>(output);
+
+        #pragma unroll
+        for (int i = 0; i < MAX_HD2_PER_THREAD; i++) {
+            int d2 = lane + i * WARP_SIZE;
+            if (d2 < hd2) {
+                out2[out_base2 + d2] = __floats2half2_rn(
+                    merged_acc[i * 2] * inv_sum,
+                    merged_acc[i * 2 + 1] * inv_sum);
+            }
+        }
+    }
+}
+
+size_t attention_cached_split_workspace_bytes(int batch_size, int num_heads) {
+    return size_t(batch_size) * num_heads *
+        (2 * ATTN_WARPS + ATTN_WARPS * MAX_HD_PER_THREAD * WARP_SIZE) * sizeof(float);
+}
+
+void launch_attention_cached_fp16_split_dp(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    float* partials, int batch_size, const int32_t* d_seq_len,
+    int num_heads, int num_kv_heads, int head_dim, int max_seq_len,
+    float scale, int window_size, cudaStream_t stream, int cache_slots) {
+    if (cache_slots <= 0) cache_slots = max_seq_len;
+    const int heads = batch_size * num_heads;
+    attention_cached_v2_kernel_dp<true><<<heads * SPLIT_BLOCKS, SPLIT_WARPS * WARP_SIZE, 0, stream>>>(
+        q, k_cache, v_cache, output, batch_size, d_seq_len, num_heads,
+        num_kv_heads, head_dim, max_seq_len, scale, window_size, cache_slots, partials);
+    attention_cached_split_merge<<<heads, WARP_SIZE, 0, stream>>>(
+        partials, output, num_heads, head_dim);
 }
 
 // ============================================================================

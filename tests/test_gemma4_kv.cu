@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <limits>
@@ -64,13 +65,13 @@ helios::ModelConfig synthetic_model() {
 }
 
 std::vector<std::string> register_detection_contract(helios::Engine& engine,
-                                                      void* dummy) {
+                                                      void* dummy, uint32_t layers = 35) {
     std::vector<std::string> names;
     auto add = [&](const std::string& name) {
         engine.tensors().register_external(name, dummy, {1}, helios::dtype::FP16());
         names.push_back(name);
     };
-    for (uint32_t i = 0; i < 35; ++i) {
+    for (uint32_t i = 0; i < layers; ++i) {
         add("text.layer" + std::to_string(i) + ".ln_attn_in.weight");
     }
     add("text.layer0.ln_attn_post.weight");
@@ -227,6 +228,67 @@ void test_cached_graph_contract() {
     std::cout << "PASS: source/shared local/global cached graph contract" << std::endl;
 }
 
+// Ensure the model-facing route actually selects the tested kernel, and that
+// its workspace is a fourth input (not a second Q/K/V tuple).
+void test_split_decode_selection() {
+    auto gemma = synthetic_gemma();
+    gemma.layers = {gemma.layers[13], gemma.layers[14]};
+    gemma.num_kv_shared_layers = 0;
+    gemma.flags = 0;
+    gemma.layers[0].sliding_window = 1024;
+    gemma.layers[0].num_kv_heads = 8;
+    gemma.layers[1].num_kv_heads = 1;
+    auto config = synthetic_model();
+    config.set("num_hidden_layers", int64_t(2));
+    config.set("num_attention_heads", int64_t(16));
+    config.set("num_key_value_heads", int64_t(8));
+    for (bool enabled : {false, true}) {
+        helios::EngineConfig ec;
+        ec.use_split_attention = enabled;
+        helios::Engine engine(ec);
+        void* dummy = nullptr;
+        cuda_require(cudaMalloc(&dummy, 2), "split selection dummy");
+        const auto names = register_detection_contract(engine, dummy, 2);
+        helios::GraphBuilder builder;
+        const auto arch = builder.detect_architecture(engine, "text", config);
+        builder.allocate_gemma4_scratch(engine, config, gemma, arch, 1, 2);
+        helios::Gemma4KVCache cache;
+        require(cache.allocate(gemma, 8, 1, 4096, 512), "split selection KV");
+        cache.register_tensors(engine, "_split_test_kv");
+        std::string workspace;
+        for (uint32_t pos : {0u, 2046u, 2047u, 4095u}) {
+            for (uint32_t layer : {0u, 1u}) {
+                const auto cb = builder.build_gemma4_layer_cached(
+                    engine, config, gemma, arch, layer, 1, 1,
+                    {"_split_test_kv", pos, 4096});
+                const auto& attn = find_op(cb, helios::op::ATTENTION_CACHED());
+                const bool split = enabled && pos >= 2047;
+                require(attn.inputs.size() == (split ? 4 : 3), "split decode selection");
+                if (split) {
+                    workspace = attn.inputs[3];
+                    const auto& t = engine.tensors().at(workspace);
+                    require(t.dtype == helios::dtype::FP32() &&
+                            t.size_bytes >= helios::kernels::attention_cached_split_workspace_bytes(1, 16),
+                            "stable FP32 split workspace");
+                }
+            }
+        }
+        const auto prefill = builder.build_gemma4_layer_cached(
+            engine, config, gemma, arch, 1, 1, 2, {"_split_test_kv", 2048, 4096});
+        require(find_op(prefill, helios::op::ATTENTION_PREFILL_CACHED()).inputs.size() == 3,
+                "prefill keeps reference path");
+        builder.free_scratch(engine);
+        require(workspace.empty() || !engine.tensors().exists(workspace), "workspace freed with scratch");
+        for (int layer = 0; layer < 2; ++layer) {
+            engine.tensors().remove("_split_test_kv.layer" + std::to_string(layer) + ".k");
+            engine.tensors().remove("_split_test_kv.layer" + std::to_string(layer) + ".v");
+        }
+        for (const auto& name : names) engine.tensors().remove(name);
+        cudaFree(dummy);
+    }
+    std::cout << "PASS: split decode threshold, geometry and workspace lifetime" << std::endl;
+}
+
 std::vector<half> repeated_half(size_t count, float value) {
     return std::vector<half>(count, __float2half(value));
 }
@@ -355,7 +417,13 @@ std::vector<half> copy_logits(const helios::Engine& engine, uint32_t vocab) {
 }
 
 void test_real_prefill_decode_consistency(const std::string& path) {
+    struct Stream {
+        cudaStream_t value = nullptr;
+        ~Stream() { if (value) cudaStreamDestroy(value); }
+    } stream;
+    cuda_require(cudaStreamCreate(&stream.value), "create real test stream");
     helios::EngineConfig engine_config;
+    engine_config.stream = stream.value;
     engine_config.scratch_pool.auto_fraction = 0.0f;
     engine_config.scratch_pool.min_size_bytes = 0;
     helios::Engine engine(engine_config);
@@ -419,9 +487,33 @@ void test_real_prefill_decode_consistency(const std::string& path) {
         if (b > decode_max) { decode_max = b; decode_argmax = i; }
     }
     mean_error /= config.vocab_size();
+    std::cout << "NUMERICS max=" << max_error << " mean=" << mean_error << " argmax=" << prefill_argmax << "/" << decode_argmax << std::endl;
     require(max_error <= 0.125f && mean_error <= 0.005 &&
             prefill_argmax == decode_argmax,
             "real prefill/decode logits diverged");
+
+    // Capture with real weights, then change device-side position and input.
+    // Re-running the same causal step eagerly must match every logit bit.
+    const helios::KVCacheParams graph_cache{"_g4kv", 3, 8};
+    const auto graph = builder.build_gemma4_forward_cached(
+        engine, config, gemma, arch, "g4.real.tokens", 1, 1, graph_cache);
+    for (uint32_t position = 3; position < 8; ++position) {
+        int32_t token = 40 + position;
+        cuda_require(cudaMemcpy(token_ptr, &token, sizeof(token), cudaMemcpyHostToDevice),
+                     "copy graph token");
+        engine.update_device_cache_pos(position, 1);
+        engine.execute_graph_replay(graph);
+        engine.sync();
+        require(engine.graph_ready(), "real graph must be captured");
+        const auto captured = copy_logits(engine, config.vocab_size());
+        engine.execute(graph);
+        engine.sync();
+        const auto eager = copy_logits(engine, config.vocab_size());
+        require(std::memcmp(captured.data(), eager.data(), captured.size() * sizeof(half)) == 0,
+                "captured/eager real logits differ");
+    }
+    engine.invalidate_graph();
+    std::cout << "PASS: capture/replay equals eager for every logit at five positions" << std::endl;
 
     builder.free_scratch(engine);
     for (uint32_t i = 0; i < gemma.layers.size(); ++i) {
@@ -435,6 +527,36 @@ void test_real_prefill_decode_consistency(const std::string& path) {
 
 } // namespace
 
+void test_ring_rewind_validity() {
+    auto gemma = synthetic_gemma();
+    for (auto& layer : gemma.layers) {
+        if (!layer.is_global_attention()) layer.sliding_window = 4;
+    }
+    helios::Gemma4KVCache cache;
+    require(cache.allocate(gemma, 1, 1, 32, 2), "allocate short ring");
+    require(cache.slots(0) == 6, "window plus prefill capacity");
+    cache.advance(12); // ring contains logical positions 6..11
+    require(cache.can_rewind_to(9), "query 9 needs 6..8, still resident");
+    require(!cache.can_rewind_to(8), "query 8 would need overwritten position 5");
+    require(!cache.rewind_to(8) && cache.position() == 12,
+            "invalid rewind must not move the cursor");
+    require(cache.rewind_to(10) && cache.rewind_to(9), "safe successive rewinds");
+    require(!cache.can_rewind_to(8), "rewinds do not restore overwritten slots");
+    cache.note_write_end(14); // simulate a partial forward that failed
+    require(!cache.can_rewind_to(9), "failed writes still constrain rollback");
+    helios::Gemma4KVCache moved(std::move(cache));
+    require(!moved.can_rewind_to(9), "move preserves physical write history");
+    moved.reset();
+    moved.advance(5);
+    require(moved.can_rewind_to(0), "reset starts a new physical history");
+
+    helios::Gemma4KVCache full;
+    require(full.allocate(gemma, 1, 1, 32), "allocate full cache");
+    full.advance(12);
+    require(full.rewind_to(0), "full cache retains the entire prefix");
+    std::cout << "PASS: ring rewind boundaries, partial writes, reset and move" << std::endl;
+}
+
 int main(int argc, char** argv) {
     int devices = 0;
     cuda_require(cudaGetDeviceCount(&devices), "cudaGetDeviceCount");
@@ -445,7 +567,9 @@ int main(int argc, char** argv) {
         return 0;
     }
     test_layout_and_aliases();
+    test_ring_rewind_validity();
     test_cached_graph_contract();
+    test_split_decode_selection();
     test_local_window_and_global_hd512();
     std::cout << "ALL GEMMA 4 KV TESTS PASSED" << std::endl;
     return 0;

@@ -1,0 +1,2 @@
+DIFF _s.g4.layer7.attn_out count=1 max=0.000244141
+FAIL: real attention not bitwise identical

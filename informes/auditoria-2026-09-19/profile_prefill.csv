@@ -1,0 +1,51 @@
+Generating SQLite file /tmp/hector-audit-20260919/prefill.sqlite from /tmp/hector-audit-20260919/prefill.nsys-rep
+Processing [/tmp/hector-audit-20260919/prefill.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+64.4,5336229188,624,8551649.3,6975636.5,548741,43685938,8176634.4,"helios::kernels::attention_prefill_cached_kernel(const __half *, const __half *, const __half *, __half *, int, int, int, int, int, int, int, float, int)"
+13.1,1089110130,1872,581789.6,522517.0,506245,1045515,129786.1,"void helios::kernels::dequant_hq_symmetric_kernel<(int)4, (int)152>(const unsigned char *, __half *, int, int)"
+10.3,852009790,2688,316967.9,137745.0,67616,1136907,255963.4,ampere_h1688gemm_128x128_ldg8_stages_32x1_tn
+4.3,357179899,864,413402.7,494036.5,17888,1009034,247522.9,void cutlass::Kernel2<cutlass_80_tensorop_h16816gemm_64x256_32x4_tn_align8>(T1::Params)
+4.1,339206987,2496,135900.2,143809.5,17440,808840,107782.8,"void helios::kernels::dequant_hq_symmetric_kernel<(int)5, (int)184>(const unsigned char *, __half *, int, int)"
+1.1,90675844,576,157423.3,103169.0,102370,821896,112448.8,ampere_h16816gemm_128x128_ldg8_stages_64x3_tn
+0.8,70201406,4381,16024.1,13056.0,1408,457924,23752.0,"helios::kernels::rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, int, float)"
+0.4,34386215,624,55106.1,50240.0,4703,506309,50626.3,"helios::kernels::gelu_fp16_kernel(const __half *, __half *, unsigned long)"
+0.3,24916908,624,39930.9,39681.0,2592,444804,27317.4,"helios::kernels::mul_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.3,22192185,13,1707091.2,1569551.0,1541039,2023251,172600.7,"void helios::kernels::gemv_hq_symmetric_kernel<(int)5, (int)184, (int)2, (int)4>(const __half *, const unsigned char *, __half *, int, int)"
+0.2,20683799,192,107728.1,19600.0,4415,798120,165000.1,ampere_h16816gemm_64x64_ldg8_stages_64x5_tn
+0.2,13379929,1248,10721.1,9600.0,1664,304707,12202.7,"helios::kernels::add_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.2,12664503,1248,10147.8,11648.0,1088,403204,11862.5,"helios::kernels::kv_cache_update_kernel(const __half *, __half *, int, int, int, int, int, int)"
+0.1,9695379,1040,9322.5,6608.5,1311,310628,13593.4,"helios::kernels::rope_kernel(__half *, int, int, int, int, int, int, float, float)"
+0.1,5733701,624,9188.6,8992.5,1568,209570,11717.8,"helios::kernels::mul_scalar_tensor_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.0,1871764,8,233970.5,176898.0,159234,454980,111568.3,ampere_h1688gemm_256x64_ldg8_stages_32x1_tn
+0.0,1632243,13,125557.2,123745.0,121345,155810,9199.0,"helios::kernels::argmax_fp16_kernel(const __half *, int *, int)"
+0.0,995987,40,24899.7,24832.0,24704,25568,221.1,ampere_h16816gemm_128x64_ldg8_stages_64x3_tn
+0.0,837547,208,4026.7,1552.0,992,7712,2866.1,"void helios::kernels::rope_proportional_kernel<(bool)0>(__half *, int, int, int, int, int, int, const int *, float, float)"
+0.0,668450,208,3213.7,3296.0,1280,10464,729.1,"void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, __half, __half, __half, __half, (bool)0, __half, __half, __half, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)"
+0.0,186176,13,14321.2,13216.0,12640,18464,1879.5,"void helios::kernels::embedding_hq_symmetric_kernel<(int)5, (int)184>(const int *, const unsigned char *, __half *, int, int, int)"
+0.0,57666,13,4435.8,4609.0,1088,5280,1022.4,"helios::kernels::scale_fp16_kernel(const __half *, __half *, __half, unsigned long)"
+0.0,36353,13,2796.4,2816.0,2624,3136,134.9,"helios::kernels::softcap_fp16_kernel(const __half *, __half *, float, unsigned long)"
+
+Processing [/tmp/hector-audit-20260919/prefill.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_api_sum.py]... 
+Time (%),Total Time (ns),Num Calls,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+59.0,4889119244,26,188043047.8,769785.0,1110,526512503,218290947.5,cudaStreamSynchronize
+36.8,3050001763,18558,164349.7,2860.0,2450,195739153,1955826.2,cudaLaunchKernel
+1.8,151312750,2112,71644.3,2600.0,1990,1004047,173970.2,cudaMemsetAsync
+1.6,134978461,864,156225.1,2875.0,2570,1020937,269461.2,cuLaunchKernel
+0.4,30135228,208,144880.9,3380.0,2870,23703103,1642463.9,cudaLaunchKernelExC_v11060
+0.2,12870867,13,990066.7,175372.0,13610,6397074,1778664.1,cuLibraryLoadData
+0.0,2830400,2,1415200.0,1415200.0,111391,2719009,1843864.4,cudaFree
+0.0,2628808,864,3042.6,250.0,180,2378106,80895.1,cuKernelGetFunction
+0.0,2611216,13,200862.8,165561.0,130151,405872,86773.8,cudaMemcpyAsync
+0.0,1657841,2320,714.6,600.0,460,4760,377.4,cudaEventRecord
+0.0,1454260,18558,78.4,70.0,50,1050,42.8,cuKernelGetName
+0.0,1029368,11808,87.2,70.0,50,1110,46.4,cuStreamGetCaptureInfo_v2
+0.0,719365,5,143873.0,74311.0,2710,549393,229454.0,cudaMalloc
+0.0,148951,883,168.7,150.0,60,580,84.7,cuGetProcAddress_v2
+0.0,137450,13,10573.1,8980.0,7770,30180,5938.3,cudaMemcpy
+0.0,31240,22,1420.0,375.0,200,5710,1951.3,cuLibraryGetKernel
+0.0,9090,18,505.0,210.0,190,4690,1051.5,cudaEventCreateWithFlags
+0.0,7980,1,7980.0,7980.0,7980,7980,0.0,cuProfilerStart
+0.0,6240,2,3120.0,3120.0,1620,4620,2121.3,cudaEventQuery
+0.0,4900,4,1225.0,1230.0,940,1500,231.0,cuInit
+0.0,210,2,105.0,105.0,100,110,7.1,cuModuleGetLoadingMode
+

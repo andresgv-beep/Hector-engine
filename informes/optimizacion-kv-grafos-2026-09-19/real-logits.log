@@ -1,0 +1,5 @@
+NUMERICS max=0 mean=0 argmax=236761/236761
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+PASS: capture/replay equals eager for every logit at five positions
+PASS: real prefill/decode logits max=0 mean=0 argmax=236761
+ALL REAL GEMMA 4 KV TESTS PASSED

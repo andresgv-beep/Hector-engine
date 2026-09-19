@@ -208,6 +208,8 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
     cudaError_t cap_err = cudaStreamBeginCapture(config_.stream, cudaStreamCaptureModeGlobal);
     if (cap_err != cudaSuccess) {
         // Can't capture — fall back to normal execution
+        fprintf(stderr, "[engine] CUDA Graph capture unavailable: %s; executing normally\n",
+                cudaGetErrorString(cap_err));
         cudaGetLastError();
         execute(commands);
         return;

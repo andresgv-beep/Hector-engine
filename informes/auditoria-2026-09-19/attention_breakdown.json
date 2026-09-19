@@ -1,0 +1,10 @@
+{
+  "decode": {
+    "local_ms_per_token": 0.387155640625,
+    "global_ms_per_token": 0.0875337109375
+  },
+  "decode_long": {
+    "local_ms_per_token": 2.8484516171875,
+    "global_ms_per_token": 3.541785796875
+  }
+}

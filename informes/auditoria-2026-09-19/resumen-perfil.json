@@ -1,0 +1,117 @@
+{
+  "decode": {
+    "kernels": 148224,
+    "kernel_total_ms": 2852.198809,
+    "categories": {
+      "gemv": {
+        "ms": 2516.623865,
+        "percent": 88.23451777130309
+      },
+      "rmsnorm": {
+        "ms": 196.657584,
+        "percent": 6.8949465717275675
+      },
+      "attention_cached": {
+        "ms": 60.760237,
+        "percent": 2.1302945926586005
+      },
+      "attention_prefill": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "dequant": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "gemm": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "argmax": {
+        "ms": 22.195734,
+        "percent": 0.7781972957131265
+      }
+    },
+    "capture_returns": [
+      [
+        900,
+        127
+      ]
+    ]
+  },
+  "decode_long": {
+    "kernels": 148224,
+    "kernel_total_ms": 3632.916072,
+    "categories": {
+      "gemv": {
+        "ms": 2538.045118,
+        "percent": 69.86247597519505
+      },
+      "rmsnorm": {
+        "ms": 203.715656,
+        "percent": 5.607496896779398
+      },
+      "attention_cached": {
+        "ms": 817.950389,
+        "percent": 22.514981705858688
+      },
+      "attention_prefill": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "dequant": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "gemm": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "argmax": {
+        "ms": 16.737892,
+        "percent": 0.46072883788877134
+      }
+    },
+    "capture_returns": [
+      [
+        900,
+        127
+      ]
+    ]
+  },
+  "prefill": {
+    "kernels": 19630,
+    "kernel_total_ms": 8284.552049,
+    "categories": {
+      "gemv": {
+        "ms": 22.192185,
+        "percent": 0.26787429023007636
+      },
+      "rmsnorm": {
+        "ms": 70.201406,
+        "percent": 0.8473772098332555
+      },
+      "attention_cached": {
+        "ms": 0.0,
+        "percent": 0.0
+      },
+      "attention_prefill": {
+        "ms": 5336.229188,
+        "percent": 64.4118011020779
+      },
+      "dequant": {
+        "ms": 1428.317117,
+        "percent": 17.24072838883796
+      },
+      "gemm": {
+        "ms": 1323.417083,
+        "percent": 15.974515884171977
+      },
+      "argmax": {
+        "ms": 1.632243,
+        "percent": 0.01970224811608278
+      }
+    },
+    "capture_returns": []
+  }
+}

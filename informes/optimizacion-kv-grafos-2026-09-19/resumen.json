@@ -1,0 +1,62 @@
+[
+  {
+    "prompt_tokens": 41,
+    "samples_per_mode": 5,
+    "eager": {
+      "median_tok_s": 42.308,
+      "min_tok_s": 42.266,
+      "max_tok_s": 42.347,
+      "median_prefill_ms": 176.304,
+      "median_gpu_used_MiB": 9631.1
+    },
+    "graphs": {
+      "median_tok_s": 43.368,
+      "min_tok_s": 43.345,
+      "max_tok_s": 43.386,
+      "median_prefill_ms": 176.729,
+      "median_gpu_used_MiB": 9639.1
+    },
+    "gain_percent": 2.505436324099475,
+    "same_output_hash": "15730427814794380040"
+  },
+  {
+    "prompt_tokens": 2089,
+    "samples_per_mode": 5,
+    "eager": {
+      "median_tok_s": 36.539,
+      "min_tok_s": 36.534,
+      "max_tok_s": 36.554,
+      "median_prefill_ms": 2245.484,
+      "median_gpu_used_MiB": 9631.1
+    },
+    "graphs": {
+      "median_tok_s": 37.676,
+      "min_tok_s": 37.276,
+      "max_tok_s": 38.069,
+      "median_prefill_ms": 2238.251,
+      "median_gpu_used_MiB": 9642.6
+    },
+    "gain_percent": 3.1117436164098677,
+    "same_output_hash": "15579933776154709868"
+  },
+  {
+    "prompt_tokens": 6185,
+    "samples_per_mode": 5,
+    "eager": {
+      "median_tok_s": 33.386,
+      "min_tok_s": 33.381,
+      "max_tok_s": 33.396,
+      "median_prefill_ms": 8428.434,
+      "median_gpu_used_MiB": 9631.1
+    },
+    "graphs": {
+      "median_tok_s": 34.019,
+      "min_tok_s": 33.975,
+      "max_tok_s": 34.18,
+      "median_prefill_ms": 8425.346,
+      "median_gpu_used_MiB": 9636.9
+    },
+    "gain_percent": 1.8960043131851512,
+    "same_output_hash": "5820420632660544778"
+  }
+]

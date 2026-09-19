@@ -1,0 +1,92 @@
+[  3%] Built target test_mini_json
+[  4%] Built target ck_dump
+[  5%] Building CXX object CMakeFiles/helios-engine.dir/src/inference_session.cpp.o
+[  6%] Linking CXX static library libhelios-engine.a
+[ 32%] Built target helios-engine
+[ 34%] Linking CXX executable test_engine
+[ 34%] Linking CXX executable test_tensor
+[ 34%] Linking CXX executable test_memory
+[ 35%] Linking CXX executable test_command
+[ 36%] Built target test_memory
+[ 38%] Built target test_tensor
+[ 38%] Built target test_command
+[ 38%] Built target test_engine
+[ 38%] Linking CXX executable test_kernels
+[ 39%] Linking CXX executable test_hq31k
+[ 40%] Linking CXX executable test_hq62_embedding
+[ 40%] Linking CXX executable test_hqs_wide
+[ 41%] Built target test_hq31k
+[ 41%] Built target test_hq62_embedding
+[ 42%] Built target test_kernels
+[ 43%] Built target test_hqs_wide
+[ 44%] Linking CXX executable test_hqs_symmetric
+[ 45%] Linking CXX executable test_hnf_loader
+[ 46%] Linking CXX executable test_gemma4_metadata
+[ 46%] Linking CXX executable test_gemma4_vision_metadata
+[ 47%] Built target test_hnf_loader
+[ 48%] Built target test_hqs_symmetric
+[ 49%] Built target test_gemma4_metadata
+[ 50%] Built target test_gemma4_vision_metadata
+[ 51%] Linking CXX executable test_gemma4_vision_preprocess
+[ 52%] Linking CXX executable test_gemma4_vision_runner
+[ 53%] Linking CXX executable test_gemma4_multimodal
+[ 54%] Linking CXX executable test_gemma4_primitives
+[ 55%] Built target test_gemma4_vision_preprocess
+[ 56%] Linking CXX executable test_gemma4_ple
+[ 57%] Built target test_gemma4_vision_runner
+[ 57%] Built target test_gemma4_primitives
+[ 57%] Linking CXX executable test_gemma4_graph
+[ 57%] Built target test_gemma4_multimodal
+[ 58%] Linking CXX executable test_gemma4_kv
+[ 59%] Linking CXX executable test_gemma4_tokenizer
+[ 60%] Built target test_gemma4_ple
+[ 61%] Built target test_gemma4_tokenizer
+[ 62%] Linking CXX executable test_chat_template
+[ 63%] Built target test_gemma4_graph
+[ 64%] Linking CXX executable test_ck_policy
+[ 65%] Built target test_gemma4_kv
+[ 66%] Linking CXX executable inspect_hnf
+[ 67%] Linking CXX executable helios_model_probe
+[ 68%] Built target test_chat_template
+[ 68%] Built target test_ck_policy
+[ 68%] Linking CXX executable test_graph_builder
+[ 69%] Linking CXX executable test_generate
+[ 70%] Built target helios_model_probe
+[ 71%] Built target inspect_hnf
+[ 71%] Linking CXX executable test_generate_kv
+[ 72%] Linking CXX executable test_tokenizer
+[ 73%] Built target test_graph_builder
+[ 74%] Linking CXX executable test_generate_full
+[ 74%] Built target test_generate
+[ 75%] Built target test_tokenizer
+[ 76%] Built target test_generate_kv
+[ 77%] Linking CXX executable test_gemma4_generate
+[ 78%] Linking CXX executable gemma4_dump_logits
+[ 79%] Linking CXX executable gemma4_multimodal_dump
+[ 80%] Built target test_generate_full
+[ 81%] Built target test_gemma4_generate
+[ 81%] Linking CXX executable gemma4_calibrate
+[ 82%] Built target gemma4_dump_logits
+[ 83%] Linking CXX executable test_multimodal
+[ 84%] Built target gemma4_multimodal_dump
+[ 85%] Linking CXX executable test_generate_modal
+[ 86%] Linking CXX executable text_code_relay
+[ 87%] Built target gemma4_calibrate
+[ 88%] Built target test_multimodal
+[ 88%] Built target test_generate_modal
+[ 89%] Linking CXX executable test_smoke
+[ 90%] Linking CXX executable test_chat
+[ 91%] Linking CXX executable helios_chat
+[ 92%] Built target text_code_relay
+[ 93%] Linking CXX executable helios_runtime
+[ 94%] Built target test_smoke
+[ 95%] Built target test_chat
+[ 96%] Built target helios_chat
+[ 97%] Linking CXX executable helios_formatted
+[ 97%] Linking CXX executable sesiones_test
+[ 98%] Building CXX object CMakeFiles/test_inference_session_gemma4.dir/tests/test_inference_session_gemma4.cpp.o
+[ 98%] Built target helios_runtime
+[ 98%] Built target helios_formatted
+[ 99%] Built target sesiones_test
+[100%] Linking CXX executable test_inference_session_gemma4
+[100%] Built target test_inference_session_gemma4

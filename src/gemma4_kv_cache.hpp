@@ -11,6 +11,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -67,6 +68,7 @@ public:
         head_dims_.resize(layers);
         kv_heads_.resize(layers);
         slots_.resize(layers);
+        windows_.resize(layers);
 
         int32_t last_local = -1;
         int32_t last_global = -1;
@@ -80,6 +82,7 @@ public:
             head_dims_[i] = layer.head_dim;
             kv_heads_[i] = layer.kv_heads_or(num_kv_heads);
             slots_[i] = ranuras(layer, max_seq_len, max_prefill);
+            windows_[i] = layer.is_global_attention() ? 0 : layer.sliding_window;
             if (layer.is_global_attention()) last_global = static_cast<int32_t>(i);
             else last_local = static_cast<int32_t>(i);
 
@@ -103,6 +106,7 @@ public:
             head_dims_[i] = layer.head_dim;
             kv_heads_[i] = kv_heads_[source];
             slots_[i] = slots_[source];
+            windows_[i] = windows_[source];
             kv_heads_[i] = kv_heads_[source];
         }
 
@@ -140,12 +144,14 @@ public:
         head_dims_.clear();
         kv_heads_.clear();
         slots_.clear();
+        windows_.clear();
         num_kv_heads_ = 0;
         max_batch_size_ = 0;
         max_seq_len_ = 0;
         first_shared_layer_ = 0;
         elements_per_plane_ = 0;
         position_ = 0;
+        written_until_ = 0;
     }
 
     void register_tensors(Engine& engine, const std::string& prefix) {
@@ -205,13 +211,34 @@ public:
     size_t total_bytes() const { return 2 * elements_per_plane_ * sizeof(half); }
 
     uint32_t position() const { return position_; }
-    void reset() { position_ = 0; }
+    void reset() { position_ = 0; written_until_ = 0; }
+    // Record before dispatch: failed forwards may overwrite some layers even
+    // when their logical position has not advanced yet.
+    void note_write_end(uint32_t end) {
+        if (end > written_until_) written_until_ = std::min(end, max_seq_len_);
+    }
     void advance(uint32_t tokens = 1) {
         position_ = tokens > max_seq_len_ - position_ ? max_seq_len_
                                                        : position_ + tokens;
+        note_write_end(position_);
     }
-    void rewind_to(uint32_t position) {
-        if (position <= position_) position_ = position;
+    bool can_rewind_to(uint32_t position) const {
+        if (!is_allocated() || position > position_) return false;
+        for (uint32_t layer = 0; layer < first_shared_layer_; ++layer) {
+            if (!windows_[layer]) continue;
+            const uint32_t oldest = written_until_ > slots_[layer]
+                                        ? written_until_ - slots_[layer] : 0;
+            // The next query is at `position` and includes itself in its window.
+            const uint32_t needed = position >= windows_[layer]
+                                        ? position - windows_[layer] + 1 : 0;
+            if (needed < oldest) return false;
+        }
+        return true;
+    }
+    bool rewind_to(uint32_t position) {
+        if (!can_rewind_to(position)) return false;
+        position_ = position;
+        return true;
     }
 
 private:
@@ -258,12 +285,14 @@ private:
         head_dims_ = std::move(other.head_dims_);
         kv_heads_ = std::move(other.kv_heads_);
         slots_ = std::move(other.slots_);
+        windows_ = std::move(other.windows_);
         num_kv_heads_ = other.num_kv_heads_;
         max_batch_size_ = other.max_batch_size_;
         max_seq_len_ = other.max_seq_len_;
         first_shared_layer_ = other.first_shared_layer_;
         elements_per_plane_ = other.elements_per_plane_;
         position_ = other.position_;
+        written_until_ = other.written_until_;
         other.k_data_ = nullptr;
         other.v_data_ = nullptr;
         other.free();
@@ -279,12 +308,14 @@ private:
     std::vector<uint32_t> kv_heads_;
     /* Ranuras reales de cada capa: su ventana si es deslizante, la secuencia si no. */
     std::vector<uint32_t> slots_;
+    std::vector<uint32_t> windows_;
     uint32_t num_kv_heads_ = 0;
     uint32_t max_batch_size_ = 0;
     uint32_t max_seq_len_ = 0;
     uint32_t first_shared_layer_ = 0;
     size_t elements_per_plane_ = 0;
     uint32_t position_ = 0;
+    uint32_t written_until_ = 0;
 };
 
 } // namespace helios

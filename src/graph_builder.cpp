@@ -22,6 +22,7 @@
 
 #include "graph_builder.hpp"
 #include "gemma4_ple.hpp"
+#include "../kernels/kernels.hpp"
 #include <algorithm>
 #include <stdexcept>
 #include <cmath>
@@ -442,6 +443,12 @@ void GraphBuilder::allocate_gemma4_scratch(
     alloc(S("g4.k_backing"), {B, L, KVH * max_hd});
     alloc(S("g4.v_backing"), {B, L, KVH * max_hd});
     alloc(S("g4.attn_out_backing"), {B, L, H * max_hd});
+    if (engine.config().use_split_attention && B == 1 && H == 16) {
+        const auto count = static_cast<uint32_t>(
+            kernels::attention_cached_split_workspace_bytes(B, H) / sizeof(float));
+        engine.tensors().allocate_and_register(S("g4.attn_partials"), {count}, dtype::FP32());
+        scratch_names_.push_back(S("g4.attn_partials"));
+    }
     alloc(S("g4.gate_backing"), {B, L, max_intermediate});
     alloc(S("g4.up_backing"), {B, L, max_intermediate});
     alloc(S("g4.mlp_h_backing"), {B, L, max_intermediate});
@@ -822,6 +829,17 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
         auto& attention = cb.commands().back();
         attention.set("scale", 1.0f).set("device_pos", uint32_t{1})
                  .set("cache_slots", slots);
+        // Select once when constructing decode commands; no device-to-host
+        // length read or allocation during capture. A short turn may keep the
+        // reference until its next rebuild, even if it crosses this threshold.
+        const bool geometry = H == 16 &&
+            ((HD == 256 && KVH == 8 && window == 1024) ||
+             (HD == 512 && KVH == 1 && window == 0));
+        if (engine.config().use_split_attention && geometry &&
+            cache.cache_position + 1 >= 2048 &&
+            engine.tensors().exists(S("g4.attn_partials"))) {
+            attention.in(S("g4.attn_partials"));
+        }
     }
 
     cb.add_matmul(S("attn_proj"), attn_out,

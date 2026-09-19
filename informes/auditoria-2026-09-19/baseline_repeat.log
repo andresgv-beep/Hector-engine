@@ -1,0 +1,12 @@
+AUDIT repeat=0 trial=0 ok=1 prompt=41 output=128 prefill_ms=211.967 decode_ms=2981.664 tok_s=42.929 used_MiB=9520.7 reason=max_tokens
+OUTPUT repeat=0 trial=0 hash=15730427814794380040 bytes=668
+AUDIT repeat=0 trial=1 ok=1 prompt=41 output=128 prefill_ms=174.876 decode_ms=3161.845 tok_s=40.483 used_MiB=9494.9 reason=max_tokens
+OUTPUT repeat=0 trial=1 hash=15730427814794380040 bytes=668
+AUDIT repeat=128 trial=0 ok=1 prompt=2089 output=128 prefill_ms=2223.280 decode_ms=3657.042 tok_s=35.001 used_MiB=9516.4 reason=max_tokens
+OUTPUT repeat=128 trial=0 hash=15579933776154709868 bytes=714
+AUDIT repeat=128 trial=1 ok=1 prompt=2089 output=128 prefill_ms=2226.074 decode_ms=3655.078 tok_s=35.020 used_MiB=9516.4 reason=max_tokens
+OUTPUT repeat=128 trial=1 hash=15579933776154709868 bytes=714
+AUDIT repeat=384 trial=0 ok=1 prompt=6185 output=128 prefill_ms=8321.876 decode_ms=3982.501 tok_s=32.141 used_MiB=9516.4 reason=max_tokens
+OUTPUT repeat=384 trial=0 hash=4148028306768951682 bytes=720
+AUDIT repeat=384 trial=1 ok=1 prompt=6185 output=128 prefill_ms=8331.120 decode_ms=3943.178 tok_s=32.461 used_MiB=9516.4 reason=max_tokens
+OUTPUT repeat=384 trial=1 hash=4148028306768951682 bytes=720

@@ -1,0 +1,110 @@
+[
+  {
+    "pair": 0,
+    "reference": {
+      "split": "0",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8406.301",
+      "decode_ms": "3808.987",
+      "tok_s": "33.605",
+      "used_MiB": "8964.9",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "split": {
+      "split": "1",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8418.147",
+      "decode_ms": "3698.267",
+      "tok_s": "34.611",
+      "used_MiB": "8968.1",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "gain_percent": 2.993602142538321
+  },
+  {
+    "pair": 1,
+    "reference": {
+      "split": "0",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8450.956",
+      "decode_ms": "3806.539",
+      "tok_s": "33.626",
+      "used_MiB": "8930.6",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "split": {
+      "split": "1",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8417.985",
+      "decode_ms": "3670.075",
+      "tok_s": "34.877",
+      "used_MiB": "8934.2",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "gain_percent": 3.7203354547076906
+  },
+  {
+    "pair": 2,
+    "reference": {
+      "split": "0",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8453.941",
+      "decode_ms": "3727.108",
+      "tok_s": "34.343",
+      "used_MiB": "8938.8",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "split": {
+      "split": "1",
+      "repeat": "384",
+      "trial": "1",
+      "prompt": "6185",
+      "output": "128",
+      "prefill_ms": "8427.709",
+      "decode_ms": "3700.992",
+      "tok_s": "34.585",
+      "used_MiB": "8931.3",
+      "captures": "1",
+      "replays": "126",
+      "fallbacks": "0",
+      "hash": "4148028306768951682",
+      "bytes": "720"
+    },
+    "gain_percent": 0.7046559706490374
+  }
+]

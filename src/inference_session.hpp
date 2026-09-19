@@ -45,6 +45,8 @@ public:
         std::string hnf_path;
         uint32_t max_seq_len = 4096;
         float temperature = 0.7f;   // base; cada turno puede cambiarla
+        bool use_cuda_graphs = true; // replay frente a ejecución normal para A/B
+        bool use_split_attention = true; // solo geometrías/longitudes validadas; false para A/B
     };
 
     struct Info {
@@ -124,6 +126,9 @@ public:
         uint32_t cache_position = 0;
         // Tokens que no hubo que volver a prefillear por estar ya en el KV.
         uint32_t prefill_reused = 0;
+        uint32_t decode_graph_captures = 0;
+        uint32_t decode_graph_replays = 0;
+        uint32_t decode_graph_fallbacks = 0;
     };
 
     // Fragmento de texto VISIBLE, siempre UTF-8 completo: el protocolo lo
@@ -148,7 +153,8 @@ public:
 
     // Se engancha a unos pesos ya cargados. Varias sesiones sobre el mismo
     // `Model` comparten VRAM y no comparten NADA de la conversación: cada una
-    // tiene su KV, su muestreador y su grafo de decode.
+    // tiene su KV, su muestreador y sus comandos de decode. El grafo CUDA
+    // compartido se invalida y vuelve a capturar al comenzar cada turno.
     //
     // EN SERIE. Comparten los buffers de trabajo del grafo, así que dos turnos
     // a la vez se pisarían las activaciones. Un cerrojo interno los serializa:
@@ -173,8 +179,10 @@ public:
     // `error` si el turno no pudo ejecutarse.
     //
     // Semántica del KV (§4 del protocolo): si falla ANTES de emitir texto
-    // visible, el KV vuelve a `cache_position_before`; si ya emitió, se
-    // conserva lo emitido. La cancelación conserva exactamente lo emitido.
+    // visible, se intenta volver a `cache_position_before`; si el anillo ya
+    // perdió esa ventana, se vacía el KV y el llamante debe reenviar el historial.
+    // Un error de ejecución visual también vacía el KV. La posición resultante
+    // se devuelve en stats. La cancelación conserva exactamente lo emitido.
     // `attachments` vacío = turno de solo texto. Si no hay adaptador visual
     // en el HNF, un turno con adjunto falla con `unsupported_attachment`.
     bool run_turn(const std::vector<ChatMessage>& messages,

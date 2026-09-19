@@ -1,0 +1,5 @@
+layers=48 global=8 k_eq_v=8
+text.token_embedding.weight dtype=hq52k bytes=723517440 offset=576
+dtype=fp16 n=337 bytes=1539680
+dtype=hq42k n=144 bytes=5042995200
+dtype=hq52k n=185 bytes=2453176320

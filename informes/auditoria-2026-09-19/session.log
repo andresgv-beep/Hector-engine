@@ -1,0 +1,6 @@
+AUDIT repeat=0 trial=0 ok=1 prompt=41 output=128 prefill_ms=278.455 decode_ms=3012.856 tok_s=42.485 used_MiB=9507.8 reason=max_tokens
+AUDIT repeat=0 trial=1 ok=1 prompt=41 output=128 prefill_ms=174.205 decode_ms=3121.757 tok_s=41.003 used_MiB=9526.3 reason=max_tokens
+AUDIT repeat=128 trial=0 ok=1 prompt=2089 output=128 prefill_ms=2210.246 decode_ms=3641.073 tok_s=35.154 used_MiB=9526.3 reason=max_tokens
+AUDIT repeat=128 trial=1 ok=1 prompt=2089 output=128 prefill_ms=2198.075 decode_ms=3619.148 tok_s=35.367 used_MiB=9526.3 reason=max_tokens
+AUDIT repeat=384 trial=0 ok=1 prompt=6185 output=128 prefill_ms=8283.253 decode_ms=3933.743 tok_s=32.539 used_MiB=9507.8 reason=max_tokens
+AUDIT repeat=384 trial=1 ok=1 prompt=6185 output=128 prefill_ms=8297.286 decode_ms=3924.012 tok_s=32.620 used_MiB=9507.8 reason=max_tokens

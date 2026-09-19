@@ -1,0 +1,34 @@
+Generating SQLite file /tmp/hector-audit-20260919/decode_long.sqlite from /tmp/hector-audit-20260919/decode_long.nsys-rep
+Processing [/tmp/hector-audit-20260919/decode_long.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_gpu_kern_sum.py]... 
+Time (%),Total Time (ns),Instances,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+31.5,1145017577,12288,93181.8,80897.0,79905,615174,61207.6,"void helios::kernels::gemv_hq_symmetric_kernel<(int)4, (int)152, (int)1, (int)4>(const __half *, const unsigned char *, __half *, int, int)"
+22.5,817950389,6144,133129.9,63456.0,62497,685223,144878.4,"helios::kernels::attention_cached_v2_kernel_dp(const __half *, const __half *, const __half *, __half *, int, const int *, int, int, int, int, float, int, int)"
+15.6,567264984,6144,92328.3,82657.0,81537,602534,48581.5,"void helios::kernels::gemv_hq_symmetric_kernel<(int)4, (int)152, (int)2, (int)8>(const __half *, const unsigned char *, __half *, int, int)"
+10.8,393522031,18432,21349.9,14720.0,4800,519525,26152.3,"void helios::kernels::gemv_hq_symmetric_kernel<(int)5, (int)184, (int)1, (int)4>(const __half *, const unsigned char *, __half *, int, int)"
+10.3,375531366,5248,71557.0,27648.0,27008,2062804,248765.3,"void helios::kernels::gemv_hq_symmetric_kernel<(int)5, (int)184, (int)2, (int)4>(const __half *, const unsigned char *, __half *, int, int)"
+5.6,203715656,43136,4722.6,6624.0,1215,410372,9324.9,"helios::kernels::rmsnorm_fp16_kernel(const __half *, const __half *, __half *, int, int, float)"
+1.6,56709160,1024,55380.0,53057.0,52353,353476,20020.7,"void helios::kernels::gemv_hq_symmetric_kernel<(int)5, (int)184, (int)2, (int)8>(const __half *, const unsigned char *, __half *, int, int)"
+0.5,16737892,128,130764.8,121793.5,120673,364867,41126.0,"helios::kernels::argmax_fp16_kernel(const __half *, int *, int)"
+0.3,11674054,12288,950.0,928.0,895,8960,193.3,"helios::kernels::kv_cache_update_kernel_dp(const __half *, __half *, int, int, int, int, int, const int *)"
+0.3,11622323,12288,945.8,960.0,800,12416,238.9,"helios::kernels::add_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.3,11092994,10240,1083.3,1087.0,1023,9152,276.0,"helios::kernels::rope_kernel_dp(__half *, int, int, int, int, int, const int *, float, float)"
+0.2,7076654,6144,1151.8,1120.0,1055,11648,329.9,"helios::kernels::gelu_fp16_kernel(const __half *, __half *, unsigned long)"
+0.2,6281745,6144,1022.4,1024.0,960,7648,124.9,"helios::kernels::mul_scalar_tensor_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.1,5371411,6144,874.3,864.0,831,8704,314.3,"helios::kernels::mul_fp16_kernel(const __half *, const __half *, __half *, unsigned long)"
+0.1,2134196,2048,1042.1,1087.0,928,1344,80.5,"void helios::kernels::rope_proportional_kernel<(bool)1>(__half *, int, int, int, int, int, int, const int *, float, float)"
+0.0,740360,128,5784.1,5664.0,5344,20800,1345.5,"void helios::kernels::embedding_hq_symmetric_kernel<(int)5, (int)184>(const int *, const unsigned char *, __half *, int, int, int)"
+0.0,347713,128,2716.5,2688.0,2624,2945,77.1,"helios::kernels::softcap_fp16_kernel(const __half *, __half *, float, unsigned long)"
+0.0,125567,128,981.0,960.0,831,4608,332.3,"helios::kernels::scale_fp16_kernel(const __half *, __half *, __half, unsigned long)"
+
+Processing [/tmp/hector-audit-20260919/decode_long.sqlite] with [/opt/nvidia/nsight-systems/2024.5.1/host-linux-x64/reports/cuda_api_sum.py]... 
+Time (%),Total Time (ns),Num Calls,Avg (ns),Med (ns),Min (ns),Max (ns),StdDev (ns),Name
+87.2,3211254634,384,8362642.3,4360.0,2220,26610922,11907913.3,cudaMemcpyAsync
+11.4,419583413,148224,2830.7,2710.0,2290,183031,1142.8,cudaLaunchKernel
+1.1,41056016,256,160375.1,2930.0,810,25118882,1569086.6,cudaStreamSynchronize
+0.3,10174881,148224,68.6,60.0,50,13641,64.8,cuKernelGetName
+0.0,1300656,130,10005.0,8125.0,3930,27050,4355.9,cudaMemcpy
+0.0,563653,127,4438.2,3940.0,2380,11340,1462.6,cudaStreamBeginCapture_v10000
+0.0,31460,2,15730.0,15730.0,6480,24980,13081.5,cudaMalloc
+0.0,4520,8,565.0,480.0,420,810,155.1,cuLibraryGetKernel
+0.0,2610,1,2610.0,2610.0,2610,2610,0.0,cuProfilerStart
+

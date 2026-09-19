@@ -501,6 +501,15 @@ void launch_attention_cached_fp16_dp(
     cudaStream_t stream
 , int cache_slots = 0);
 
+// Decode with the same FP32 partitions/reduction as the device-pointer
+// reference, distributed over separate CTAs. Caller owns stable workspace.
+size_t attention_cached_split_workspace_bytes(int batch_size, int num_heads);
+void launch_attention_cached_fp16_split_dp(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    float* partials, int batch_size, const int32_t* d_seq_len,
+    int num_heads, int num_kv_heads, int head_dim, int max_seq_len,
+    float scale, int window_size, cudaStream_t stream, int cache_slots = 0);
+
 // ============================================================================
 // MEMORY KERNELS
 // ============================================================================

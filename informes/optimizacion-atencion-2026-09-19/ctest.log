@@ -1,0 +1,53 @@
+Test project /home/andres/Documentos/GitHub/Hector-engine/build
+      Start  1: TensorRegistryTest
+ 1/24 Test  #1: TensorRegistryTest ...............   Passed    0.27 sec
+      Start  2: MemoryPoolTest
+ 2/24 Test  #2: MemoryPoolTest ...................   Passed    0.30 sec
+      Start  3: CommandBufferTest
+ 3/24 Test  #3: CommandBufferTest ................   Passed    0.00 sec
+      Start  4: EngineTest
+ 4/24 Test  #4: EngineTest .......................   Passed    0.23 sec
+      Start  5: KernelTest
+ 5/24 Test  #5: KernelTest .......................   Passed    0.45 sec
+      Start  6: HQ31KTest
+ 6/24 Test  #6: HQ31KTest ........................   Passed    0.21 sec
+      Start  7: HQ62EmbeddingTest
+ 7/24 Test  #7: HQ62EmbeddingTest ................   Passed    0.34 sec
+      Start  8: HqsWideKTest
+ 8/24 Test  #8: HqsWideKTest .....................   Passed    0.29 sec
+      Start  9: HqsSymmetricTest
+ 9/24 Test  #9: HqsSymmetricTest .................   Passed    0.41 sec
+      Start 10: HnfLoaderTest
+10/24 Test #10: HnfLoaderTest ....................   Passed    0.22 sec
+      Start 11: Gemma4MetadataTest
+11/24 Test #11: Gemma4MetadataTest ...............   Passed    0.00 sec
+      Start 12: Gemma4VisionMetadataTest
+12/24 Test #12: Gemma4VisionMetadataTest .........   Passed    0.00 sec
+      Start 13: Gemma4VisionPreprocessTest
+13/24 Test #13: Gemma4VisionPreprocessTest .......   Passed    0.06 sec
+      Start 14: Gemma4VisionRunnerTest
+14/24 Test #14: Gemma4VisionRunnerTest ...........   Passed    0.34 sec
+      Start 15: Gemma4MultimodalTest
+15/24 Test #15: Gemma4MultimodalTest .............   Passed    0.30 sec
+      Start 16: Gemma4PrimitivesTest
+16/24 Test #16: Gemma4PrimitivesTest .............   Passed    0.36 sec
+      Start 17: Gemma4PleTest
+17/24 Test #17: Gemma4PleTest ....................   Passed    0.07 sec
+      Start 18: Gemma4GraphTest
+18/24 Test #18: Gemma4GraphTest ..................   Passed    0.29 sec
+      Start 19: Gemma4KVTest
+19/24 Test #19: Gemma4KVTest .....................   Passed    0.31 sec
+      Start 20: AttentionSplitTest
+20/24 Test #20: AttentionSplitTest ...............   Passed    0.98 sec
+      Start 21: Gemma4TokenizerTest
+21/24 Test #21: Gemma4TokenizerTest ..............   Passed    0.00 sec
+      Start 22: ChatTemplateTest
+22/24 Test #22: ChatTemplateTest .................   Passed    0.00 sec
+      Start 23: CkPolicyTest
+23/24 Test #23: CkPolicyTest .....................   Passed    0.00 sec
+      Start 24: mini_json
+24/24 Test #24: mini_json ........................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 24
+
+Total Test time (real) =   5.46 sec

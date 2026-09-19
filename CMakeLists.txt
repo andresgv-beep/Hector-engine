@@ -257,6 +257,11 @@ add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)
+add_executable(test_attention_split tests/test_attention_split.cu)
+target_link_libraries(test_attention_split PRIVATE helios-engine)
+add_test(NAME AttentionSplitTest COMMAND test_attention_split)
+add_executable(test_attention_split_model tests/test_attention_split_model.cu)
+target_link_libraries(test_attention_split_model PRIVATE helios-engine)
 add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 add_test(NAME CkPolicyTest COMMAND test_ck_policy)
@@ -352,6 +357,10 @@ target_include_directories(helios_formatted PRIVATE src)
 add_executable(sesiones_test tools/sesiones_test.cpp)
 target_link_libraries(sesiones_test PRIVATE helios-engine)
 target_include_directories(sesiones_test PRIVATE src)
+
+# Real-weight regression: explicit HNF argument, never silently skipped by CTest.
+add_executable(test_inference_session_gemma4 tests/test_inference_session_gemma4.cpp)
+target_link_libraries(test_inference_session_gemma4 PRIVATE helios-engine)
 
 # ============================================================================
 # Info

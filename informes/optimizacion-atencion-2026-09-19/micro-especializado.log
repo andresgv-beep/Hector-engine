@@ -1,0 +1,71 @@
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1 peaked=0 bitwise=1 cpu_max=0
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=17 peaked=0 bitwise=1 cpu_max=0.00019156427
+BENCH hd=256 kvh=8 heads=16 window=1024 n=127 reference_us=7.055 split_us=12.708 speedup=0.555
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=127 peaked=0 bitwise=1 cpu_max=0.00012134732
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1023 peaked=0 bitwise=1 cpu_max=1.6380367e-05
+BENCH hd=256 kvh=8 heads=16 window=1024 n=1024 reference_us=40.632 split_us=33.495 speedup=1.213
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1024 peaked=0 bitwise=1 cpu_max=1.6344174e-05
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1025 peaked=0 bitwise=1 cpu_max=2.8788246e-05
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1535 peaked=0 bitwise=1 cpu_max=1.6649741e-05
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1536 peaked=0 bitwise=1 cpu_max=1.0677032e-05
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=1537 peaked=0 bitwise=1 cpu_max=1.3134855e-05
+BENCH hd=256 kvh=8 heads=16 window=1024 n=4096 reference_us=40.632 split_us=33.608 speedup=1.209
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=4096 peaked=0 bitwise=1 cpu_max=1.6344174e-05
+BENCH hd=256 kvh=8 heads=16 window=1024 n=8192 reference_us=38.892 split_us=33.311 speedup=1.168
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=8192 peaked=0 bitwise=1 cpu_max=1.5037429e-05
+BENCH hd=256 kvh=8 heads=16 window=1024 n=12000 reference_us=43.418 split_us=29.174 speedup=1.488
+PASS batch=1 heads=16 kvh=8 hd=256 window=1024 n=12000 peaked=0 bitwise=1 cpu_max=1.3556403e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1 peaked=0 bitwise=1 cpu_max=0
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=17 peaked=0 bitwise=1 cpu_max=0.000121168
+BENCH hd=512 kvh=1 heads=16 window=0 n=127 reference_us=7.885 split_us=13.947 speedup=0.565
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=127 peaked=0 bitwise=1 cpu_max=8.7950224e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1023 peaked=0 bitwise=1 cpu_max=3.9723171e-05
+BENCH hd=512 kvh=1 heads=16 window=0 n=1024 reference_us=47.708 split_us=48.763 speedup=0.978
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1024 peaked=0 bitwise=1 cpu_max=2.7952022e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1025 peaked=0 bitwise=1 cpu_max=6.006465e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1535 peaked=0 bitwise=1 cpu_max=1.7441404e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1536 peaked=0 bitwise=1 cpu_max=2.7609869e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1537 peaked=0 bitwise=1 cpu_max=2.6227234e-05
+BENCH hd=512 kvh=1 heads=16 window=0 n=4096 reference_us=190.986 split_us=167.844 speedup=1.138
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=4096 peaked=0 bitwise=1 cpu_max=2.8506565e-05
+BENCH hd=512 kvh=1 heads=16 window=0 n=8192 reference_us=391.967 split_us=307.261 speedup=1.276
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=8192 peaked=0 bitwise=1 cpu_max=1.2539654e-05
+BENCH hd=512 kvh=1 heads=16 window=0 n=12000 reference_us=538.655 split_us=467.825 speedup=1.151
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=12000 peaked=0 bitwise=1 cpu_max=7.4514388e-06
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1 peaked=1 bitwise=1 cpu_max=0
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=17 peaked=1 bitwise=1 cpu_max=1.0114454e-10
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=127 peaked=1 bitwise=1 cpu_max=0.00024392516
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1023 peaked=1 bitwise=1 cpu_max=0.00024396408
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1024 peaked=1 bitwise=1 cpu_max=0.00024396408
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1025 peaked=1 bitwise=1 cpu_max=0.00024396408
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1535 peaked=1 bitwise=1 cpu_max=0.00024017335
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1536 peaked=1 bitwise=1 cpu_max=0.00024017335
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=1537 peaked=1 bitwise=1 cpu_max=0.00024017335
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=4096 peaked=1 bitwise=1 cpu_max=0.00024396408
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=8192 peaked=1 bitwise=1 cpu_max=0.00024396408
+PASS batch=2 heads=8 kvh=8 hd=128 window=512 n=12000 peaked=1 bitwise=1 cpu_max=0.00024341558
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1 peaked=1 bitwise=1 cpu_max=0
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=17 peaked=1 bitwise=1 cpu_max=0.00021721818
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=127 peaked=1 bitwise=1 cpu_max=0.00024327452
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1023 peaked=1 bitwise=1 cpu_max=0.00024172258
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1024 peaked=1 bitwise=1 cpu_max=0.00024172258
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1025 peaked=1 bitwise=1 cpu_max=0.00024172258
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1535 peaked=1 bitwise=1 cpu_max=0.00022238842
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1536 peaked=1 bitwise=1 cpu_max=0.00022238842
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=1537 peaked=1 bitwise=1 cpu_max=0.00022238842
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=4096 peaked=1 bitwise=1 cpu_max=1.3322676e-15
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=8192 peaked=1 bitwise=1 cpu_max=2.1094237e-15
+PASS batch=1 heads=8 kvh=1 hd=64 window=0 n=12000 peaked=1 bitwise=1 cpu_max=0.00021998291
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1 peaked=1 bitwise=1 cpu_max=0
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=17 peaked=1 bitwise=1 cpu_max=0.00023729003
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=127 peaked=1 bitwise=1 cpu_max=7.6533835e-10
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1023 peaked=1 bitwise=1 cpu_max=0.00024196633
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1024 peaked=1 bitwise=1 cpu_max=0.00024196633
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1025 peaked=1 bitwise=1 cpu_max=0.00024196633
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1535 peaked=1 bitwise=1 cpu_max=4.4937276e-11
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1536 peaked=1 bitwise=1 cpu_max=4.4937276e-11
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=1537 peaked=1 bitwise=1 cpu_max=4.4937276e-11
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=4096 peaked=1 bitwise=1 cpu_max=0.00024227393
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=8192 peaked=1 bitwise=1 cpu_max=1.805918e-05
+PASS batch=1 heads=16 kvh=1 hd=512 window=0 n=12000 peaked=1 bitwise=1 cpu_max=0.00024280833
+PASS: 60 split-attention cases, CPU reference and graph replay across lengths

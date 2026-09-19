@@ -1,0 +1,4 @@
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH split=0 repeat=384 trial=0 prompt=6185 output=128 prefill_ms=8470.216 decode_ms=3776.447 tok_s=33.894 used_MiB=8930.3 captures=1 replays=126 fallbacks=0 hash=4148028306768951682 bytes=720
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+BENCH split=0 repeat=384 trial=1 prompt=6185 output=128 prefill_ms=8450.956 decode_ms=3806.539 tok_s=33.626 used_MiB=8930.6 captures=1 replays=126 fallbacks=0 hash=4148028306768951682 bytes=720

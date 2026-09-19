@@ -909,6 +909,18 @@ void register_attention_kernels(Engine& engine) {
         
         // device_pos: total_seq leído de device (permite CUDA Graph capture-once)
         if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            if (auto* partials = ctx.in(3)) {
+                if (partials->dtype != dtype::FP32() ||
+                    partials->size_bytes < attention_cached_split_workspace_bytes(1, num_heads)) {
+                    throw std::runtime_error("ATTENTION_CACHED: invalid split workspace");
+                }
+                launch_attention_cached_fp16_split_dp(
+                    as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
+                    as_fp16(output), static_cast<float*>(partials->ptr),
+                    1, engine.device_total_seq(), num_heads, num_kv_heads, head_dim,
+                    max_seq_len, scale, window_size, ctx.stream, static_cast<int>(cache_slots));
+                return;
+            }
             launch_attention_cached_fp16_dp(
                     as_fp16_const(q),
                     as_fp16_const(k_cache),

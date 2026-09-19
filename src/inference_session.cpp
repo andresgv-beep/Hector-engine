@@ -64,6 +64,12 @@ int env_i(const char* k, int def) {
     return v ? atoi(v) : def;
 }
 
+// Declared before Engine in Model so the stream outlives every GPU resource.
+struct OwnedStream {
+    cudaStream_t handle = nullptr;
+    ~OwnedStream() { if (handle) cudaStreamDestroy(handle); }
+};
+
 }  // namespace
 
 const char* InferenceSession::finish_reason_name(FinishReason r) {
@@ -80,7 +86,9 @@ const char* InferenceSession::finish_reason_name(FinishReason r) {
 // Estado COMPARTIDO: los pesos y todo lo que se deriva de ellos.
 // ============================================================================
 struct Model::Impl {
+    OwnedStream compute_stream;
     EngineConfig engine_config;
+    bool use_cuda_graphs = true;
     std::unique_ptr<Engine> engine;
     HnfLoader loader;
     const HTFTokenizer* tokenizer = nullptr;
@@ -146,6 +154,8 @@ struct InferenceSession::Impl {
     SamplingConfig sample_config;
     CommandBuffer decode_cb;
     bool decode_cb_built = false;
+    bool graph_unavailable = false;
+    uint32_t graph_captures = 0, graph_replays = 0, graph_fallbacks = 0;
 
     // Los tokens que hay AHORA MISMO en el KV, en orden. Sirve para saber qué
     // parte de un prompt nuevo ya está procesada. Se mantiene junto a position():
@@ -169,6 +179,19 @@ struct InferenceSession::Impl {
           turn_end(M.turn_end), eos_id(M.eos_id),
           think_open(M.think_open), think_close(M.think_close) {}
 
+    ~Impl() {
+        std::lock_guard<std::mutex> lock(M.en_uso);
+        engine->sync();
+        engine->invalidate_graph();
+        // External tensor views must not outlive this session's allocations.
+        if (!kv_prefix.empty()) {
+            for (uint32_t l = 0; l < kv_config.num_layers; ++l) {
+                const auto base = kv_prefix + ".layer" + std::to_string(l);
+                engine->tensors().remove(base + ".k");
+                engine->tensors().remove(base + ".v");
+            }
+        }
+    }
 
     uint32_t position() const {
         return is_gemma4 ? gemma_kv_cache.position() : kv_cache.position();
@@ -177,7 +200,11 @@ struct InferenceSession::Impl {
         if (is_gemma4) gemma_kv_cache.advance(n); else kv_cache.advance(n);
     }
     void rewind(uint32_t p) {
-        if (is_gemma4) gemma_kv_cache.rewind_to(p); else kv_cache.rewind_to(p);
+        if (is_gemma4 && !gemma_kv_cache.rewind_to(p)) {
+            clear(); // The required ring window has already been overwritten.
+            return;
+        }
+        if (!is_gemma4) kv_cache.rewind_to(p);
         if (kv_tokens.size() > p) kv_tokens.resize(p);
     }
     void clear() {
@@ -191,6 +218,9 @@ struct InferenceSession::Impl {
     void untrack() { kv_tracked = false; kv_tokens.clear(); }
     bool prefix_usable() const {
         return kv_tracked && kv_tokens.size() == position();
+    }
+    bool can_rewind(uint32_t p) const {
+        return p <= position() && (!is_gemma4 || gemma_kv_cache.can_rewind_to(p));
     }
 
     // Codifica los mensajes NUEVOS como fragmento incremental: la historia ya
@@ -277,6 +307,7 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
     input_info->shape = {1, 1};
     cudaMemcpy(input_info->ptr, &token, sizeof(int32_t), cudaMemcpyHostToDevice);
     uint32_t pos = position();
+    if (is_gemma4) gemma_kv_cache.note_write_end(pos + 1);
     engine->update_device_cache_pos(pos, 1);
 
     if (!decode_cb_built) {
@@ -293,8 +324,17 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
         decode_cb_built = true;
         engine->execute(decode_cb);
         engine->sync();
-    } else {
+    } else if (M.use_cuda_graphs && !graph_unavailable) {
+        const bool replay = engine->graph_ready();
         engine->execute_graph_replay(decode_cb);
+        if (engine->graph_ready()) {
+            if (replay) ++graph_replays; else ++graph_captures;
+        } else {
+            ++graph_fallbacks;
+            graph_unavailable = true; // do not retry the same failure per token
+        }
+    } else {
+        engine->execute(decode_cb);
     }
     advance(1);
     if (kv_tracked) kv_tokens.push_back(token);
@@ -316,6 +356,11 @@ int32_t InferenceSession::Impl::forward_batch(const std::vector<int32_t>& ids,
         cudaMemcpy(input_info->ptr, ids.data() + done, n * sizeof(int32_t),
                    cudaMemcpyHostToDevice);
         uint32_t pos = position();
+        if (is_gemma4) gemma_kv_cache.note_write_end(pos + static_cast<uint32_t>(n));
+        // Prefill mutates scratch views, including zero-copy QKV/gate splits.
+        // The next decode must rebuild its views before capture or eager use.
+        engine->invalidate_graph();
+        decode_cb_built = false;
         CommandBuffer pcb;
         if (is_gemma4) {
             const KVCacheParams params{kv_prefix, pos, kv_config.max_seq_len};
@@ -349,6 +394,9 @@ const InferenceSession::ModelInfo& InferenceSession::info() const {
 uint32_t InferenceSession::cache_position() const { return impl_->position(); }
 
 void InferenceSession::reset() {
+    std::lock_guard<std::mutex> lock(impl_->M.en_uso);
+    impl_->engine->invalidate_graph();
+    impl_->decode_cb_built = false;
     impl_->clear();
     impl_->sampler.clear_context();
 }
@@ -357,6 +405,13 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
     std::shared_ptr<Model> m(new Model());
     auto& s = *m->impl_;
     try {
+        const cudaError_t stream_status = cudaStreamCreate(&s.compute_stream.handle);
+        if (stream_status != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA stream: ") + cudaGetErrorString(stream_status));
+        }
+        s.engine_config.stream = s.compute_stream.handle;
+        s.engine_config.use_split_attention = config.use_split_attention;
+        s.use_cuda_graphs = config.use_cuda_graphs;
         s.engine = std::make_unique<Engine>(s.engine_config);
         kernels::register_all_kernels(*s.engine);
 
@@ -449,6 +504,7 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
         impl_ = std::make_unique<Impl>(std::move(model));
         auto& s = *impl_;
         auto& M = s.M;
+        std::lock_guard<std::mutex> lock(M.en_uso);
 
         // Prefijo propio. La primera sesion conserva "_kv" para que la ruta ya
         // certificada registre exactamente los mismos nombres que antes.
@@ -550,6 +606,22 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     // corrupcion — y cuando el scratch sea por sesion, esta linea se cae sola.
     std::lock_guard<std::mutex> en_serie(impl_->M.en_uso);
     auto& s = *impl_;
+    // Engine owns a single executable graph. Rebind it at every turn so no
+    // session can replay another session's KV pointers or stale scratch shapes.
+    s.engine->invalidate_graph();
+    s.decode_cb_built = false;
+    s.graph_unavailable = false;
+    s.graph_captures = s.graph_replays = s.graph_fallbacks = 0;
+    *stats = TurnStats{};
+    struct GraphStatsGuard {
+        Impl& session;
+        TurnStats& stats;
+        ~GraphStatsGuard() {
+            stats.decode_graph_captures = session.graph_captures;
+            stats.decode_graph_replays = session.graph_replays;
+            stats.decode_graph_fallbacks = session.graph_fallbacks;
+        }
+    } graph_stats{s, *stats};
     using clock = std::chrono::high_resolution_clock;
 
     const uint32_t antes = s.position();
@@ -616,21 +688,17 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         const size_t tope = std::min(s.kv_tokens.size(), ids.size());
         size_t comun = 0;
         while (comun < tope && s.kv_tokens[comun] == ids[comun]) comun++;
+        // Keep the final token for forward when the entire prompt matches.
+        // Validate the actual target before discarding any input IDs.
+        if (comun == ids.size() && comun > 0) --comun;
         // Dejar el KV vacío no aporta nada y complica el resto; con cero comunes
         // se reinicia como siempre.
-        if (comun > 0) {
+        if (comun > 0 && s.can_rewind(static_cast<uint32_t>(comun))) {
             s.rewind(static_cast<uint32_t>(comun));
             ids.erase(ids.begin(), ids.begin() + static_cast<long>(comun));
             reutilizados = static_cast<uint32_t>(comun);
         } else {
             s.clear();
-        }
-        // Un prompt que coincide entero no deja nada que procesar y el turno no
-        // podría arrancar: se devuelve el último token para que el decode siga.
-        if (ids.empty()) {
-            ids.push_back(s.kv_tokens.back());
-            s.rewind(static_cast<uint32_t>(s.kv_tokens.size() - 1));
-            reutilizados--;
         }
     }
     stats->prefill_reused = reutilizados;
@@ -693,7 +761,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                        pr, &verr)) {
                 *error_code = "attachment_prefill_failed";
                 *error = verr;
-                s.rewind(antes);          // §4: nada emitido, sin rastro
+                s.clear(); // partial visual writes may have overwritten the ring
                 stats->cache_position = s.position();
                 return false;
             }
@@ -803,11 +871,12 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         *error = e.what();
         stats->generated_tokens = generated;
         stats->thinking_tokens = thinking;
-        // §4: si no llegó a emitir texto, el turno no deja rastro; si ya
-        // emitió, se conserva lo emitido y se reporta la posición real.
+        // Sin texto visible, volver al inicio si sigue residente; si se perdió
+        // la ventana, vaciar el KV. Con texto visible, conservar lo procesado.
         // Al suelo REAL de este prefill, que con reaprovechamiento ya no es
         // `antes`: retroceder más arriba dejaría en el KV tokens que se quitaron.
-        if (visible.empty()) s.rewind(base);
+        if (!attachments.empty()) s.clear();
+        else if (visible.empty()) s.rewind(base);
         stats->cache_position = s.position();
         return false;
     }

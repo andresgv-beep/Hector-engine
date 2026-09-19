@@ -66,6 +66,7 @@ struct EngineConfig {
     bool sync_after_each_op = false;   // Debug: sync after each kernel
     bool check_errors = true;          // Check CUDA errors
     bool enable_profiling = false;     // Measure kernel times
+    bool use_split_attention = false; // Opt-in Gemma decode with stable scratch
     
     // Default stream (nullptr = default CUDA stream)
     cudaStream_t stream = nullptr;

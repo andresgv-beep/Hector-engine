@@ -1,0 +1,7 @@
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+[engine] CUDA Graph capturado (1109 comandos) — decode en modo replay
+Reply 0: header=366 10237 62 0 eos 6167 0 text='<|channel>thought\n<channel|>Una base de datos relacional organiza la información en tablas compuestas por filas y columnas, donde cada registro está vinculado a otros mediante claves comunes. Este sistema permite gestionar los datos de manera estructurada, garantizando la integridad y facilitando la recuperación de información mediante el uso de consultas SQL.'
+Reply 1: header=318 1670 66 0 eos 21 0 text='<|channel>thought\n<channel|>Las nubes se forman cuando el vapor de agua de la superficie se evapora y asciende a las capas más altas de la atmósfera. Al enfriarse en altura, este vapor se condensa alrededor de pequeñas partículas de polvo o humedad, convirtiéndose en diminutas gotas de agua o cristales de hielo.'
+Reply 2: header=366 1812 62 0 eos 1 6166 text='<|channel>thought\n<channel|>Una base de datos relacional organiza la información en tablas compuestas por filas y columnas, donde cada registro está vinculado a otros mediante claves comunes. Este sistema permite gestionar los datos de manera estructurada, garantizando la integridad y facilitando la recuperación de información mediante el uso de consultas SQL.'
+PASS: helios_formatted protocol, auxiliary isolation and main-prefix reuse

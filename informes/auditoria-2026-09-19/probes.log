@@ -1,0 +1,14 @@
+[engine] CUDA Graph capturado (1 comandos) — decode en modo replay
+GPU NVIDIA GeForce RTX 4070 Ti SM=60
+GRAPH dedicated=0 ready=0
+GRAPH dedicated=1 ready=1
+ATTENTION hd=256 kvh=8 len=128 us=7.090
+ATTENTION hd=256 kvh=8 len=1024 us=42.680
+ATTENTION hd=256 kvh=8 len=4096 us=42.910
+ATTENTION hd=256 kvh=8 len=8192 us=42.820
+ATTENTION hd=256 kvh=8 len=12000 us=42.689
+ATTENTION hd=512 kvh=1 len=128 us=7.893
+ATTENTION hd=512 kvh=1 len=1024 us=49.934
+ATTENTION hd=512 kvh=1 len=4096 us=185.958
+ATTENTION hd=512 kvh=1 len=8192 us=361.681
+ATTENTION hd=512 kvh=1 len=12000 us=555.676

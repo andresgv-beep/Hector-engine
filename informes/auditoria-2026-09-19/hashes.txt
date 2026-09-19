@@ -1,0 +1,3 @@
+3c5d36c88c22e124c065a72a7fea54ff7e33232caf2cb09762cfd505b99c6910  build/helios_formatted
+1c36ce94e1d10a3976cee8d160b41caf798f376d7bd3e54bfc29401dbc863403  build/libhelios-engine.a
+429785268c93f544174e9e2deb90a93a8c9df6c63a7c006ffdf5076d2a0ce765  /home/andres/Documentos/GitHub/helios_convert_v9.1/output/gemma4_12b_hq42_hq52.hnf
