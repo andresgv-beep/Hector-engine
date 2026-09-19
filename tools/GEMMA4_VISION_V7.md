@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — V7 residencia y staging por fases
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrada el 2026-08-02. V7 sustituye el intercambio completo de modalidades
 > por un único régimen: texto y KV permanecen en VRAM, la torre visual vive en
 > el HNF/RAM y solo la fase que se está ejecutando ocupa una ventana temporal

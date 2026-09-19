@@ -1,5 +1,9 @@
 # Campaña de optimización HQS decode — medición antes/después
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Campaña ejecutada el 2026-07-31. El objetivo fue acelerar el `decode` real de
 Héctor sin mezclar cambios de calidad, formato ni memoria. El perfil obligó a
 medir HQ4.1K y el `lm_head` HQ5.1K como un mismo recorrido.

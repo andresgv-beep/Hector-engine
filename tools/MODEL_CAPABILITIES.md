@@ -1,5 +1,11 @@
 # Contrato genérico de capacidades HNF
 
+Alcance revisado el 2026-09-19: este descriptor lo consume la ruta C y las
+sondas. El agente Python usa el resumen `ready.model` de NDJSON para rechazar
+adjuntos incompatibles; su `/api/status` no publica el mismo descriptor que C.
+La regla visual registrada no certifica el 12B encoder-free; consultar
+[estado de modelos](../ESTADO_ACTUAL.md).
+
 ## Objetivo
 
 La orquestación no debe reconocer modelos por su nombre de fichero ni conocer

@@ -1,5 +1,10 @@
 # Adaptadores multimodales persistentes
 
+Actualización 2026-09-19: el adaptador descrito es el de Gemma 4 **con torre**
+(E2B/E4B); no implica soporte del 12B encoder-free. Además del framing de
+`helios_chat` descrito abajo existe el [transporte NDJSON](RUNTIME_PROTOCOL.md),
+que usa actualmente el agente Python de Hexos.
+
 ## Frontera del motor
 
 `MultimodalAdapter` separa la sesión conversacional de cada arquitectura. El

@@ -1,5 +1,9 @@
 # Banco de pruebas de cuantización
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Aparato para responder con números a **"¿cuánta calidad pierde nuestro formato,
 y cómo estamos frente a los demás?"**. Montado el 2026-07-31; los resultados de
 esa sesión están al final.

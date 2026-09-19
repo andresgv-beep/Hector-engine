@@ -1,5 +1,9 @@
 # Gemma 4 Vision V8 — perfil para decidir doble buffer
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Fecha: 2026-08-02
 
 ## Veredicto

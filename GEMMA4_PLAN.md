@@ -1,5 +1,9 @@
 # Gemma 4 E2B en Héctor — plan de integración por fases
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Actualizado el 2026-08-02. Este documento conserva la certificación del
 > decoder de texto. La integración multimodal posterior está cerrada y su
 > fuente de verdad es `GEMMA4_VISION_PLAN.md`.

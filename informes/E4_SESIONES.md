@@ -1,5 +1,9 @@
 # E4 · subhito — modelo compartido y estado por sesión
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Héctor ya sabe tener varias sesiones sobre unos mismos pesos. **19 pruebas · 0
 fallos**, y la batería se ha visto fallar.
 

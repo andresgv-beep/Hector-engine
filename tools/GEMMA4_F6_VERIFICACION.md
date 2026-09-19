@@ -1,5 +1,9 @@
 # Gemma 4 — verificación de la Fase 6 contra referencia externa
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Criterio de salida de la F6 en `GEMMA4_PLAN.md`: *"comparar logits de prefill y
 varios pasos de decode con la referencia usando prompts cortos y otros mayores
 que 512 tokens"*. **Cumplido el 2026-07-31.**

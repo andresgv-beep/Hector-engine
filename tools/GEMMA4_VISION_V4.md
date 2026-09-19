@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — V4 encoder FP16
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrada el 2026-08-02. Esta fase ejecuta la torre visual completa y termina
 > en los 280 embeddings de ancho 1536. Todavía no modifica el prompt ni el
 > decoder de texto.

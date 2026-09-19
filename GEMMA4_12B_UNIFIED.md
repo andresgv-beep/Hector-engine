@@ -1,5 +1,9 @@
 # Gemma 4 12B «unified» — motor
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](ESTADO_ACTUAL.md) (2026-09-19). La visión encoder-free del 12B continúa pendiente; las cifras y fallos de esta primera prueba no describen por sí solos el runtime actual.
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Abierto el 2026-09-16. **El texto funciona y genera lenguaje correcto.** La
 > visión carga desde el HNF pero el motor todavía no la ejecuta (ver «Dónde
 > quedó»).

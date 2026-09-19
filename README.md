@@ -1,172 +1,112 @@
-# HELIOS Engine — Héctor v1
+# HELIOS Engine — Héctor
 
-Polymorphic CUDA inference engine for transformer models. Core component of **HELIOS**, a cognitive AI system under active development.
+Motor de inferencia local C++/CUDA para modelos HNF. El agente, las herramientas,
+el historial y la interfaz React viven en el repositorio `hexos-core`.
 
-Built from scratch in C++/CUDA without PyTorch, TensorFlow, or llama.cpp. Everything from memory management to attention kernels is handwritten.
+**Estado revisado el 2026-09-19 sobre `b822e1b`.**
+Consulta [estado actual e índice documental](ESTADO_ACTUAL.md) para distinguir
+capacidades implementadas, límites y resultados de campañas históricas.
 
-## Performance work — 2026-09-19
+## Qué funciona
 
-Measured Gemma 4 12B changes, validation and reproduction instructions:
+- Carga HNF v9, tokenizer HTF, detección de configuración y construcción del grafo.
+  Hay rutas específicas por arquitectura; no se admite cualquier transformer
+  únicamente por reconocer nombres de tensores.
+- Texto Gemma 4 E2B/E4B y 12B unified. Qwen3 utiliza la ruta Qwen con Q/K norm.
+  La evidencia de modelos y sus límites se detalla en el [estado actual](ESTADO_ACTUAL.md).
+- Visión Gemma 4 con torre (E2B/E4B), una imagen por turno, mediante adaptador
+  persistente. La visión encoder-free del **12B unified sigue sin estar integrada**.
+- Pesos compartidos entre sesiones, KV separado, anillo local Gemma 4,
+  reutilización de prefijo textual y decode con CUDA Graphs.
+- Runtime NDJSON con fragmentos `text_delta`, progreso opcional de prefill,
+  cancelación dirigida, métricas y capacidad de contexto por sesión.
+- Puente `helios_formatted` compatible con clientes antiguos, sin entrega
+  progresiva ni orden de cancelación. La ruta nativa actual de Hexos usa NDJSON.
 
-- [Cancellation, progress and lazy auxiliary KV](informes/CANCELACION_RECURSOS_2026-09-19.md) — implementation following the architecture review.
-- [Architecture review: measurements and next priorities](informes/REVISION_ARQUITECTURA_ACTUAL_2026-09-19.md) — baseline `ceadd0b`; subsequent implementation is tracked in the report above.
-- [Architecture audit](informes/ARQUITECTURA_RENDIMIENTO_2026-09-19.md)
-- [KV reuse and CUDA Graphs](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md)
-- [Decode attention](informes/OPTIMIZACION_ATENCION_2026-09-19.md)
-- [Prefill attention](informes/OPTIMIZACION_PREFILL_2026-09-19.md)
-- [E4B prefill validation](informes/OPTIMIZACION_PREFILL_E4B_2026-09-19.md)
+## Compilación
 
-## What is this
+Linux, CMake >= 3.18, compilador C++17 y CUDA Toolkit compatible con la GPU.
+La campaña local del 19 de septiembre usa CUDA 13.1 y RTX 4070 Ti.
 
-Héctor is the inference engine at the heart of HELIOS — a modular cognitive architecture designed for local AI inference with multi-model orchestration. The full system includes Héctor (inference), HEXOS (system monitoring), HERA (episodic memory), and a Cognitive Kernel that coordinates reasoning and communication across multiple models.
-
-The engine loads models in a proprietary binary format (HNF — HELIOS Neural Format), detects the model architecture from the weight tensors it finds, and builds the correct compute graph automatically. No architecture-specific code paths — one polymorphic pipeline handles any supported transformer.
-
-## Features
-
-**Engine core:**
-- Custom tensor registry with named tensors on GPU
-- Scratch memory pool with bump allocation (zero fragmentation)
-- Command buffer pattern — build graph once, execute many times
-- CUDA Graph capture and replay for autoregressive decode
-- Device-side cache position for true single-capture graphs
-
-**CUDA kernels (23 registered ops):**
-- Elementwise: add, multiply, scale, copy, bias
-- Activations: SiLU, GELU, GELU-new, fused SiLU×mul, fused GELU×mul
-- Normalization: RMSNorm, LayerNorm, fused add+RMSNorm
-- Linear: matmul via cuBLAS (FP16, FP32) and custom HQS quantized matmul
-- Attention: full multi-head attention, cached attention with KV update
-- Positional: RoPE (standard, LLaMA-3 scaled, LongRoPE, YaRN, dynamic NTK)
-- Sampling: argmax, temperature+top-k+top-p on GPU
-- Utilities: embedding lookup, QKV split, half split
-
-**Quantization (HQS — HELIOS Quantization System):**
-- HQ4K — 4-bit quantized with per-block scales (32 elements/block)
-- HQ5K — 5-bit quantized with per-block scales
-- HQ41K / HQ51K — 1K-block variants
-- Fused dequant-matmul kernels (weights stay quantized in memory)
-
-**Model format (HNF v9):**
-- Binary container with 16 block slots (text, vision, audio, cortex, code, tokenizer, etc.)
-- Block table at fixed offset — O(1) block lookup
-- Embedded tokenizer (HTF — HELIOS Tokenizer Format) with BPE, special tokens, and chat templates
-- Multimodal support: combine text + vision + code models in one file
-- Execution hints (JSON or binary) for architecture metadata
-
-**Architecture support (tested):**
-- Qwen2 (ChatML template)
-- Phi-3 / Phi-4 (LongRoPE, partial rotary)
-- DeepSeek Coder
-
-**Planned / in progress:**
-- Falcon (MQA kernel designed, not yet integrated)
-- LLaMA-3
-- Any standard transformer that follows detectable patterns (fused/separate QKV, gated/plain MLP, RMSNorm/LayerNorm)
-
-**Tokenizer (HTF):**
-- BPE with byte-fallback
-- Special token handling (BOS, EOS, pad, chat markers)
-- Multi-domain vocabulary support
-
-**KV Cache:**
-- Pre-allocated for max sequence length
-- GQA support (num_kv_heads ≠ num_heads)
-- Per-layer cache with batch dimension
-
-## What's not done yet
-
-- No HTTP/API server — runs as test binaries only
-- No multi-GPU / tensor parallelism
-- No continuous batching
-- No streaming output
-- No GGUF/safetensors import (requires conversion to HNF)
-- CUDA Graph replay limited to fixed-topology decode steps
-- No Windows support (Linux only)
-
-## Requirements
-
-- Linux (tested on Ubuntu 22.04/24.04)
-- NVIDIA GPU (Turing or newer — sm_75+)
-- CUDA Toolkit 12.x
-- CMake 3.18+
-- g++ with C++17 support
-
-## Build
+Desde la raíz de este repositorio:
 
 ```bash
-git clone https://github.com/YOUR_USER/helios-engine.git
-cd helios-engine
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j 6
+ctest --test-dir build --output-on-failure -j 1
 ```
 
-Default CUDA architectures: `sm_75` (Turing/2080Ti), `sm_86` (Ampere/3090), `sm_89` (Ada/4070). Edit `CMAKE_CUDA_ARCHITECTURES` in CMakeLists.txt if needed.
+`CMakeLists.txt` fija actualmente `CMAKE_CUDA_ARCHITECTURES` a `native`, no a
+una lista 75/86/89. Para un binario portable hay que ajustar esa asignación y
+usar una versión de CMake/CUDA que soporte la selección deseada. Los binarios
+con pesos reales requieren además un HNF; no todos forman parte de CTest.
 
-## Usage
-
-The engine requires models converted to HNF format. Test binaries are built automatically:
+## Entradas de uso
 
 ```bash
-# Run unit tests
-./test_tensor
-./test_memory
-./test_command
-./test_engine
-./test_kernels
-./test_hnf_loader
+# Capacidades del HNF sin cargar pesos ni crear contexto CUDA
+build/helios_model_probe --json /ruta/modelo.hnf
 
-# Smoke test (progressive 4-phase validation)
-./test_smoke <path_to_model.hnf>
+# Chat de terminal (ruta propia, no el agente Python)
+build/helios_chat /ruta/modelo.hnf
 
-# Interactive chat
-./test_chat <path_to_model.hnf> text "What is the meaning of life?"
-
-# Generation with KV cache
-./test_generate_kv <path_to_model.hnf> text "Once upon a time" 128
-
-# Multimodal generation
-./test_generate_modal <path_to_model.hnf> cortex "Explain quantum computing"
+# Servicio de inferencia por stdin/stdout NDJSON
+build/helios_runtime --model /ruta/modelo.hnf --ctx 16384 --temp 0
 ```
 
-## Project structure
+El motor no sirve HTTP por sí mismo. Hexos ofrece servidores HTTP; su agente
+Python conecta este runtime con la interfaz. No confundir `helios_chat`,
+`helios_formatted`, `helios_runtime` y los dos backends HTTP de Hexos.
 
-```
-helios-engine/
-├── CMakeLists.txt
-├── src/
-│   ├── engine.hpp/cpp          — Core engine (execution, kernel registry, CUDA graphs)
-│   ├── tensor.hpp/cpp          — Tensor registry (named tensors on GPU)
-│   ├── memory.hpp/cpp          — Scratch memory pool (bump allocator)
-│   ├── command.hpp/cpp         — Command buffer (op graph)
-│   ├── graph_builder.hpp/cpp   — Auto-detect architecture, build forward pass
-│   ├── hnf_loader.hpp/cpp      — HNF v9 model loader
-│   ├── htf_tokenizer.hpp/cpp   — BPE tokenizer (HTF format)
-│   ├── kv_cache.hpp            — KV cache for autoregressive decode
-│   ├── sampler.hpp/cpp         — GPU sampling (temperature, top-k, top-p)
-│   ├── dtype.hpp/cpp           — Data type registry (FP16, FP32, HQ4K, HQ5K)
-│   └── optype.hpp/cpp          — Operation type registry
-├── kernels/
-│   ├── kernels.hpp             — Kernel declarations
-│   ├── register_kernels.cpp    — All 23 kernel registrations
-│   ├── elementwise.cu          — Add, mul, scale, copy
-│   ├── activations.cu          — SiLU, GELU, fused variants
-│   ├── normalization.cu        — RMSNorm, LayerNorm
-│   ├── fused_add_rmsnorm.cu    — Fused residual + RMSNorm
-│   ├── linear.cu               — Linear projection dispatch
-│   ├── matmul_cublas.cu        — cuBLAS FP16/FP32 matmul
-│   ├── matmul_hqs.cu           — HQS quantized matmul (4-bit, 5-bit)
-│   ├── matmul_hqs_compact.cu   — Compact HQS variant
-│   ├── attention.cu            — Multi-head attention + cached attention
-│   ├── sampling.cu             — Argmax, temperature, top-k/p
-│   ├── hqs_common.cuh          — Shared HQS dequant helpers
-│   └── quantize_q8.cuh         — Q8 quantization utilities
-├── tests/                      — Unit tests (tensor, memory, command, engine, kernels, HNF)
-├── test_*.cpp                  — Integration tests (generation, chat, multimodal, smoke)
-└── verify_*.py                 — Python weight verification scripts
-```
+El [contrato NDJSON](tools/RUNTIME_PROTOCOL.md) describe peticiones, eventos,
+KV y cancelación. El lanzador del agente está en `hexos-core/runtime/run-helios-native`.
 
-## License
+## Cuantización y memoria
 
-MIT
+Los tipos compactos registrados incluyen HQ31K, HQ41K, HQ51K, HQ42K, HQ52K y
+HQ62K. Las formas y bytes reales están en [dtype.cpp](src/dtype.cpp); el nombre
+no indica el tamaño completo del HNF ni todos sus metadatos. HQ62K tiene lookup
+de embeddings, **no un matmul general implementado**. HQ42K/HQ52K se usan en el
+12B probado. El conversor produce los pesos; Héctor los consume.
+
+El prefill cuantizado puede descuantizar a FP16 y usar cuBLAS; no todas las
+rutas mantienen cada operación fusionada. El KV y el scratch se reservan según
+arquitectura/capacidad; las sesiones auxiliares se crean bajo demanda en los
+clientes documentados. Varias sesiones comparten pesos y recursos de trabajo,
+pero ejecutan inferencia en serie.
+
+## Evidencia reciente
+
+- [Cancelación, progreso y conexión con Hexos](informes/CANCELACION_RECURSOS_2026-09-19.md).
+- [KV y CUDA Graphs](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md).
+- [Atención de decode](informes/OPTIMIZACION_ATENCION_2026-09-19.md).
+- [Atención de prefill](informes/OPTIMIZACION_PREFILL_2026-09-19.md) y
+  [regresión E4B](informes/OPTIMIZACION_PREFILL_E4B_2026-09-19.md).
+- [Perfil y siguientes prioridades](informes/REVISION_ARQUITECTURA_ACTUAL_2026-09-19.md).
+
+Los tiempos pertenecen al modelo, GPU, contexto y revisión de cada informe.
+No se extrapolan como rendimiento garantizado ni como certificación de todas
+las familias.
+
+## Límites vigentes
+
+Sin multi-GPU/tensor parallelism ni continuous batching. Sin importación directa
+de GGUF/safetensors: se requiere conversión a HNF. Audio y vídeo no tienen un
+adaptador de inferencia operativo documentado. No hay soporte Windows certificado.
+Cancelar no interrumpe un kernel CUDA a mitad de ejecución ni el interior del
+preprocesado/encoder visual. Quedan optimizaciones numéricas de prefill y decode;
+mostrar texto progresivo no aumenta por sí mismo los tokens/s.
+
+## Código principal
+
+- `src/inference_session.*`: modelo compartido, sesiones, KV y generación.
+- `src/graph_builder.*`, `src/gemma4_kv_cache.hpp`: grafos y caché por arquitectura.
+- `src/hnf_loader.*`, `src/htf_tokenizer.*`: pesos, metadatos y tokenizer.
+- `src/model_capabilities.*`, `src/multimodal_adapter.*`: capacidades y adaptación visual.
+- `kernels/`: operaciones CUDA, atención y multiplicaciones cuantizadas.
+- `tools/helios_runtime.cpp`: frontera NDJSON.
+- `tests/`, `informes/`: pruebas y evidencia fechada.
+
+## Licencia
+
+MIT.

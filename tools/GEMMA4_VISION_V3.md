@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — V3 preprocesado RGB
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrada el 2026-08-02. Esta fase trabaja exclusivamente sobre RGB8 ya
 > decodificado. No añade PNG/JPEG, CUDA visual ni conexión con el decoder.
 

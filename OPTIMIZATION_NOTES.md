@@ -1,5 +1,9 @@
 # Notas de optimización — Héctor v1
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Diagnóstico hecho el 2026-07-29. Plan: **medir primero, tocar después.**
 >
 > **Archivo histórico:** las afirmaciones sobre herramientas o modelos ausentes

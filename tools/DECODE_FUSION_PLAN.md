@@ -1,5 +1,9 @@
 # Campaña de rendimiento decode — fusiones, embedding y HQ3.1K
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Fecha de apertura: 2026-08-01
 
 ## Objetivo

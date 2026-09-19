@@ -1,5 +1,9 @@
 # Gemma 4 E2B-IT — evidencia parcial de la Fase 8
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Mediciones realizadas el 2026-07-31 con `google/gemma-4-E2B-it`, cuyo
 `model.safetensors` tiene SHA256
 `2db5482b20d746879bb3ef79b5203e9075a2e2b98f54ec7c2f281c1477ddc550`.

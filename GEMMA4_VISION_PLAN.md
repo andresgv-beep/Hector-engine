@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision en Héctor — plan de integración
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](ESTADO_ACTUAL.md) (2026-09-19). El recorrido visual con torre ya está implementado; los bloqueos de las fases iniciales se conservan como historia.
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Creado el 2026-08-01. Este documento separa la integración visual de la
 > campaña de texto/HQS. Visión avanza por pruebas de correctitud y no modifica
 > la cuantización del decoder hasta disponer de paridad FP16.

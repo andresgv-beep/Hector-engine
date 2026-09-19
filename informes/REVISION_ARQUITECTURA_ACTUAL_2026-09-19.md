@@ -1,5 +1,9 @@
 # Héctor: revisión de arquitectura después de las optimizaciones
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19). Cancelación, progreso, auxiliar diferida y conexión con Hexos ya se implementaron después de esta revisión.
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Fecha: 2026-09-19. Código revisado: `ceadd0bee0fd0400e28e0793e143671268999902`.
 
 Seguimiento posterior: [cancelación, progreso y KV auxiliar bajo demanda](CANCELACION_RECURSOS_2026-09-19.md). Los hallazgos y medidas de este documento describen la revisión base; consultar ese seguimiento para distinguir lo ya corregido de lo pendiente.

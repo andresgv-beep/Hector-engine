@@ -1,5 +1,9 @@
 # Héctor: arquitectura y prioridades de rendimiento
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Revisión local del 19 de septiembre de 2026, sobre `fdc99e5`.
 GPU: RTX 4070 Ti, 60 SM, 12.282 MiB. Driver 595.91.07; biblioteca
 compilada en Release con CUDA 13.1 y arquitectura nativa.

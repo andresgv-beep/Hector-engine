@@ -1,5 +1,9 @@
 # GEMV batcheado — test de muerte superado (2026-08-01)
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 Prototipo en `tools/gemv_batched_prototype.cu`. **No es código de producción**:
 es la prueba de que la idea funciona antes de integrarla.
 

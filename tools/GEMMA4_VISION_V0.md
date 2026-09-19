@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — oráculo V0
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrado el 2026-08-01. Este informe fija la referencia numérica antes de
 > convertir pesos o escribir kernels de visión en Héctor.
 

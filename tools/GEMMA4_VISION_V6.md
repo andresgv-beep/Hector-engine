@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — V6 producto mínimo y robustez
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrada el 2026-08-02. Esta fase conecta el preprocesado V3, la torre V4 y
 > el puente multimodal V5 en una conversación real. No modifica la
 > cuantización ni los kernels visuales certificados.

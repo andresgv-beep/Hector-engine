@@ -1,5 +1,9 @@
 # Gemma 4 E2B Vision — V2 loader y validador
 
+> **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
+> consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19).
+> Las mediciones y conclusiones siguientes corresponden a su revisión original.
+
 > Cerrada el 2026-08-02. Esta fase no construye el forward visual ni añade
 > kernels; solo establece el contrato de carga seguro de los pesos de V1.
 
