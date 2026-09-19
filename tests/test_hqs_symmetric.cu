@@ -3,6 +3,7 @@
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cublas_v2.h>
 
 #include <algorithm>
 #include <cmath>
@@ -152,6 +153,69 @@ void test_matmul(Launch launch, const char* name) {
     }
 }
 
+// Independent CPU expansion followed by the same cuBLAS multiplication.
+// Covers vector-store alignment, incomplete quantization blocks and the scalar
+// fallback for K not divisible by eight. Graph replay also uses the real launcher.
+template<int BITS, int BLOCK_BYTES, typename Launch>
+void test_prefill_packed_stores(Launch launch) {
+    cublasHandle_t handle;
+    require(cublasCreate(&handle) == CUBLAS_STATUS_SUCCESS, "create cuBLAS");
+    require(cublasSetMathMode(handle, CUBLAS_DEFAULT_MATH) == CUBLAS_STATUS_SUCCESS,
+            "cuBLAS math mode");
+    for (int K : {7, 8, 248, 255, 256, 264, 2040, 2048, 2056, 3840, 15360}) {
+        const int N = 7;
+        const int M = 9;
+        auto weights = make_weights<BITS, BLOCK_BYTES>(N, K);
+        std::vector<half> expanded(size_t(N) * K), input(size_t(M) * K);
+        for (int n = 0; n < N; ++n)
+            for (int k = 0; k < K; ++k)
+                expanded[size_t(n) * K + k] = __float2half(
+                    decode_weight<BITS, BLOCK_BYTES>(weights, n, k, K));
+        for (size_t i = 0; i < input.size(); ++i)
+            input[i] = __float2half((int(i % 29) - 14) * 0.00390625f);
+        uint8_t* dw;
+        half *dx, *de, *actual, *expected;
+        cuda_require(cudaMalloc(&dw, weights.size()), "quant weights");
+        cuda_require(cudaMalloc(&dx, input.size() * 2), "input");
+        cuda_require(cudaMalloc(&de, expanded.size() * 2), "reference weights");
+        cuda_require(cudaMalloc(&actual, M * N * 2), "actual");
+        cuda_require(cudaMalloc(&expected, M * N * 2), "expected");
+        cuda_require(cudaMemcpy(dw, weights.data(), weights.size(), cudaMemcpyHostToDevice), "weights");
+        cuda_require(cudaMemcpy(dx, input.data(), input.size() * 2, cudaMemcpyHostToDevice), "input");
+        cuda_require(cudaMemcpy(de, expanded.data(), expanded.size() * 2, cudaMemcpyHostToDevice), "reference");
+        half alpha = __float2half(1), beta = __float2half(0);
+        require(cublasHgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, N, M, K,
+                           &alpha, de, K, dx, K, &beta, expected, N) == CUBLAS_STATUS_SUCCESS,
+                "reference GEMM");
+        cudaStream_t stream;
+        cuda_require(cudaStreamCreate(&stream), "stream");
+        launch(dx, dw, actual, M, K, N, stream); // Allocate scratch before capture.
+        cuda_require(cudaDeviceSynchronize(), "warmup");
+        std::vector<half> a(M * N), e(M * N);
+        cuda_require(cudaMemcpy(e.data(), expected, e.size() * 2, cudaMemcpyDeviceToHost), "expected output");
+        for (int graph = 0; graph < 2; ++graph) {
+            cudaGraph_t captured = nullptr;
+            cudaGraphExec_t exec = nullptr;
+            if (graph) cuda_require(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal), "capture");
+            launch(dx, dw, actual, M, K, N, stream);
+            if (graph) {
+                cuda_require(cudaStreamEndCapture(stream, &captured), "end capture");
+                cuda_require(cudaGraphInstantiate(&exec, captured, nullptr, nullptr, 0), "instantiate");
+                cuda_require(cudaGraphLaunch(exec, stream), "replay");
+            }
+            cuda_require(cudaStreamSynchronize(stream), "synchronize");
+            cuda_require(cudaMemcpy(a.data(), actual, a.size() * 2, cudaMemcpyDeviceToHost), "actual output");
+            require(std::memcmp(a.data(), e.data(), a.size() * 2) == 0,
+                    "prefill CPU-expansion parity BITS=" + std::to_string(BITS) +
+                    " K=" + std::to_string(K) + " graph=" + std::to_string(graph));
+            if (graph) { cudaGraphExecDestroy(exec); cudaGraphDestroy(captured); }
+        }
+        cudaStreamDestroy(stream);
+        cudaFree(dw); cudaFree(dx); cudaFree(de); cudaFree(actual); cudaFree(expected);
+    }
+    cublasDestroy(handle);
+}
+
 template<int BITS, int BLOCK_BYTES, typename Launch>
 void test_embedding(Launch launch, const char* name) {
     constexpr int VOCAB = 3;
@@ -195,6 +259,8 @@ int main() {
     using namespace helios::hqs;
     test_matmul<4, HQ42K_BLOCK_SIZE>(kernels::launch_matmul_hq42k, "HQ4.2K matmul");
     test_matmul<5, HQ52K_BLOCK_SIZE>(kernels::launch_matmul_hq52k, "HQ5.2K matmul");
+    test_prefill_packed_stores<4, HQ42K_BLOCK_SIZE>(kernels::launch_matmul_hq42k);
+    test_prefill_packed_stores<5, HQ52K_BLOCK_SIZE>(kernels::launch_matmul_hq52k);
     test_embedding<4, HQ42K_BLOCK_SIZE>(kernels::launch_embedding_hq42k, "HQ4.2K embedding");
     test_embedding<5, HQ52K_BLOCK_SIZE>(kernels::launch_embedding_hq52k, "HQ5.2K embedding");
     std::cout << "PASS: HQ4.2K/HQ5.2K CUDA matmul and embedding match CPU decode" << std::endl;

@@ -1,6 +1,6 @@
 # Estado actual e índice documental de Héctor
 
-Actualizado: **2026-09-19**, con prefill compacto validado sobre `333b7e5`. Este archivo resume el
+Actualizado: **2026-09-19**, con descompresión vectorizada validada sobre `93afc47`. Este archivo resume el
 estado operativo. Los planes e informes fechados conservan sus resultados de
 entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 
@@ -17,6 +17,7 @@ entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 | Falcon / LLaMA y otras familias | No elevar detección/configuración a soporte end-to-end certificado sin prueba específica con pesos. |
 | Sesiones | `Model` comparte pesos; `InferenceSession` tiene KV y sampler propios. Ejecución serializada, no batching concurrente. |
 | Prefill local HD256 | Acumuladores compactos integrados para las dos geometrías Gemma 12B/E4B validadas. Prefill largo 14–15 % / 10–11 % más corto frente al coalescido previo; decode sin cambios. [Pruebas y medidas](informes/PREFILL_COMPACTO_HD256_2026-09-19.md). |
+| Prefill HQ4.2/HQ5.2 | Escrituras de descompresión vectorizadas para K múltiplo de ocho; resto escalar. Misma reserva FP16, cuBLAS y GEMV. [Medidas y validación 12B](informes/MATMUL_CUANTIZADO_2026-09-19.md). |
 | Prefijo y CUDA Graphs | Implementados con límites del anillo y reconstrucción cuando corresponde. [KV/grafos](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md). |
 | Progreso/cancelación | Implementados en NDJSON y conectados al agente/UI de Hexos. [Contrato](tools/RUNTIME_PROTOCOL.md). |
 | HTTP | Pertenece a Hexos, no al ejecutable de inferencia. Héctor sí tiene CLI/runtime utilizables, no solo tests. |
@@ -47,7 +48,9 @@ puede mezclar tipos: no comparar su tamaño como si todos los pesos usaran HQ62K
 
 - Atención de prefill con reutilización de K/V entre consultas: los kernels
   actuales ya están optimizados, pero eso no completa una atención por tiles.
-- GEMV cuantizado y costes de descuantización/GEMM, según el perfil real.
+- GEMV cuantizado para decode y descuantización integrada con GEMM por tiles.
+  Las escrituras vectorizadas HQ4.2/HQ5.2 **ya están hechas**; seguimos
+  expandiendo la matriz a FP16 y el umbral M=9 sigue siendo fijo.
 - Visión encoder-free del 12B y audio/vídeo: trabajo distinto del streaming.
 - Multi-GPU y continuous batching: no implementados.
 - Comprobar nuevas familias con pesos reales antes de generalizar resultados.
@@ -61,7 +64,7 @@ La cancelación conserva límites: espera a que termine el trabajo CUDA en curso
 - **Contratos vigentes:** [runtime](tools/RUNTIME_PROTOCOL.md),
   [capacidades](tools/MODEL_CAPABILITIES.md), [adaptadores](tools/MULTIMODAL_ADAPTER.md),
   [pesos mapeados](tools/MAPPED_WEIGHT_PIPELINE.md).
-- **Implementación reciente:** [prefill compacto HD256](informes/PREFILL_COMPACTO_HD256_2026-09-19.md), [cancelación y recursos](informes/CANCELACION_RECURSOS_2026-09-19.md),
+- **Implementación reciente:** [descompresión HQ4.2/HQ5.2](informes/MATMUL_CUANTIZADO_2026-09-19.md), [prefill compacto HD256](informes/PREFILL_COMPACTO_HD256_2026-09-19.md), [cancelación y recursos](informes/CANCELACION_RECURSOS_2026-09-19.md),
   los informes `OPTIMIZACION_*_2026-09-19.md` enlazados en el README.
 - **Diagnósticos de una base anterior:** [arquitectura inicial](informes/ARQUITECTURA_RENDIMIENTO_2026-09-19.md),
   [revisión posterior](informes/REVISION_ARQUITECTURA_ACTUAL_2026-09-19.md),

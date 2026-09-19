@@ -1,5 +1,9 @@
 # Héctor: revisión de arquitectura después de las optimizaciones
 
+Seguimiento del paso 2: [descompresión HQ4.2/HQ5.2 vectorizada](MATMUL_CUANTIZADO_2026-09-19.md)
+implementada después de esta revisión. La GEMM con descuantización por tiles
+y el ajuste del umbral siguen pendientes; las cifras del perfil original se conservan.
+
 > **Informe de campaña / corte histórico.** Para capacidades y pendientes vigentes,
 > consultar [estado actual](../ESTADO_ACTUAL.md) (2026-09-19). Cancelación, progreso, auxiliar diferida y conexión con Hexos ya se implementaron después de esta revisión.
 > Las mediciones y conclusiones siguientes corresponden a su revisión original.

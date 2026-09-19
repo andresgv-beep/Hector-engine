@@ -3,7 +3,7 @@
 Motor de inferencia local C++/CUDA para modelos HNF. El agente, las herramientas,
 el historial y la interfaz React viven en el repositorio `hexos-core`.
 
-**Estado revisado el 2026-09-19; prefill compacto validado sobre la base `333b7e5`.**
+**Estado revisado el 2026-09-19; descompresión HQ4.2/HQ5.2 vectorizada validada sobre `93afc47`.**
 Consulta [estado actual e índice documental](ESTADO_ACTUAL.md) para distinguir
 capacidades implementadas, límites y resultados de campañas históricas.
 
@@ -26,6 +26,9 @@ capacidades implementadas, límites y resultados de campañas históricas.
 Atención local HD256 con acumuladores compactos: prefill largo del 12B un
 14–15 % más corto y del E4B un 10–11 % en la campaña local, frente al kernel
 coalescido previo. [Mediciones y límites](informes/PREFILL_COMPACTO_HD256_2026-09-19.md).
+
+Descompresión HQ4.2/HQ5.2 con escrituras vectorizadas integrada en el prefill,
+sin modificar pesos ni GEMV de decode. [Mediciones y alcance](informes/MATMUL_CUANTIZADO_2026-09-19.md).
 
 ## Compilación
 

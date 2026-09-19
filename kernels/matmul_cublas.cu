@@ -1,14 +1,14 @@
 // kernels/matmul_cublas.cu
 // ============================================================================
-// MATMUL via cuBLAS — Dequant HQ4.1K/HQ5.1K → FP16 buffer → cuBLAS HGEMM
+// MATMUL via cuBLAS — Dequant HQ4.1K/HQ5.1K/HQ4.2K/HQ5.2K → FP16 → HGEMM
 // ============================================================================
 //
 // Strategy:
-//   1. Dequant kernel: HQ4.1K/HQ5.1K → FP16 (bandwidth-bound, fast)
+//   1. Dequant kernel: compact or symmetric HQS → FP16 scratch
 //   2. cuBLAS cublasHgemm: FP16 × FP16 with tensor cores
 //
-// The dequant is cheap (~0.25ms for 50MB) because it's pure memory I/O.
-// cuBLAS uses tensor cores for the actual matmul → 4-8x faster than CUDA cores.
+// Dequantization cost depends on shape, cache and memory transactions. Symmetric
+// formats use packed output stores when K is aligned; cuBLAS performs the GEMM.
 //
 // Memory: one persistent FP16 scratch buffer, allocated on first use.
 // The buffer is sized for the largest weight matrix encountered.
@@ -145,7 +145,7 @@ __global__ void dequant_hq51k_kernel(
     }
 }
 
-template<int BITS, int BLOCK_BYTES>
+template<int BITS, int BLOCK_BYTES, bool PackedStores = false>
 __global__ void dequant_hq_symmetric_kernel(
     const uint8_t* __restrict__ weights,
     half* __restrict__ output,
@@ -162,7 +162,8 @@ __global__ void dequant_hq_symmetric_kernel(
         (size_t(row) * ((K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE) + sb) * BLOCK_BYTES;
     const float step = decode_symmetric_step(block, group);
     const int k_base = sb * SUPER_BLOCK_SIZE + group * GROUP_SIZE;
-    half* dst = output + size_t(row) * K + k_base;
+    half values[GROUP_SIZE];
+    half* dst = PackedStores ? values : output + size_t(row) * K + k_base;
     if constexpr (BITS == 4) {
         const uint8_t* payload = block + SYMMETRIC_HEADER_SIZE + group * 4;
         #pragma unroll
@@ -181,6 +182,17 @@ __global__ void dequant_hq_symmetric_kernel(
             if (k_base + i < K)
                 dst[i] = __float2half(float(int((packed >> (i * 5)) & 31) - 16) * step);
         }
+    }
+    if constexpr (PackedStores) {
+        // K is a multiple of eight: every group is complete and every output
+        // address is 16-byte aligned. Preserve each FP16 rounding, then issue
+        // one packed store instead of eight strided scalar stores per thread.
+        const uint4 packed = make_uint4(
+            uint32_t(__half_as_ushort(values[0])) | (uint32_t(__half_as_ushort(values[1])) << 16),
+            uint32_t(__half_as_ushort(values[2])) | (uint32_t(__half_as_ushort(values[3])) << 16),
+            uint32_t(__half_as_ushort(values[4])) | (uint32_t(__half_as_ushort(values[5])) << 16),
+            uint32_t(__half_as_ushort(values[6])) | (uint32_t(__half_as_ushort(values[7])) << 16));
+        *reinterpret_cast<uint4*>(output + size_t(row) * K + k_base) = packed;
     }
 }
 
@@ -286,8 +298,13 @@ static void launch_matmul_hq_symmetric_cublas(
     ensure_dequant_buffer(size_t(N) * K, stream);
     const int total_groups = (K + hqs::GROUP_SIZE - 1) / hqs::GROUP_SIZE;
     dim3 grid(N, (total_groups + 255) / 256);
-    dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES><<<grid, 256, 0, stream>>>(
-        weights, g_dequant_buffer, K, N);
+    if (K % hqs::GROUP_SIZE == 0) {
+        dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES, true><<<grid, 256, 0, stream>>>(
+            weights, g_dequant_buffer, K, N);
+    } else {
+        dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES><<<grid, 256, 0, stream>>>(
+            weights, g_dequant_buffer, K, N);
+    }
     __half alpha = __float2half(1.0f);
     __half beta = __float2half(0.0f);
     cublasHgemm(g_cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,

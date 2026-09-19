@@ -1,0 +1,40 @@
+[
+  {
+    "kernel": "_ZN6helios7kernels27dequant_hq_symmetric_kernelILi5ELi184ELb0EEEvPKhP6__halfii",
+    "stores": [
+      "/*0520*/              @!P6 STG.E.U16 [R8.64], R15 ;                               /* 0x0000000f0800e986 */",
+      "/*0730*/              @!P5 STG.E.U16 [R8.64+0x2], R13 ;                           /* 0x0000020d0800d986 */",
+      "/*0820*/              @!P4 STG.E.U16 [R8.64+0x4], R3 ;                            /* 0x000004030800c986 */",
+      "/*0830*/              @!P3 STG.E.U16 [R8.64+0x6], R5 ;                            /* 0x000006050800b986 */",
+      "/*0840*/              @!P2 STG.E.U16 [R8.64+0xa], R11 ;                           /* 0x00000a0b0800a986 */",
+      "/*0850*/              @!P1 STG.E.U16 [R8.64+0x8], R7 ;                            /* 0x0000080708009986 */",
+      "/*0860*/              @!P0 STG.E.U16 [R8.64+0xc], R13 ;                           /* 0x00000c0d08008986 */",
+      "/*08e0*/                   STG.E.U16 [R8.64+0xe], R3 ;                            /* 0x00000e0308007986 */"
+    ]
+  },
+  {
+    "kernel": "_ZN6helios7kernels27dequant_hq_symmetric_kernelILi5ELi184ELb1EEEvPKhP6__halfii",
+    "stores": [
+      "/*0950*/                   STG.E.128 [R10.64], R4 ;                               /* 0x000000040a007986 */"
+    ]
+  },
+  {
+    "kernel": "_ZN6helios7kernels27dequant_hq_symmetric_kernelILi4ELi152ELb0EEEvPKhP6__halfii",
+    "stores": [
+      "/*0550*/              @!P6 STG.E.U16 [R10.64], R7 ;                               /* 0x000000070a00e986 */",
+      "/*0620*/              @!P5 STG.E.U16 [R10.64+0x2], R12 ;                          /* 0x0000020c0a00d986 */",
+      "/*0720*/              @!P4 STG.E.U16 [R10.64+0x4], R2 ;                           /* 0x000004020a00c986 */",
+      "/*0730*/              @!P3 STG.E.U16 [R10.64+0x6], R4 ;                           /* 0x000006040a00b986 */",
+      "/*0740*/              @!P2 STG.E.U16 [R10.64+0x8], R0 ;                           /* 0x000008000a00a986 */",
+      "/*0750*/              @!P1 STG.E.U16 [R10.64+0xa], R8 ;                           /* 0x00000a080a009986 */",
+      "/*0760*/              @!P0 STG.E.U16 [R10.64+0xc], R12 ;                          /* 0x00000c0c0a008986 */",
+      "/*07d0*/                   STG.E.U16 [R10.64+0xe], R6 ;                           /* 0x00000e060a007986 */"
+    ]
+  },
+  {
+    "kernel": "_ZN6helios7kernels27dequant_hq_symmetric_kernelILi4ELi152ELb1EEEvPKhP6__halfii",
+    "stores": [
+      "/*0880*/                   STG.E.128 [R4.64], R16 ;                               /* 0x0000001004007986 */"
+    ]
+  }
+]
