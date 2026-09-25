@@ -369,7 +369,8 @@ int main(int argc, char** argv) {
     // First token from prefill logits
     {
         TensorInfo* lg = builder.get_logits(engine);
-        const half* last_logits = static_cast<const half*>(lg->ptr) + (seq_len - 1) * V;
+        // GraphBuilder projects only the final prefill position into row zero.
+        const half* last_logits = static_cast<const half*>(lg->ptr);
         
         int32_t first_tok = samp.sample(last_logits, V, samp_config);
         generated.push_back(first_tok);
