@@ -48,6 +48,8 @@ public:
         bool use_cuda_graphs = true; // replay frente a ejecución normal para A/B
         bool use_split_attention = true; // solo geometrías/longitudes validadas; false para A/B
         bool use_coalesced_prefill = true; // geometrías Gemma validadas; false para A/B
+        bool use_flash_decode = true;      // decode partido en la secuencia; false para A/B
+        uint32_t flash_decode_min_seq = 1024; // por debajo el kernel de referencia es más rápido
     };
 
     struct Info {

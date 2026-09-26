@@ -382,6 +382,8 @@ public:
         const char* e = getenv("HELIOS_FUSE_KV_ROPE");
         return e && e[0] == '1';
     }();
+    bool flash_decode_ = false;          // workspace reserved by allocate_scratch
+    uint32_t flash_decode_min_seq_ = 0;
 
     TensorInfo* get_logits(Engine& engine) const;
     TensorInfo* get_hidden(Engine& engine) const;

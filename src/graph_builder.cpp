@@ -31,6 +31,10 @@
 
 namespace helios {
 
+// Sequence splits per head for the experimental decode; bounds the workspace
+// independently of context length.
+constexpr uint32_t kFlashDecodeSplits = 64;
+
 // ============================================================================
 // NAMING HELPERS
 // ============================================================================
@@ -352,6 +356,14 @@ void GraphBuilder::allocate_scratch(
     alloc("v", {B, L, KVH * HD});
     alloc("attn_out",  {B, L, H * HD});
     alloc("attn_proj", {B, L, D});
+    if (engine.config().use_flash_decode && B == 1) {
+        const auto count = static_cast<uint32_t>(kernels::attention_flash_decode_workspace_bytes(
+            H, HD, kFlashDecodeSplits) / sizeof(float));
+        engine.tensors().allocate_and_register(S("flash_partials"), {count}, dtype::FP32());
+        scratch_names_.push_back(S("flash_partials"));
+    }
+    flash_decode_ = engine.config().use_flash_decode && B == 1;
+    flash_decode_min_seq_ = engine.config().flash_decode_min_seq;
     
     // Fused QKV buffer (for architectures with fused qkv_proj)
     if (arch.has_fused_qkv) {
@@ -449,6 +461,12 @@ void GraphBuilder::allocate_gemma4_scratch(
         engine.tensors().allocate_and_register(S("g4.attn_partials"), {count}, dtype::FP32());
         scratch_names_.push_back(S("g4.attn_partials"));
     }
+    if (engine.config().use_flash_decode && B == 1) {
+        const auto count = static_cast<uint32_t>(kernels::attention_flash_decode_workspace_bytes(
+            H, max_hd, kFlashDecodeSplits) / sizeof(float));
+        engine.tensors().allocate_and_register(S("g4.flash_partials"), {count}, dtype::FP32());
+        scratch_names_.push_back(S("g4.flash_partials"));
+    }
     alloc(S("g4.gate_backing"), {B, L, max_intermediate});
     alloc(S("g4.up_backing"), {B, L, max_intermediate});
     alloc(S("g4.mlp_h_backing"), {B, L, max_intermediate});
@@ -481,6 +499,7 @@ void GraphBuilder::allocate_gemma4_scratch(
 }
 
 void GraphBuilder::free_scratch(Engine& engine) {
+    flash_decode_ = false;
     for (const auto& name : scratch_view_names_) {
         if (engine.tensors().exists(name)) engine.tensors().remove(name);
     }
@@ -835,7 +854,11 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
         const bool geometry = H == 16 &&
             ((HD == 256 && KVH == 8 && window == 1024) ||
              (HD == 512 && KVH == 1 && window == 0));
-        if (engine.config().use_split_attention && geometry &&
+        if (engine.config().use_flash_decode &&
+            cache.cache_position + 1 >= engine.config().flash_decode_min_seq &&
+            engine.tensors().exists(S("g4.flash_partials"))) {
+            attention.in(S("g4.flash_partials")).set("flash_splits", kFlashDecodeSplits);
+        } else if (engine.config().use_split_attention && geometry &&
             cache.cache_position + 1 >= 2048 &&
             engine.tensors().exists(S("g4.attn_partials"))) {
             attention.in(S("g4.attn_partials"));
@@ -1433,6 +1456,9 @@ void GraphBuilder::build_attention_block(
             cb.add_attention_cached(S("attn_out"), S("q"), k_cache, v_cache,
                                     H, KVH, HD, total_seq, cache->max_cache_len);
             cb.commands().back().set("device_pos", (uint32_t)1);
+            if (flash_decode_ && total_seq >= flash_decode_min_seq_) {
+                cb.commands().back().in(S("flash_partials")).set("flash_splits", kFlashDecodeSplits);
+            }
         }
     } else {
         // 4b. Full attention (no cache)

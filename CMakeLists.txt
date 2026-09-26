@@ -90,6 +90,7 @@ set(KERNEL_SOURCES
     kernels/matmul_hqs_compact.cu
     kernels/matmul_cublas.cu
     kernels/attention.cu
+    kernels/attention_flash_decode.cu
     kernels/sampling.cu
     kernels/fused_add_rmsnorm.cu
     kernels/gemma4_vision.cu
@@ -260,6 +261,9 @@ add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)
 add_executable(test_attention_split tests/test_attention_split.cu)
 target_link_libraries(test_attention_split PRIVATE helios-engine)
 add_test(NAME AttentionSplitTest COMMAND test_attention_split)
+add_executable(test_attention_flash_decode tests/test_attention_flash_decode.cu)
+target_link_libraries(test_attention_flash_decode PRIVATE helios-engine)
+add_test(NAME AttentionFlashDecodeTest COMMAND test_attention_flash_decode)
 add_executable(test_attention_split_model tests/test_attention_split_model.cu)
 target_link_libraries(test_attention_split_model PRIVATE helios-engine)
 add_executable(test_attention_prefill tests/test_attention_prefill.cu)

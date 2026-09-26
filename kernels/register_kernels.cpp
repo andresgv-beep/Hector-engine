@@ -909,6 +909,21 @@ void register_attention_kernels(Engine& engine) {
         
         // device_pos: total_seq leído de device (permite CUDA Graph capture-once)
         if (cmd.get<uint32_t>("device_pos", 0) && engine.has_device_cache_pos()) {
+            if (const uint32_t splits = cmd.get<uint32_t>("flash_splits", 0)) {
+                auto* partials = ctx.in(3);
+                if (!partials || partials->dtype != dtype::FP32() ||
+                    partials->size_bytes < attention_flash_decode_workspace_bytes(num_heads, head_dim, splits)) {
+                    throw std::runtime_error("ATTENTION_CACHED: invalid flash decode workspace");
+                }
+                launch_attention_flash_decode_dp(
+                    as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
+                    as_fp16(output), static_cast<float*>(partials->ptr), engine.device_total_seq(),
+                    num_heads, num_kv_heads, head_dim, scale, window_size,
+                    cache_slots ? static_cast<int>(cache_slots) : static_cast<int>(max_seq_len),
+                    static_cast<int>(splits), static_cast<int>(cmd.get<uint32_t>("flash_min_chunk", 64)),
+                    ctx.stream);
+                return;
+            }
             if (auto* partials = ctx.in(3)) {
                 if (partials->dtype != dtype::FP32() ||
                     partials->size_bytes < attention_cached_split_workspace_bytes(1, num_heads)) {
