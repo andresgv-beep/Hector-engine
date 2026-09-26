@@ -986,6 +986,14 @@ void register_attention_kernels(Engine& engine) {
                     "ATTENTION_PREFILL_CACHED: unsupported head geometry");
             }
 
+            // Tiny chunks are cheaper on the reference kernel than launching GEMMs.
+            if (engine.config().use_gemm_prefill && seq_new >= 32 &&
+                launch_attention_prefill_gemm_fp16(
+                    as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache), as_fp16(output),
+                    (int)seq_new, (int)past_len, (int)num_heads, (int)num_kv_heads, (int)head_dim,
+                    (int)max_seq_len, scale, (int)window_size, ctx.stream, (int)cache_slots)) {
+                return;
+            }
             // Limit automatic dispatch to the measured Gemma 12B and E4B
             // geometries. Other shapes retain the original implementation.
             const bool coalesced = engine.config().use_coalesced_prefill &&

@@ -70,6 +70,7 @@ struct EngineConfig {
     bool use_coalesced_prefill = false; // Opt-in cached prefill; reference available for A/B
     bool use_flash_decode = false;       // Opt-in sequence-split decode for every geometry
     uint32_t flash_decode_min_seq = 0;   // shorter decode turns keep the reference kernels
+    bool use_gemm_prefill = false;       // cached prefill attention through cuBLAS GEMMs
     
     // Default stream (nullptr = default CUDA stream)
     cudaStream_t stream = nullptr;

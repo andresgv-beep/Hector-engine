@@ -519,6 +519,14 @@ void launch_attention_cached_fp16_split_dp(
 
 // Decode split along the sequence into `splits` CTAs per head plus a merge.
 // Summation order differs from the reference; caller owns stable workspace.
+// Cached prefill as FP32 GEMMs over key blocks (tensor cores via cuBLAS) with
+// masked partial softmax and an online merge. Returns false if cuBLAS or the
+// process-wide workspace are unavailable; callers keep the reference kernel.
+bool launch_attention_prefill_gemm_fp16(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
+    int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots);
+
 size_t attention_flash_decode_workspace_bytes(int num_heads, int head_dim, int splits);
 void launch_attention_flash_decode_dp(
     const half* q, const half* k_cache, const half* v_cache, half* output,
