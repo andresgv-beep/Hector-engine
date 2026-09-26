@@ -221,6 +221,8 @@ private:
     
     std::vector<int32_t> encode_bpe(const std::string& text) const;
     std::vector<int32_t> encode_bpe_segment(const std::string& text) const;
+    // BPE merges over one pre-tokenized piece (already byte/metaspace mapped).
+    void merge_piece(const std::string& processed, std::vector<int32_t>& out) const;
     std::vector<int32_t> encode_sentencepiece(const std::string& text) const;
     std::vector<int32_t> encode_wordpiece(const std::string& text) const;
     

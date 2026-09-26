@@ -4,6 +4,7 @@
 // ============================================================================
 
 #include "htf_tokenizer.hpp"
+#include "unicode_tables.hpp"
 #include <fstream>
 #include <cstring>
 #include <algorithm>
@@ -91,6 +92,156 @@ bool get_bool(const char* json, const std::string& key, bool def = false) {
 // Hash for pair<int32_t, int32_t>
 inline uint64_t pair_hash(int32_t a, int32_t b) {
     return (static_cast<uint64_t>(a) << 32) | static_cast<uint32_t>(b);
+}
+
+
+struct Codepoint { uint32_t value; size_t begin, end; };
+
+std::vector<Codepoint> decode_utf8(const std::string& text) {
+    std::vector<Codepoint> cps;
+    cps.reserve(text.size());
+    for (size_t i = 0; i < text.size();) {
+        const unsigned char c = text[i];
+        size_t len = 1;
+        uint32_t cp = c;
+        if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        if (i + len > text.size()) len = 1;
+        for (size_t k = 1; k < len; ++k) cp = (cp << 6) | (static_cast<unsigned char>(text[i + k]) & 0x3F);
+        cps.push_back({len == 1 ? c : cp, i, i + len});
+        i += len;
+    }
+    return cps;
+}
+
+void append_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) out += static_cast<char>(cp);
+    else if (cp < 0x800) { out += static_cast<char>(0xC0 | (cp >> 6)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+    else if (cp < 0x10000) { out += static_cast<char>(0xE0 | (cp >> 12)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+    else { out += static_cast<char>(0xF0 | (cp >> 18)); out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F)); out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+}
+
+template <size_t N>
+bool in_ranges(const unicode_tables::CodepointRange (&table)[N], uint32_t cp) {
+    const auto* it = std::upper_bound(std::begin(table), std::end(table), cp,
+        [](uint32_t v, const unicode_tables::CodepointRange& r) { return v < r.first; });
+    return it != std::begin(table) && cp <= (it - 1)->last;
+}
+
+bool is_letter(uint32_t cp) { return in_ranges(unicode_tables::kLetters, cp); }
+bool is_number(uint32_t cp) { return in_ranges(unicode_tables::kNumbers, cp); }
+bool is_newline(uint32_t cp) { return cp == '\r' || cp == '\n'; }
+bool is_space(uint32_t cp) {  // Unicode White_Space
+    return (cp >= 0x09 && cp <= 0x0D) || cp == 0x20 || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) || cp == 0x2028 || cp == 0x2029 || cp == 0x202F ||
+           cp == 0x205F || cp == 0x3000;
+}
+
+uint8_t combining_class(uint32_t cp) {
+    const auto& t = unicode_tables::kCombiningClasses;
+    const auto* it = std::lower_bound(std::begin(t), std::end(t), cp,
+        [](const unicode_tables::CombiningClass& c, uint32_t v) { return c.codepoint < v; });
+    return it != std::end(t) && it->codepoint == cp ? it->ccc : 0;
+}
+
+uint32_t compose(uint32_t starter, uint32_t mark) {
+    constexpr uint32_t SBase = 0xAC00, LBase = 0x1100, VBase = 0x1161, TBase = 0x11A7;
+    if (starter >= LBase && starter < LBase + 19 && mark >= VBase && mark < VBase + 21)
+        return SBase + ((starter - LBase) * 21 + (mark - VBase)) * 28;
+    if (starter >= SBase && starter < SBase + 11172 && (starter - SBase) % 28 == 0 &&
+        mark > TBase && mark < TBase + 28)
+        return starter + (mark - TBase);
+    const auto& t = unicode_tables::kCompositions;
+    const auto* it = std::lower_bound(std::begin(t), std::end(t), std::make_pair(starter, mark),
+        [](const unicode_tables::CompositionPair& p, const std::pair<uint32_t, uint32_t>& v) {
+            return p.starter != v.first ? p.starter < v.first : p.mark < v.second; });
+    return it != std::end(t) && it->starter == starter && it->mark == mark ? it->composed : 0;
+}
+
+// Canonical composition of text typed mostly precomposed: joins base + marks
+// (e.g. "e" + U+0301) the way NFC does, without a full decomposition pass.
+std::string nfc(const std::string& text) {
+    bool ascii = true;
+    for (unsigned char c : text) if (c >= 0x80) { ascii = false; break; }
+    if (ascii) return text;
+    std::vector<uint32_t> out;
+    long starter = -1;
+    uint8_t last_ccc = 0;
+    for (const Codepoint& c : decode_utf8(text)) {
+        const uint8_t ccc = combining_class(c.value);
+        const bool adjacent = starter >= 0 && static_cast<size_t>(starter) + 1 == out.size();
+        if (starter >= 0 && (adjacent || (last_ccc != 0 && last_ccc < ccc))) {
+            if (const uint32_t composed = compose(out[starter], c.value)) {
+                out[starter] = composed;
+                continue;
+            }
+        }
+        if (ccc == 0) { starter = static_cast<long>(out.size()); last_ccc = 0; }
+        else last_ccc = ccc;
+        out.push_back(c.value);
+    }
+    std::string result;
+    result.reserve(text.size());
+    for (uint32_t cp : out) append_utf8(result, cp);
+    return result;
+}
+
+// Qwen2/Qwen3 split regex, alternatives tried in order like the original:
+// (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}
+// | ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+std::vector<std::string> pretokenize_byte_level(const std::string& text) {
+    const std::vector<Codepoint> cps = decode_utf8(text);
+    const size_t n = cps.size();
+    auto cp = [&](size_t i) { return cps[i].value; };
+    auto other = [&](size_t i) { return !is_space(cp(i)) && !is_letter(cp(i)) && !is_number(cp(i)); };
+    auto lower = [](uint32_t c) { return c >= 'A' && c <= 'Z' ? c + 32 : c; };
+    std::vector<std::string> pieces;
+    size_t i = 0;
+    while (i < n) {
+        size_t end = i;
+        // (?i:'s|'t|'re|'ve|'m|'ll|'d)
+        if (cp(i) == '\'' && i + 1 < n) {
+            const uint32_t a = lower(cp(i + 1));
+            const uint32_t b = i + 2 < n ? lower(cp(i + 2)) : 0;
+            if (a == 's' || a == 't' || a == 'm' || a == 'd') end = i + 2;
+            else if ((a == 'r' && b == 'e') || (a == 'v' && b == 'e') || (a == 'l' && b == 'l')) end = i + 3;
+        }
+        // [^\r\n\p{L}\p{N}]?\p{L}+
+        if (end == i) {
+            size_t j = i;
+            if (!is_newline(cp(j)) && !is_letter(cp(j)) && !is_number(cp(j)) && j + 1 < n && is_letter(cp(j + 1))) ++j;
+            if (is_letter(cp(j))) { while (j < n && is_letter(cp(j))) ++j; end = j; }
+        }
+        // \p{N}
+        if (end == i && is_number(cp(i))) end = i + 1;
+        // ` ?[^\s\p{L}\p{N}]+[\r\n]*`
+        if (end == i) {
+            size_t j = i;
+            if (cp(j) == ' ' && j + 1 < n && other(j + 1)) ++j;
+            if (other(j)) {
+                while (j < n && other(j)) ++j;
+                while (j < n && is_newline(cp(j))) ++j;
+                end = j;
+            }
+        }
+        if (end == i && is_space(cp(i))) {
+            size_t run = i;
+            while (run < n && is_space(cp(run))) ++run;
+            // \s*[\r\n]+ : ends right after the last newline of the run.
+            size_t last_nl = run;
+            for (size_t k = run; k > i; --k) if (is_newline(cp(k - 1))) { last_nl = k; break; }
+            if (last_nl != run || (run > i && is_newline(cp(run - 1)))) end = last_nl;
+            // \s+(?!\S) : leave the last space for the following word.
+            else if (run == n) end = run;
+            else if (run - i >= 2) end = run - 1;
+            else end = run;  // \s+
+        }
+        if (end == i) end = i + 1;
+        pieces.emplace_back(text.substr(cps[i].begin, cps[end - 1].end - cps[i].begin));
+        i = end;
+    }
+    return pieces;
 }
 
 } // anonymous namespace
@@ -960,7 +1111,19 @@ std::vector<int32_t> HTFTokenizer::encode_bpe_segment(const std::string& text) c
     if (add_prefix_space_ && !processed.empty() && processed.front() != ' ') {
         processed.insert(processed.begin(), ' ');
     }
-    if (byte_level_) processed = bytes_to_unicode(processed);
+    if (byte_level_) {
+        // Byte-level BPE (Qwen2/Qwen3, GPT style) only merges inside the pieces
+        // of its split regex, after NFC. Merging across pieces gave other ids.
+        for (const std::string& piece : pretokenize_byte_level(nfc(processed)))
+            merge_piece(bytes_to_unicode(piece), ids);
+        return ids;
+    }
+    merge_piece(processed, ids);
+    return ids;
+}
+
+void HTFTokenizer::merge_piece(const std::string& processed, std::vector<int32_t>& out) const {
+    std::vector<int32_t> ids;
     
     // Tokenize each character initially
     std::vector<std::string> tokens;
@@ -997,7 +1160,8 @@ std::vector<int32_t> HTFTokenizer::encode_bpe_segment(const std::string& text) c
     }
     
     if (merges_.empty()) {
-        return ids;
+        out.insert(out.end(), ids.begin(), ids.end());
+        return;
     }
     
     // Apply BPE merges
@@ -1043,7 +1207,7 @@ std::vector<int32_t> HTFTokenizer::encode_bpe_segment(const std::string& text) c
         }
     }
     
-    return ids;
+    out.insert(out.end(), ids.begin(), ids.end());
 }
 
 std::vector<int32_t> HTFTokenizer::encode_sentencepiece(const std::string& text) const {
