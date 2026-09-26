@@ -25,6 +25,8 @@ namespace kernels {
 // mas anchas se recorren en varias ventanas; el acumulador permanece en fp32.
 // Debe ser multiplo de SUPER_BLOCK_SIZE y de 8 (copia vectorizada float4).
 constexpr int COMPACT_INPUT_CHUNK = 16384;
+static_assert((COMPACT_INPUT_CHUNK / hqs::SUPER_BLOCK_SIZE) % 2 == 0,
+              "GEMV variant A alternates accumulators per superblock pair within a chunk");
 
 // Batch (M>1): a partir de este M compensa dequant completo + cuBLAS GEMM
 // frente al bucle de M GEMVs (el dequant lee el peso UNA vez; el bucle M veces)
@@ -53,6 +55,14 @@ constexpr int CCC_WPR = 2, CCC_RPB = 4, CCC_BLOCK = CCC_WPR * CCC_RPB * 32;
 
 // Lecturas globales directas y coalescibles; camino rápido sin bounds-check y
 // lecturas half2 del input.
+// One warp per row (variant A) keeps two accumulators and alternates them per
+// superblock, reducing each like the two warps of B/C and adding them in the
+// same order: the tuned variant then changes speed, never the result.
+template<int WARPS_PER_ROW>
+__device__ __forceinline__ void rotate_single_warp(float& a, float& b) {
+    if constexpr (WARPS_PER_ROW == 1) { const float t = a; a = b; b = t; }
+}
+
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK>
 __global__ void gemv_hq41k_kernel(
     const half* __restrict__ input,
@@ -76,6 +86,7 @@ __global__ void gemv_hq41k_kernel(
         ? weights + (size_t)row * total_sb * HQ41K_BLOCK_SIZE
         : weights;
     float acc = 0.0f;
+    float acc_odd = 0.0f;
 
     // K puede superar la capacidad de shared (Qwen2.5-Coder: 18944). Cada
     // ventana se copia una vez por bloque y conserva el mismo orden de suma
@@ -95,7 +106,7 @@ __global__ void gemv_hq41k_kernel(
         const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) /
                            SUPER_BLOCK_SIZE;
         for (int sb = sb_begin + warp_in_group;
-             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+             row < N && sb < sb_end; sb += WARPS_PER_ROW, rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd)) {
             const int sb_base_k = sb * SUPER_BLOCK_SIZE;
             const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
                 row_weights + (size_t)sb * HQ41K_BLOCK_SIZE);
@@ -146,9 +157,14 @@ __global__ void gemv_hq41k_kernel(
         __syncthreads();
     }
 
+    // Chunks hold an even number of superblocks; an odd total leaves them swapped.
+    if (((K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE) & 1) rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd);
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
+    for (int offset = 16; offset > 0; offset >>= 1) {
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+        if constexpr (WARPS_PER_ROW == 1) acc_odd += __shfl_down_sync(0xFFFFFFFF, acc_odd, offset);
+    }
+    if constexpr (WARPS_PER_ROW == 1) acc += acc_odd;
     if (lane_id == 0) s_partial[row_group * WARPS_PER_ROW + warp_in_group] = acc;
     __syncthreads();
     if (warp_in_group == 0 && lane_id < WARPS_PER_ROW) {
@@ -197,6 +213,7 @@ __global__ void gemv_hq51k_kernel(
         ? weights + (size_t)row * total_sb * HQ51K_BLOCK_SIZE
         : weights;
     float acc = 0.0f;
+    float acc_odd = 0.0f;
 
     for (int chunk_base = 0; chunk_base < K; chunk_base += COMPACT_INPUT_CHUNK) {
         const int chunk_len = min(COMPACT_INPUT_CHUNK, K - chunk_base);
@@ -213,7 +230,7 @@ __global__ void gemv_hq51k_kernel(
         const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) /
                            SUPER_BLOCK_SIZE;
         for (int sb = sb_begin + warp_in_group;
-             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+             row < N && sb < sb_end; sb += WARPS_PER_ROW, rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd)) {
             const int sb_base_k = sb * SUPER_BLOCK_SIZE;
             const uint32_t* blk32 = reinterpret_cast<const uint32_t*>(
                 row_weights + (size_t)sb * HQ51K_BLOCK_SIZE);
@@ -270,9 +287,14 @@ __global__ void gemv_hq51k_kernel(
         __syncthreads();
     }
 
+    // Chunks hold an even number of superblocks; an odd total leaves them swapped.
+    if (((K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE) & 1) rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd);
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
+    for (int offset = 16; offset > 0; offset >>= 1) {
         acc += __shfl_down_sync(0xFFFFFFFF, acc, offset);
+        if constexpr (WARPS_PER_ROW == 1) acc_odd += __shfl_down_sync(0xFFFFFFFF, acc_odd, offset);
+    }
+    if constexpr (WARPS_PER_ROW == 1) acc += acc_odd;
     if (lane_id == 0) s_partial[row_group * WARPS_PER_ROW + warp_in_group] = acc;
     __syncthreads();
     if (warp_in_group == 0 && lane_id < WARPS_PER_ROW) {
@@ -316,6 +338,7 @@ __global__ void gemv_hq_symmetric_kernel(
     const uint8_t* row_weights = row < N
         ? weights + size_t(row) * total_sb * BLOCK_BYTES : weights;
     float acc = 0.0f;
+    float acc_odd = 0.0f;
 
     for (int chunk_base = 0; chunk_base < K; chunk_base += COMPACT_INPUT_CHUNK) {
         const int chunk_len = min(COMPACT_INPUT_CHUNK, K - chunk_base);
@@ -331,7 +354,7 @@ __global__ void gemv_hq_symmetric_kernel(
         const int sb_begin = chunk_base / SUPER_BLOCK_SIZE;
         const int sb_end = (chunk_base + chunk_len + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE;
         for (int sb = sb_begin + warp_in_group;
-             row < N && sb < sb_end; sb += WARPS_PER_ROW) {
+             row < N && sb < sb_end; sb += WARPS_PER_ROW, rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd)) {
             const int sb_base = sb * SUPER_BLOCK_SIZE;
             const uint8_t* block = row_weights + size_t(sb) * BLOCK_BYTES;
             const float step = decode_symmetric_step(block, lane);
@@ -366,9 +389,14 @@ __global__ void gemv_hq_symmetric_kernel(
         __syncthreads();
     }
 
+    // Chunks hold an even number of superblocks; an odd total leaves them swapped.
+    if (((K + SUPER_BLOCK_SIZE - 1) / SUPER_BLOCK_SIZE) & 1) rotate_single_warp<WARPS_PER_ROW>(acc, acc_odd);
     #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1)
+    for (int offset = 16; offset > 0; offset >>= 1) {
         acc += __shfl_down_sync(0xffffffff, acc, offset);
+        if constexpr (WARPS_PER_ROW == 1) acc_odd += __shfl_down_sync(0xffffffff, acc_odd, offset);
+    }
+    if constexpr (WARPS_PER_ROW == 1) acc += acc_odd;
     if (lane == 0) s_partial[row_group * WARPS_PER_ROW + warp_in_group] = acc;
     __syncthreads();
     if (warp_in_group == 0 && lane < WARPS_PER_ROW) {
