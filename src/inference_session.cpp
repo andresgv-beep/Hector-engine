@@ -26,10 +26,12 @@
 namespace helios {
 namespace {
 
-// Tanda del prefill de TEXTO. Trocear no es una limitación: cada tanda atiende
-// al KV ya acumulado, así que subirlo vuelve la atención cuadrática dentro del
-// chunk y encarece el prefill. Medido: 2600 tokens pasan de ~4 s a ~13 s con 4096.
-constexpr uint32_t kPrefillChunk = 512;
+// Tanda del prefill de TEXTO. Cada tanda descuantiza todos los pesos una vez,
+// así que tandas mayores amortizan ese coste fijo. Con la atención por GEMMs ya
+// no se vuelve cuadrática dentro de la tanda. Medido a 15k tokens: 1024 frente
+// a 512 baja el prefill un 15 % (12B) y un 20 % (E4B); 2048 apenas añade y
+// empeora Qwen. Las capas deslizantes de Gemma reservan ventana + tanda.
+constexpr uint32_t kPrefillChunk = 1024;
 // Techo del turno CON IMAGEN, que el adaptador prefillea de una vez y no puede
 // trocear. Es independiente del anterior: los dos caminos están separados en
 // run_turn. Solo comparten los buffers, dimensionados al mayor de los dos.
