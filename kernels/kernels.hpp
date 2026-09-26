@@ -527,6 +527,13 @@ bool launch_attention_prefill_gemm_fp16(
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
     int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots);
 
+// Fused causal prefill (FlashAttention-2 style, tensor cores) for head_dim 128
+// full-attention layers. Returns false for shapes it does not handle.
+bool launch_attention_prefill_flash_fp16(
+    const half* q, const half* k_cache, const half* v_cache, half* output,
+    int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
+    int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots);
+
 size_t attention_flash_decode_workspace_bytes(int num_heads, int head_dim, int splits);
 void launch_attention_flash_decode_dp(
     const half* q, const half* k_cache, const half* v_cache, half* output,

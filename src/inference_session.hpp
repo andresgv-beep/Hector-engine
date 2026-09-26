@@ -51,6 +51,7 @@ public:
         bool use_flash_decode = true;      // decode partido en la secuencia; false para A/B
         uint32_t flash_decode_min_seq = 1024; // por debajo el kernel de referencia es más rápido
         bool use_gemm_prefill = true;      // atención de prefill con GEMMs de cuBLAS; false para A/B
+        bool use_flash_prefill = true;     // atención de prefill fusionada (HD128 sin ventana); false para A/B
     };
 
     struct Info {

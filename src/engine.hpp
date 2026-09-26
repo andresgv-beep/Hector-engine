@@ -71,6 +71,7 @@ struct EngineConfig {
     bool use_flash_decode = false;       // Opt-in sequence-split decode for every geometry
     uint32_t flash_decode_min_seq = 0;   // shorter decode turns keep the reference kernels
     bool use_gemm_prefill = false;       // cached prefill attention through cuBLAS GEMMs
+    bool use_flash_prefill = false;      // fused HD128 prefill attention, before the GEMM path
     
     // Default stream (nullptr = default CUDA stream)
     cudaStream_t stream = nullptr;
