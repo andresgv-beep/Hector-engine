@@ -265,16 +265,17 @@ void hilo_lector() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string hnf;
+    std::string hnf, multimodal;
     uint32_t ctx = 4096;
     float temp = 0.7f;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--model" && i + 1 < argc) hnf = argv[++i];
+        else if (a == "--multimodal" && i + 1 < argc) multimodal = argv[++i];
         else if (a == "--ctx" && i + 1 < argc) ctx = (uint32_t)atoi(argv[++i]);
         else if (a == "--temp" && i + 1 < argc) temp = (float)atof(argv[++i]);
         else {
-            std::fprintf(stderr, "uso: %s --model <hnf> [--ctx N] [--temp T]\n",
+            std::fprintf(stderr, "uso: %s --model <hnf> [--multimodal <hnf>] [--ctx N] [--temp T]\n",
                          argv[0]);
             return 2;
         }
@@ -292,6 +293,7 @@ int main(int argc, char** argv) {
 
     Model::Config cfg;
     cfg.hnf_path = hnf;
+    cfg.multimodal_hnf_path = multimodal;
     cfg.max_seq_len = ctx;
     cfg.temperature = temp;
     std::string err;

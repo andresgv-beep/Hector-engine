@@ -70,6 +70,16 @@ public:
     virtual const char* id() const = 0;
     virtual MultimodalAdapterLimits limits() const = 0;
 
+    // Token that marks where an attachment of this kind goes in an already
+    // formatted prompt, or -1 when the kind is unsupported. Sessions count
+    // these markers instead of reading one architecture's vision config.
+    virtual int32_t marker_token(AttachmentKind kind) const = 0;
+
+    // True when the tokens around a marker are plain causal text, so a session
+    // may prefill them through the normal text path and hand the adapter only
+    // the marker. False keeps the whole turn inside the adapter.
+    virtual bool prefix_is_text() const { return false; }
+
     // Executes the modality encoder and the decoder prefill at
     // cache.cache_position. The owner advances its logical KV position by
     // result.sequence_tokens only after this call succeeds.
@@ -86,6 +96,18 @@ std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
     const std::string& adapter_id,
     Engine& engine,
     HnfLoader& loader,
+    GraphBuilder& graph,
+    const ArchDescriptor& text_architecture,
+    uint32_t max_prefill_tokens,
+    std::string* error = nullptr);
+
+// Gemma 4 12B «unified»: image and audio embedders from a modality-only HNF
+// (`modality_loader`, blocks 0x1/0x2) feeding the text model of `text_loader`.
+// Loads whichever of the two blocks the HNF declares and keeps them resident.
+std::unique_ptr<MultimodalAdapter> create_gemma4_unified_adapter(
+    Engine& engine,
+    HnfLoader& text_loader,
+    HnfLoader& modality_loader,
     GraphBuilder& graph,
     const ArchDescriptor& text_architecture,
     uint32_t max_prefill_tokens,

@@ -28,6 +28,11 @@ struct Gemma4UnifiedVisionSpec {
     uint32_t max_soft_tokens = 0;    // 280
     uint32_t hidden = 0;             // decoder hidden size
     float rms_norm_eps = 1e-6f;
+    // <|image|> in the prompt becomes <|image> + IMAGE * N + <image|>.
+    int32_t image_token_id = -1;
+    int32_t boi_token_id = -1;
+    int32_t eoi_token_id = -1;
+    int32_t pad_token_id = -1;
 };
 
 struct Gemma4UnifiedAudioSpec {
@@ -36,6 +41,11 @@ struct Gemma4UnifiedAudioSpec {
     uint32_t max_tokens = 0;         // 750 = 30 s
     uint32_t hidden = 0;
     float rms_norm_eps = 1e-6f;
+    // <|audio|> in the prompt becomes <|audio> + AUDIO * T + <audio|>.
+    int32_t audio_token_id = -1;
+    int32_t boa_token_id = -1;
+    int32_t eoa_token_id = -1;
+    int32_t pad_token_id = -1;
 };
 
 // Read and validate the JSON hints of a modality-only HNF. False, with a

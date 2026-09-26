@@ -72,6 +72,7 @@ set(ENGINE_SOURCES
     src/gemma4_vision_preprocess.cpp
     src/gemma4_vision_runner.cpp
     src/gemma4_unified_embedder.cpp
+    src/gemma4_unified_adapter.cpp
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp

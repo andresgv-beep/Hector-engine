@@ -43,6 +43,8 @@ class Model {
 public:
     struct Config {
         std::string hnf_path;
+        // Optional modality-only HNF (Gemma 4 12B unified image/audio embedders).
+        std::string multimodal_hnf_path;
         uint32_t max_seq_len = 4096;
         float temperature = 0.7f;   // base; cada turno puede cambiarla
         bool use_cuda_graphs = true; // replay frente a ejecución normal para A/B

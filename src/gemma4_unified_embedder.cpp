@@ -35,6 +35,11 @@ uint32_t positive(const ModelConfig& config, const char* key) {
     return value > 0 && value <= int64_t(UINT32_MAX) ? uint32_t(value) : 0u;
 }
 
+int32_t token(const ModelConfig& config, const char* key) {
+    const int64_t value = config.get<int64_t>(key, -1);
+    return value >= 0 && value <= INT32_MAX ? int32_t(value) : -1;
+}
+
 template <typename T>
 void release(T*& pointer) {
     if (pointer) cudaFree(pointer);
@@ -60,6 +65,14 @@ bool gemma4_unified_vision_spec(const HnfLoader& loader,
     spec.max_soft_tokens = positive(config, "num_soft_tokens");
     spec.hidden = positive(config, "text_hidden_size");
     spec.rms_norm_eps = config.get<float>("rms_norm_eps", 1e-6f);
+    spec.image_token_id = token(config, "image_token_id");
+    spec.boi_token_id = token(config, "boi_token_id");
+    spec.eoi_token_id = token(config, "eoi_token_id");
+    spec.pad_token_id = token(config, "pad_token_id");
+    if (spec.image_token_id < 0 || spec.boi_token_id < 0 || spec.eoi_token_id < 0 ||
+        spec.pad_token_id < 0) {
+        return fail(error, "Gemma 4 unified vision hints lack the image token ids");
+    }
     if (!spec.model_patch_size || !spec.posemb_size || !spec.max_soft_tokens ||
         !spec.hidden || spec.patch_values !=
             spec.model_patch_size * spec.model_patch_size * 3 ||
@@ -88,6 +101,14 @@ bool gemma4_unified_audio_spec(const HnfLoader& loader,
     spec.hidden = positive(config, "text_hidden_size");
     spec.rms_norm_eps = config.get<float>("rms_norm_eps", 1e-6f);
     const uint32_t ms = positive(config, "ms_per_token");
+    spec.audio_token_id = token(config, "audio_token_id");
+    spec.boa_token_id = token(config, "boa_token_id");
+    spec.eoa_token_id = token(config, "eoa_token_id");
+    spec.pad_token_id = token(config, "pad_token_id");
+    if (spec.audio_token_id < 0 || spec.boa_token_id < 0 || spec.eoa_token_id < 0 ||
+        spec.pad_token_id < 0) {
+        return fail(error, "Gemma 4 unified audio hints lack the audio token ids");
+    }
     if (!spec.samples_per_token || !spec.sampling_rate || !spec.max_tokens ||
         !spec.hidden || !ms ||
         uint64_t(spec.sampling_rate) * ms / 1000 != spec.samples_per_token ||

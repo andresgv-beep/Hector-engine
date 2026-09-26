@@ -94,6 +94,9 @@ struct Model::Impl {
     bool use_cuda_graphs = true;
     std::unique_ptr<Engine> engine;
     HnfLoader loader;
+    // Before `multimodal`: the unified adapter reads this loader's hints and
+    // must be destroyed first.
+    HnfLoader modality_loader;
     const HTFTokenizer* tokenizer = nullptr;
     ModelConfig model_config;
     GraphBuilder gb;
@@ -483,6 +486,9 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         s.arch = s.gb.detect_architecture(*s.engine, "text", s.model_config);
         // Gemma de solo texto nunca prefillea más de kPrefillChunk.
         // Conservar el techo multimodal para los demás caminos.
+        const bool multimodal_file = !config.multimodal_hnf_path.empty();
+        // The unified adapter only prefills the attachment itself (<= 752
+        // tokens); the surrounding text goes through the normal chunks.
         const uint32_t scratch_tokens = s.is_gemma4 && !s.loader.has_gemma4_vision_config()
                                             ? kPrefillChunk : kScratchTokens;
         s.engine->tensors().allocate_and_register(
@@ -513,6 +519,24 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
                 kMultimodalPrefill, &adapter_error);
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
+                return nullptr;
+            }
+        }
+        if (multimodal_file) {
+            if (s.multimodal) {
+                *error = "el HNF de texto ya trae visión; sobra --multimodal";
+                return nullptr;
+            }
+            if (!s.modality_loader.open(config.multimodal_hnf_path)) {
+                *error = "no pude abrir el HNF multimodal: " + s.modality_loader.last_error();
+                return nullptr;
+            }
+            std::string adapter_error;
+            s.multimodal = create_gemma4_unified_adapter(
+                *s.engine, s.loader, s.modality_loader, s.gb, s.arch,
+                scratch_tokens, &adapter_error);
+            if (!s.multimodal) {
+                *error = "no pude crear el adaptador multimodal: " + adapter_error;
                 return nullptr;
             }
         }
@@ -712,12 +736,12 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     // y aquí ya no hay mensajes que anotar. Se comprueba en vez de suponerlo: sin
     // marcador el prefill visual falla en silencio aunque los pixeles esten bien.
     if (gen.preformatted && !attachments.empty()) {
-        if (!s.loader.has_gemma4_vision_config()) {
+        const int32_t marker = s.multimodal->marker_token(AttachmentKind::ImageRgb8);
+        if (marker < 0) {
             *error_code = "unsupported_attachment";
             *error = "el modelo no declara configuracion visual";
             return false;
         }
-        const int32_t marker = s.loader.gemma4_vision_config().image_token_id;
         const size_t marcadores = static_cast<size_t>(
             std::count(ids.begin(), ids.end(), marker));
         if (marcadores != attachments.size()) {
@@ -798,8 +822,32 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         if (!prefill_cancelled && !attachments.empty()) {
             // El adaptador expande el placeholder y prefillea; la sesión solo
             // avanza su posición lógica si la llamada tuvo éxito.
+            //
+            // Si lo que rodea al marcador es texto causal (Gemma 4 12B), solo
+            // el marcador pasa por el adaptador: el texto de antes y el de
+            // después va por el prefill normal en trozos. Así el adaptador
+            // nunca ve más que el adjunto y no hace falta scratch de 6k.
+            std::vector<int32_t> head, after;
+            std::vector<int32_t> marked = ids;
+            if (s.multimodal->prefix_is_text()) {
+                const int32_t marker = s.multimodal->marker_token(AttachmentKind::ImageRgb8);
+                const auto at = std::find(ids.begin(), ids.end(), marker);
+                if (at == ids.end()) {
+                    *error_code = "image_marker_mismatch";
+                    *error = "el turno trae un adjunto pero ningún marcador de imagen";
+                    return false;
+                }
+                head.assign(ids.begin(), at);
+                marked.assign(1, marker);
+                after.assign(at + 1, ids.end());
+            }
+            uint32_t head_tokens = 0;
+            if (!head.empty() &&
+                !s.forward_batch(head, stream, cancel_flag, head_tokens, on_prefill_progress)) {
+                prefill_cancelled = true;
+            }
             MultimodalTurnInput turn;
-            turn.formatted_token_ids = ids;
+            turn.formatted_token_ids = marked;
             for (const auto& a : attachments) {
                 turn.attachments.push_back({AttachmentKind::ImageRgb8,
                                             a.data, a.byte_size, "image/rgb8",
@@ -810,10 +858,12 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             if (!validate_multimodal_turn(turn, s.multimodal->limits(), &verr)) {
                 *error_code = "invalid_attachment";
                 *error = verr;
+                if (!head.empty()) s.rewind(base);
                 return false;
             }
             MultimodalPrefillResult pr;
-            if (!s.multimodal->prefill(turn, {s.kv_prefix, antes,
+            if (!prefill_cancelled &&
+                !s.multimodal->prefill(turn, {s.kv_prefix, s.position(),
                                               s.kv_config.max_seq_len},
                                        pr, &verr)) {
                 *error_code = "attachment_prefill_failed";
@@ -822,15 +872,25 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 stats->cache_position = s.position();
                 return false;
             }
-            s.advance(pr.sequence_tokens);
-            // Los soft tokens de la imagen no son del tokenizador: a partir de
-            // aquí no se puede afirmar qué hay en el KV, así que no se reaprovecha.
-            s.untrack();
-            auto* logits = s.gb.get_logits(*s.engine);
-            next = s.sampler.sample(static_cast<const half*>(logits->ptr),
-                                    s.model_config.vocab_size(),
-                                    s.sample_config, stream);
-            stats->prefill_tokens = pr.sequence_tokens;
+            if (!prefill_cancelled) {
+                s.advance(pr.sequence_tokens);
+                // Los soft tokens de la imagen no son del tokenizador: a partir de
+                // aquí no se puede afirmar qué hay en el KV, así que no se reaprovecha.
+                s.untrack();
+                uint32_t after_tokens = 0;
+                if (!after.empty()) {
+                    auto result = s.forward_batch(after, stream, cancel_flag,
+                                                  after_tokens, on_prefill_progress);
+                    prefill_cancelled = !result.has_value();
+                    if (result) next = *result;
+                } else {
+                    auto* logits = s.gb.get_logits(*s.engine);
+                    next = s.sampler.sample(static_cast<const half*>(logits->ptr),
+                                            s.model_config.vocab_size(),
+                                            s.sample_config, stream);
+                }
+                stats->prefill_tokens = head_tokens + pr.sequence_tokens + after_tokens;
+            }
         } else if (!prefill_cancelled) {
             auto result = s.forward_batch(ids, stream, cancel_flag,
                                          stats->prefill_tokens, on_prefill_progress);

@@ -64,6 +64,10 @@ public:
 
     const char* id() const override { return "helios.gemma4.vision.v1"; }
 
+    int32_t marker_token(AttachmentKind kind) const override {
+        return kind == AttachmentKind::ImageRgb8 && loader_.has_gemma4_vision_config()
+            ? loader_.gemma4_vision_config().image_token_id : -1;
+    }
     MultimodalAdapterLimits limits() const override {
         return {
             attachment_kind_bit(AttachmentKind::ImageRgb8),
