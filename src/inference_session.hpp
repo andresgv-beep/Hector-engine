@@ -109,14 +109,17 @@ public:
         std::vector<std::string> stop_tokens;
     };
 
-    // Adjunto RGB8 prestado: el motor recibe píxeles ya decodificados. PNG y
-    // JPEG no cruzan esta frontera — los decodifica quien tenga librería de
-    // imágenes, que no es Héctor.
+    // Adjunto prestado: el motor recibe píxeles RGB8 ya decodificados o audio
+    // PCM float32. PNG, JPEG o WebM no cruzan esta frontera — los decodifica
+    // quien tenga librería para ello, que no es Héctor.
     struct ImageAttachment {
         const void* data = nullptr;
         size_t byte_size = 0;
         uint32_t width = 0, height = 0;
         size_t row_stride_bytes = 0;
+        // Audio: mono PCM float32 a sample_rate. Los campos de imagen quedan a 0.
+        bool audio = false;
+        uint32_t sample_rate = 0, channels = 0;
     };
 
     enum class FinishReason { Eos, MaxTokens, Stop, Cancelled, ContextFull };

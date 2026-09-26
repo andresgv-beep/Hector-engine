@@ -238,7 +238,7 @@ struct InferenceSession::Impl {
     // está en KV, así que la plantilla completa (con su BOS) solo vale para el
     // primer prefill de la sesión.
     std::vector<int32_t> encode(const std::vector<ChatMessage>& messages,
-                                bool con_adjunto,
+                                const char* marcador,
                                 std::string* error_code, std::string* error);
 
     std::optional<int32_t> forward_batch(const std::vector<int32_t>& ids,
@@ -262,15 +262,15 @@ struct InferenceSession::Impl {
 
 std::vector<int32_t> InferenceSession::Impl::encode(
         const std::vector<ChatMessage>& messages,
-        bool con_adjunto,
+        const char* marcador,
         std::string* error_code, std::string* error) {
     // El adaptador busca su marcador dentro del turno ya formateado para
     // expandirlo a los soft tokens de la imagen. Sin él, el prefill visual
     // falla aunque los píxeles estén perfectos.
     std::vector<ChatMessage> msgs = messages;
-    if (con_adjunto) {
+    if (marcador) {
         for (auto it = msgs.rbegin(); it != msgs.rend(); ++it) {
-            if (it->role == "user") { it->content = "<|image|>\n" + it->content; break; }
+            if (it->role == "user") { it->content = marcador + ("\n" + it->content); break; }
         }
     }
     const std::vector<ChatMessage>& messages_ref = msgs;
@@ -719,9 +719,20 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         *error = "prompt preformateado requiere exactamente un mensaje";
         return false;
     }
+    // Un turno lleva adjuntos de una sola clase: imagen o audio.
+    const bool audio = !attachments.empty() && attachments.front().audio;
+    for (const auto& a : attachments) {
+        if (a.audio != audio) {
+            *error_code = "mixed_attachments";
+            *error = "un turno no puede mezclar imagen y audio";
+            return false;
+        }
+    }
+    const AttachmentKind kind = audio ? AttachmentKind::AudioPcmF32 : AttachmentKind::ImageRgb8;
     std::vector<int32_t> ids = gen.preformatted
         ? s.tokenizer->encode(messages[0].content, false, false)
-        : s.encode(messages, !attachments.empty(), error_code, error);
+        : s.encode(messages, attachments.empty() ? nullptr : audio ? "<|audio|>" : "<|image|>",
+                   error_code, error);
     if (ids.empty()) {
         if (error_code->empty()) {
             *error_code = "empty_turn";
@@ -731,17 +742,17 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     }
     if (!attachments.empty() && !s.multimodal) {
         *error_code = "unsupported_attachment";
-        *error = "este modelo no declara adaptador visual";
+        *error = "este modelo no declara adaptador multimodal";
         return false;
     }
     // Con prompt preformateado el marcador lo coloca quien renderiza la plantilla,
     // y aquí ya no hay mensajes que anotar. Se comprueba en vez de suponerlo: sin
     // marcador el prefill visual falla en silencio aunque los pixeles esten bien.
     if (gen.preformatted && !attachments.empty()) {
-        const int32_t marker = s.multimodal->marker_token(AttachmentKind::ImageRgb8);
+        const int32_t marker = s.multimodal->marker_token(kind);
         if (marker < 0) {
             *error_code = "unsupported_attachment";
-            *error = "el modelo no declara configuracion visual";
+            *error = audio ? "el modelo no admite audio" : "el modelo no declara configuracion visual";
             return false;
         }
         const size_t marcadores = static_cast<size_t>(
@@ -749,7 +760,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         if (marcadores != attachments.size()) {
             *error_code = "image_marker_mismatch";
             *error = "el prompt preformateado trae " + std::to_string(marcadores) +
-                     " marcadores de imagen y el turno " +
+                     (audio ? " marcadores de audio y el turno " : " marcadores de imagen y el turno ") +
                      std::to_string(attachments.size()) + " adjuntos";
             return false;
         }
@@ -832,11 +843,11 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             std::vector<int32_t> head, after;
             std::vector<int32_t> marked = ids;
             if (s.multimodal->prefix_is_text()) {
-                const int32_t marker = s.multimodal->marker_token(AttachmentKind::ImageRgb8);
+                const int32_t marker = s.multimodal->marker_token(kind);
                 const auto at = std::find(ids.begin(), ids.end(), marker);
                 if (at == ids.end()) {
                     *error_code = "image_marker_mismatch";
-                    *error = "el turno trae un adjunto pero ningún marcador de imagen";
+                    *error = "el turno trae un adjunto pero ningún marcador para él";
                     return false;
                 }
                 head.assign(ids.begin(), at);
@@ -851,10 +862,10 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             MultimodalTurnInput turn;
             turn.formatted_token_ids = marked;
             for (const auto& a : attachments) {
-                turn.attachments.push_back({AttachmentKind::ImageRgb8,
-                                            a.data, a.byte_size, "image/rgb8",
-                                            a.width, a.height,
-                                            a.row_stride_bytes, 0, 0});
+                turn.attachments.push_back({kind, a.data, a.byte_size,
+                                            a.audio ? "audio/pcm-f32" : "image/rgb8",
+                                            a.width, a.height, a.row_stride_bytes,
+                                            a.sample_rate, a.channels});
             }
             std::string verr;
             if (!validate_multimodal_turn(turn, s.multimodal->limits(), &verr)) {

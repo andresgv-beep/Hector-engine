@@ -131,9 +131,11 @@ void anunciar_pausa(const std::string& sesion) {
          json_escape(sesion) + "\",\"reason\":\"switch\"}");
 }
 struct Adjunto {
-    std::vector<unsigned char> pixels;
+    std::vector<unsigned char> pixels;   // RGB8, o PCM float32 si audio
     uint32_t width = 0, height = 0;
     size_t stride = 0;
+    bool audio = false;
+    uint32_t sample_rate = 0, channels = 0;
 };
 std::map<std::string, Adjunto> g_adjuntos;   // protegido por g_cola_mtx
 
@@ -177,10 +179,15 @@ void hilo_lector() {
             const std::string kind = p.doc.get("kind")
                                    ? p.doc.get("kind")->str() : "";
             const long long w = num("width"), h = num("height"),
-                            st = num("stride"), by = num("bytes");
+                            st = num("stride"), by = num("bytes"),
+                            rate = num("sample_rate"), ch = num("channels");
             constexpr long long kTope = 300LL * 1024 * 1024;
-            const bool geo_ok = kind == "rgb8" && w > 0 && h > 0 &&
-                                st >= w * 3 && by == st * h && by <= kTope;
+            // rgb8: píxeles con su geometría. pcm_f32: audio mono en float32;
+            // el adaptador comprueba que la frecuencia sea la del modelo.
+            const bool audio = kind == "pcm_f32";
+            const bool geo_ok = audio
+                ? rate > 0 && ch == 1 && by > 0 && by % 4 == 0 && by <= kTope
+                : kind == "rgb8" && w > 0 && h > 0 && st >= w * 3 && by == st * h && by <= kTope;
             std::vector<unsigned char> buf;
             if (by > 0 && by <= kTope) {
                 buf.resize((size_t)by);
@@ -189,14 +196,16 @@ void hilo_lector() {
             }
             if (!geo_ok || (long long)buf.size() != by) {
                 emit_error(p.id, "invalid_attachment",
-                           "geometría RGB8 incoherente o payload incompleto",
+                           audio ? "audio PCM float32 mono incoherente o payload incompleto"
+                                 : "geometría RGB8 incoherente o payload incompleto",
                            0, 0, 0);
                 continue;
             }
             {
                 std::lock_guard<std::mutex> l(g_cola_mtx);
                 g_adjuntos[p.id] = Adjunto{std::move(buf), (uint32_t)w,
-                                           (uint32_t)h, (size_t)st};
+                                           (uint32_t)h, (size_t)st, audio,
+                                           (uint32_t)rate, (uint32_t)ch};
             }
             emit_result(p.id, true, 0, 0, 0);
             continue;
@@ -454,7 +463,8 @@ int main(int argc, char** argv) {
                 adjuntos.push_back({it->second.pixels.data(),
                                     it->second.pixels.size(),
                                     it->second.width, it->second.height,
-                                    it->second.stride});
+                                    it->second.stride, it->second.audio,
+                                    it->second.sample_rate, it->second.channels});
                 ids_usados.push_back(v.str());
             }
         }
