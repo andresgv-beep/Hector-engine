@@ -980,10 +980,25 @@ void register_attention_kernels(Engine& engine) {
             uint32_t max_seq_len = cmd.get<uint32_t>("max_seq_len", 2048);
             uint32_t window_size = cmd.get<uint32_t>("window_size", 0);
             uint32_t cache_slots = cmd.get<uint32_t>("cache_slots", 0);
+            const uint32_t bidir_begin = cmd.get<uint32_t>("bidir_begin", 0);
+            const uint32_t bidir_end = cmd.get<uint32_t>("bidir_end", 0);
             if (head_dim == 0 || head_dim > 512 || num_kv_heads == 0 ||
                 num_heads == 0 || num_heads % num_kv_heads != 0) {
                 throw std::runtime_error(
                     "ATTENTION_PREFILL_CACHED: unsupported head geometry");
+            }
+            // Only the GEMM path knows the image block; falling back to a
+            // causal kernel would silently change what the model sees.
+            if (bidir_end > bidir_begin) {
+                if (!launch_attention_prefill_gemm_fp16(
+                        as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache), as_fp16(output),
+                        (int)seq_new, (int)past_len, (int)num_heads, (int)num_kv_heads, (int)head_dim,
+                        (int)max_seq_len, scale, (int)window_size, ctx.stream, (int)cache_slots,
+                        (int)bidir_begin, (int)bidir_end)) {
+                    throw std::runtime_error(
+                        "ATTENTION_PREFILL_CACHED: bidirectional image block needs the GEMM prefill");
+                }
+                return;
             }
 
             if (engine.config().use_flash_prefill &&

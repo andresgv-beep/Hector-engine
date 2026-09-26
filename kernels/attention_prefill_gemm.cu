@@ -81,7 +81,7 @@ __device__ __forceinline__ float block_reduce(float v, float* scratch, bool is_m
 __global__ __launch_bounds__(PG_THREADS) void prefill_block_softmax_kernel(
     const float* __restrict__ scores, half* __restrict__ probs, float* __restrict__ block_max,
     float* __restrict__ block_sum, int seq_new, int past_len, int key_base, int nkeys, int ld,
-    int kv_end, int cache_slots, int window) {
+    int kv_end, int cache_slots, int window, int bidir_begin, int bidir_end) {
     const int s = blockIdx.x, h = blockIdx.y;
     const size_t row = (size_t(h) * seq_new + s);
     const float* in = scores + row * ld;
@@ -93,7 +93,14 @@ __global__ __launch_bounds__(PG_THREADS) void prefill_block_softmax_kernel(
         const int slot = key_base + c;
         return slot + ((kv_end - 1 - slot) / cache_slots) * cache_slots;
     };
-    auto valid = [&](int p) { return p <= qpos && (window <= 0 || p > qpos - window); };
+    // Gemma 4 12B sliding layers: the tokens of one image see each other in
+    // both directions (Gemma 3's blockwise overlay). Global layers pass an
+    // empty block and stay causal.
+    const bool q_in_block = qpos >= bidir_begin && qpos < bidir_end;
+    auto valid = [&](int p) {
+        const bool visible = p <= qpos || (q_in_block && p >= bidir_begin && p < bidir_end);
+        return visible && (window <= 0 || p > qpos - window);
+    };
 
     float local = -INFINITY;
     for (int c = threadIdx.x; c < nkeys; c += PG_THREADS)
@@ -153,8 +160,12 @@ __global__ __launch_bounds__(PG_THREADS) void prefill_finalize_kernel(
 bool launch_attention_prefill_gemm_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
-    int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots) {
+    int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots,
+    int bidir_begin, int bidir_end) {
     if (cache_slots <= 0) cache_slots = max_seq_len;
+    // The block may only reach keys already written by this chunk.
+    if (bidir_end > bidir_begin &&
+        (bidir_begin < past_len || bidir_end > past_len + seq_new)) return false;
     const int kv_end = past_len + seq_new;
     const int nkeys_total = std::min(cache_slots, kv_end);
     const int group = num_heads / num_kv_heads;
@@ -188,7 +199,7 @@ bool launch_attention_prefill_gemm_fp16(
         }
         prefill_block_softmax_kernel<<<grid, PG_THREADS, 0, stream>>>(
             g_ws.scores, g_ws.probs, block_max, block_sum, seq_new, past_len, key_base, nk, block,
-            kv_end, cache_slots, window_size);
+            kv_end, cache_slots, window_size, bidir_begin, bidir_end);
         for (int j = 0; j < group; ++j) {
             // O_b[h] (head_dim x queries, col-major) = V_g P_h.
             if (cublasGemmStridedBatchedEx(handle, CUBLAS_OP_N, CUBLAS_OP_N, head_dim, seq_new, nk, &one,

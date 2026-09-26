@@ -727,10 +727,14 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     uint32_t layer_idx,
     uint32_t batch_size,
     uint32_t seq_len,
-    const KVCacheParams& cache
+    const KVCacheParams& cache,
+    Gemma4BidirectionalBlock bidirectional
 ) {
     if (!scratch_allocated_) {
         throw std::runtime_error("GraphBuilder: call allocate_gemma4_scratch() first");
+    }
+    if (!bidirectional.empty() && (seq_len == 1 || bidirectional.end > seq_len)) {
+        throw std::invalid_argument("GraphBuilder: image block outside the prefill chunk");
     }
     if (layer_idx >= gemma.layers.size() || batch_size == 0 || seq_len == 0 ||
         batch_size > alloc_batch_ || seq_len > alloc_seq_ ||
@@ -841,6 +845,10 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
             .set("max_seq_len", cache.max_cache_len)
             .set("cache_slots", slots)
             .set("window_size", window);
+        if (window > 0 && !bidirectional.empty()) {
+            attention.set("bidir_begin", cache.cache_position + bidirectional.begin)
+                     .set("bidir_end", cache.cache_position + bidirectional.end);
+        }
     } else {
         cb.add_attention_cached(attn_out, q, k_cache, v_cache,
                                 H, KVH, HD, cache.cache_position + 1,
@@ -930,7 +938,8 @@ CommandBuffer GraphBuilder::build_gemma4_multimodal_forward_cached(
     const Gemma4MultimodalInputNames& names,
     uint32_t batch_size,
     uint32_t seq_len,
-    const KVCacheParams& cache
+    const KVCacheParams& cache,
+    Gemma4BidirectionalBlock bidirectional
 ) {
     if (config.arch() != "gemma4" || gemma.layers.size() != arch.num_layers ||
         arch.num_layers != config.num_hidden_layers()) {
@@ -942,7 +951,8 @@ CommandBuffer GraphBuilder::build_gemma4_multimodal_forward_cached(
     cb.reserve(cb.size() + arch.num_layers * 30 + 4);
     for (uint32_t layer = 0; layer < arch.num_layers; ++layer) {
         cb.append(build_gemma4_layer_cached(
-            engine, config, gemma, arch, layer, batch_size, seq_len, cache));
+            engine, config, gemma, arch, layer, batch_size, seq_len, cache,
+            bidirectional));
     }
 
     cb.add_rmsnorm(S("normed"), S("hidden"),

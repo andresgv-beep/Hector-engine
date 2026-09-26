@@ -72,6 +72,15 @@ struct KVCacheParams {
 // External tensors required only by Gemma 4 multimodal prefill. Token tensors
 // are INT32 [batch, sequence], image embeddings are FP16 [soft_tokens, hidden]
 // and image_positions is INT32 [soft_tokens].
+// Chunk-relative [begin, end) of one image's soft tokens. Gemma 4 12B lets
+// them attend to each other in both directions on sliding layers only (global
+// layers stay causal, unlike Gemma 3). Empty: plain causal prefill.
+struct Gemma4BidirectionalBlock {
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    bool empty() const { return end <= begin; }
+};
+
 struct Gemma4MultimodalInputNames {
     std::string embedding_tokens;
     std::string ple_identity_tokens;
@@ -312,7 +321,8 @@ public:
         uint32_t layer_idx,
         uint32_t batch_size,
         uint32_t seq_len,
-        const KVCacheParams& cache
+        const KVCacheParams& cache,
+        Gemma4BidirectionalBlock bidirectional = {}
     );
 
     // Complete cached text forward for Gemma 4: scaled embedding + PLE,
@@ -336,7 +346,8 @@ public:
         const Gemma4MultimodalInputNames& names,
         uint32_t batch_size,
         uint32_t seq_len,
-        const KVCacheParams& cache
+        const KVCacheParams& cache,
+        Gemma4BidirectionalBlock bidirectional = {}
     );
 
     // Attention-independent tail shared by normal and shared-KV layers. This

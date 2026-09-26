@@ -92,6 +92,75 @@ int main(int argc, char** argv) {
         std::printf("\n");
         cudaFree(dq); cudaFree(dk); cudaFree(dv); cudaFree(dr); cudaFree(dg);
     }
+    // Gemma 4 12B image blocks: queries inside [begin, end) also see later keys
+    // of the block, windowed like any other key. FP64 reference only: the
+    // reference kernel has no block.
+    struct Block { const char* name; int heads, kvh, hd, window, slots, past, seq, begin, end; };
+    const Block blocks[] = {
+        {"gemma12b-local", 16, 8, 256, 1024, 1536, 0, 300, 5, 285},
+        {"gemma12b-local", 16, 8, 256, 1024, 1536, 1400, 400, 1410, 1690},
+        {"window-cuts-img", 16, 8, 256, 64, 1536, 200, 300, 220, 500},
+        {"gemma12b-global", 16, 1, 512, 0, 16896, 100, 300, 110, 390},
+    };
+    for (const auto& c : blocks) {
+        const size_t qn = size_t(c.seq) * c.heads * c.hd, kn = size_t(c.slots) * c.kvh * c.hd;
+        std::vector<half> q(qn), k(kn), v(kn), o(qn);
+        uint32_t seed = 11 + c.hd + c.past;
+        for (auto& x : q) x = __float2half(rnd(seed) * 0.5f);
+        for (auto& x : k) x = __float2half(rnd(seed) * 2.f);
+        for (auto& x : v) x = __float2half(rnd(seed));
+        half *dq, *dk, *dv, *dg;
+        ck(cudaMalloc(&dq, qn * 2)); ck(cudaMalloc(&dk, kn * 2)); ck(cudaMalloc(&dv, kn * 2)); ck(cudaMalloc(&dg, qn * 2));
+        ck(cudaMemcpy(dq, q.data(), qn * 2, cudaMemcpyHostToDevice));
+        ck(cudaMemcpy(dk, k.data(), kn * 2, cudaMemcpyHostToDevice));
+        ck(cudaMemcpy(dv, v.data(), kn * 2, cudaMemcpyHostToDevice));
+        const float scale = 1.f / std::sqrt(float(c.hd));
+        if (!launch_attention_prefill_gemm_fp16(dq, dk, dv, dg, c.seq, c.past, c.heads, c.kvh, c.hd, c.slots,
+                                                scale, c.window, st, c.slots, c.begin, c.end))
+            throw std::runtime_error("bidirectional gemm prefill launch failed");
+        ck(cudaStreamSynchronize(st));
+        ck(cudaMemcpy(o.data(), dg, qn * 2, cudaMemcpyDeviceToHost));
+        const int last = c.past + c.seq - 1;
+        auto visible = [&](int pos, int p) {
+            const bool in = pos >= c.begin && pos < c.end && p >= c.begin && p < c.end;
+            return (p <= pos || in) && (c.window <= 0 || p > pos - c.window);
+        };
+        double err = 0, reach = 0;
+        std::vector<double> sc(last + 1);
+        // Before, first, middle and last token of the image, and after it.
+        for (int pos : {c.begin - 1, c.begin, (c.begin + c.end) / 2, c.end - 1, c.end, last}) {
+            if (pos < c.past || pos > last) continue;
+            for (int h = 0; h < c.heads; h += std::max(1, c.heads / 5)) {
+                const int qi = pos - c.past, kh = h / (c.heads / c.kvh);
+                double mx = -1e300;
+                for (int p = 0; p <= last; ++p) {
+                    if (!visible(pos, p)) continue;
+                    double d = 0;
+                    const size_t kb = (size_t(p % c.slots) * c.kvh + kh) * c.hd;
+                    for (int j = 0; j < c.hd; ++j) d += double(__half2float(q[(size_t(qi) * c.heads + h) * c.hd + j])) * __half2float(k[kb + j]);
+                    sc[p] = d * scale; mx = std::max(mx, sc[p]);
+                    if (p > pos) reach = std::max(reach, double(p - pos));
+                }
+                double sum = 0;
+                for (int p = 0; p <= last; ++p) if (visible(pos, p)) { sc[p] = std::exp(sc[p] - mx); sum += sc[p]; }
+                for (int j = 0; j < c.hd; ++j) {
+                    double a = 0;
+                    for (int p = 0; p <= last; ++p) if (visible(pos, p)) a += sc[p] * __half2float(v[(size_t(p % c.slots) * c.kvh + kh) * c.hd + j]);
+                    const size_t i = (size_t(qi) * c.heads + h) * c.hd + j;
+                    err = std::max(err, std::fabs(__half2float(o[i]) - a / sum));
+                }
+            }
+        }
+        const bool pass = std::isfinite(err) && err <= 3e-3 && reach > 0;
+        ok &= pass;
+        std::printf("%-16s past=%5d seq=%3d image=[%d,%d) looks_ahead=%.0f err_gemm=%.2e %s\n", c.name, c.past, c.seq,
+                    c.begin, c.end, reach, err, pass ? "OK" : "FAIL");
+        cudaFree(dq); cudaFree(dk); cudaFree(dv); cudaFree(dg);
+    }
+    // A block outside the chunk would read keys that are not written yet.
+    ok &= !launch_attention_prefill_gemm_fp16(nullptr, nullptr, nullptr, nullptr, 10, 100, 16, 8, 256, 1536,
+                                              1.f, 1024, st, 1536, 90, 105);
+
     cudaStreamDestroy(st);
     std::printf(ok ? "ALL OK\n" : "FAILURES\n");
     return ok ? 0 : 1;
