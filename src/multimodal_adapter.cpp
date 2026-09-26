@@ -320,6 +320,11 @@ std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
         return std::make_unique<Gemma4VisionAdapter>(
             engine, loader, graph, text_architecture, max_prefill_tokens);
     }
+    if (adapter_id == "helios.gemma4u.multimodal.v1") {
+        // One HNF carrying text, vision and audio: the same loader serves both.
+        return create_gemma4_unified_adapter(engine, loader, loader, graph,
+                                             text_architecture, max_prefill_tokens, error);
+    }
     fail(error, "unknown or unavailable multimodal adapter: " + adapter_id);
     return nullptr;
 }

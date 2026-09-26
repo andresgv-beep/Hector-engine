@@ -514,9 +514,11 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         const auto* vision = caps.find(ModelModality::Vision);
         if (vision && vision->status == AdapterStatus::RuntimeReady) {
             std::string adapter_error;
+            // The scratch bounds what any adapter may prefill: 6k for the
+            // E4B tower path, one text chunk for the unified 12B.
             s.multimodal = create_multimodal_adapter(
                 vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
-                kMultimodalPrefill, &adapter_error);
+                scratch_tokens, &adapter_error);
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
                 return nullptr;

@@ -36,6 +36,10 @@ std::string modality_architecture(const HnfLoader& loader,
     if (!loader.has_config_for_block(block)) return {};
     const ModelConfig& config = loader.config_for_block(block);
     if (modality == ModelModality::Vision) {
+        // The encoder-free 12B has no encoder_type of its own: the generic
+        // binary record would report "clip". Its JSON arch is authoritative.
+        const std::string arch = config.get<std::string>("arch", "");
+        if (arch == "gemma4_unified_vision") return arch;
         return config.get<std::string>("encoder_type", "");
     }
     return config.arch();
@@ -43,11 +47,12 @@ std::string modality_architecture(const HnfLoader& loader,
 
 // This is deliberately the only architecture-specific routing table in the
 // generic layer. The adapter implementation itself stays in its own files.
-constexpr std::array<ModalityAdapterRule, 4> kAdapterRules{{
+constexpr std::array<ModalityAdapterRule, 5> kAdapterRules{{
     {"qwen", ModelModality::Text, "qwen", "helios.text.chat.v1"},
     {"qwen2", ModelModality::Text, "qwen2", "helios.text.chat.v1"},
     {"gemma4", ModelModality::Text, "gemma4", "helios.text.chat.v1"},
     {"gemma4", ModelModality::Vision, "gemma4", "helios.gemma4.vision.v1"},
+    {"gemma4", ModelModality::Vision, "gemma4_unified_vision", "helios.gemma4u.multimodal.v1"},
 }};
 
 } // namespace
