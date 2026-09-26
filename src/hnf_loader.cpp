@@ -1525,6 +1525,7 @@ bool HnfLoader::parse_execution_hints(const std::string& json) {
     if (get_bool(j, "code_enabled", false)) config_.set("code_enabled", true);
     if (get_bool(j, "vision_enabled", false)) config_.set("vision_enabled", true);
     if (get_bool(j, "cortex_enabled", false)) config_.set("cortex_enabled", true);
+    if (get_bool(j, "audio_enabled", false)) config_.set("audio_enabled", true);
     
     // Structure: { "text": {...}, "vision": {...}, "cortex": {...}, "code": {...} }
     // Parse each block into its respective config
@@ -1538,6 +1539,7 @@ bool HnfLoader::parse_execution_hints(const std::string& json) {
     static const BlockMapping mappings[] = {
         {"text",   BLOCK_TEXT_MODEL, true},
         {"vision", BLOCK_VISION,    false},
+        {"audio",  BLOCK_AUDIO,     false},
         {"cortex", BLOCK_CORTEX,    false},
         {"code",   BLOCK_CODE_EXEC, false},
     };

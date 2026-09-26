@@ -71,6 +71,7 @@ set(ENGINE_SOURCES
     src/gemma4_vision_validator.cpp
     src/gemma4_vision_preprocess.cpp
     src/gemma4_vision_runner.cpp
+    src/gemma4_unified_embedder.cpp
     src/graph_builder.cpp
     src/sampler.cpp
     src/htf_tokenizer.cpp
@@ -199,6 +200,10 @@ target_link_libraries(test_gemma4_vision_preprocess PRIVATE helios-engine)
 add_executable(test_gemma4_vision_runner tests/test_gemma4_vision_runner.cu)
 target_link_libraries(test_gemma4_vision_runner PRIVATE helios-engine)
 
+# Gemma 4 12B unified image/audio embedders against the Python oracle
+add_executable(test_gemma4_unified_embedder tests/test_gemma4_unified_embedder.cu)
+target_link_libraries(test_gemma4_unified_embedder PRIVATE helios-engine)
+
 add_executable(test_gemma4_multimodal tests/test_gemma4_multimodal.cu)
 target_link_libraries(test_gemma4_multimodal PRIVATE helios-engine)
 
@@ -256,6 +261,7 @@ add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4VisionPreprocessTest COMMAND test_gemma4_vision_preprocess)
 add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
 add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
+add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
