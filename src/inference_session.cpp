@@ -474,7 +474,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
 
         // El grafo y sus buffers de trabajo son del MODELO: los comparten
         // todas las sesiones, y por eso los turnos van en serie.
-        s.arch = s.gb.detect_architecture(*s.engine, "text");
+        s.arch = s.gb.detect_architecture(*s.engine, "text", s.model_config);
         // Gemma de solo texto nunca prefillea más de kPrefillChunk.
         // Conservar el techo multimodal para los demás caminos.
         const uint32_t scratch_tokens = s.is_gemma4 && !s.loader.has_gemma4_vision_config()

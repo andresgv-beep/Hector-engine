@@ -585,7 +585,7 @@ int main(int argc, char** argv) {
         };
 
         GraphBuilder gb;
-        auto arch = gb.detect_architecture(engine, "text");
+        auto arch = gb.detect_architecture(engine, "text", model_config);
         // Scratch para prefill por lotes (hasta PREFILL_CHUNK tokens por forward)
         const uint32_t PREFILL_CHUNK = 512;
         if (is_gemma4) {
