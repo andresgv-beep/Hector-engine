@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <cmath>
 using namespace helios::kernels;
 
 static void ck(cudaError_t e) { if (e != cudaSuccess) throw std::runtime_error(cudaGetErrorString(e)); }
@@ -72,11 +73,25 @@ int main(int argc, char** argv) try {
     const auto d4 = upload(v4), d43 = upload(h43), d42 = upload(h42);
 
     using Fn = void(*)(const half*, const uint8_t*, half*, int, int, cudaStream_t);
-    const Fn variants[] = {hqs_v4::launch_gemv<1,4>, hqs_v4::launch_gemv<2,8>, hqs_v4::launch_gemv<2,4>, hqs_v4::launch_gemv<1,8>};
-    const char* names[] = {"1x4", "2x8", "2x4", "1x8"};
-    for (int i = 0; i < 4; ++i) {
-        variants[i](dx, d4[0], dy, K, N, s); ck(cudaStreamSynchronize(s));
-        dump(out + "/y_v4_" + names[i] + ".f16", dy, N);
+    struct Variant { const char* name; Fn fn; };
+    const Variant variants[] = {
+        {"1x4", hqs_v4::launch_gemv<1,4>}, {"2x8", hqs_v4::launch_gemv<2,8>},
+        {"2x4", hqs_v4::launch_gemv<2,4>}, {"1x8", hqs_v4::launch_gemv<1,8>},
+        {"v2_1x4u1", hqs_v4::launch_gemv2<1,4,1>}, {"v2_1x4u2", hqs_v4::launch_gemv2<1,4,2>},
+        {"v2_1x4u4", hqs_v4::launch_gemv2<1,4,4>}, {"v2_1x8u2", hqs_v4::launch_gemv2<1,8,2>},
+        {"v2_1x8u4", hqs_v4::launch_gemv2<1,8,4>}, {"v2_2x4u2", hqs_v4::launch_gemv2<2,4,2>},
+        {"v2_2x8u2", hqs_v4::launch_gemv2<2,8,2>}, {"v2_2x4u4", hqs_v4::launch_gemv2<2,4,4>},
+        {"v2_4x2u2", hqs_v4::launch_gemv2<4,2,2>}, {"v2_1x2u4", hqs_v4::launch_gemv2<1,2,4>},
+    };
+    std::vector<half> ref(N), got(N);
+    for (const auto& v : variants) {
+        v.fn(dx, d4[0], dy, K, N, s); ck(cudaStreamSynchronize(s));
+        dump(out + "/y_v4_" + v.name + ".f16", dy, N);
+        ck(cudaMemcpy(got.data(), dy, N * 2, cudaMemcpyDeviceToHost));
+        if (&v == &variants[0]) ref = got;
+        float worst = 0;
+        for (int i = 0; i < N; ++i) worst = std::max(worst, std::fabs(__half2float(got[i]) - __half2float(ref[i])));
+        fprintf(stderr, "%s max|diff| vs 1x4 = %g\n", v.name, worst);
     }
     launch_dequant_hq44k(d4[0], dw, K, N, s); ck(cudaStreamSynchronize(s));
     dump(out + "/w_v4.f16", dw, size_t(N) * K);
@@ -84,8 +99,8 @@ int main(int argc, char** argv) try {
     launch_matmul_hq42k(dx, d42[0], dy, 1, K, N, s); ck(cudaStreamSynchronize(s)); dump(out + "/y_hq42.f16", dy, N);
 
     printf("{\"K\":%d,\"N\":%d,\"copies\":%d", K, N, copies);
-    for (int i = 0; i < 4; ++i)
-        printf(",\"v4_%s_us\":%.2f", names[i], time_rotating([&](int c) { variants[i](dx, d4[c], dy, K, N, s); }, copies, s));
+    for (const auto& v : variants)
+        printf(",\"v4_%s_us\":%.2f", v.name, time_rotating([&](int c) { v.fn(dx, d4[c], dy, K, N, s); }, copies, s));
     printf(",\"v4_tuned_us\":%.2f", time_rotating([&](int c) { launch_matmul_hq44k(dx, d4[c], dy, 1, K, N, s); }, copies, s));
     printf(",\"hq43_g16_us\":%.2f", time_rotating([&](int c) { launch_matmul_hqs_v3(dx, d43[c], dy, 1, K, N, 4, 16, s); }, copies, s));
     printf(",\"hq42_us\":%.2f", time_rotating([&](int c) { launch_matmul_hq42k(dx, d42[c], dy, 1, K, N, s); }, copies, s));

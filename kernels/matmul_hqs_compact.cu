@@ -796,6 +796,43 @@ void launch_matmul_hqs_v3(const half* input,const uint8_t* weights,half* output,
 }
 
 void launch_matmul_hq44k_cublas(const half*,const uint8_t*,half*,int,int,int,cudaStream_t);
+
+// Decode GEMVs stream weights from DRAM, but a single MLP matrix (~35 MB) fits in
+// L2 (48 MB on the 4070 Ti), so a hot-cache benchmark picks the wrong layout.
+// Evict L2 before each timed launch and time only the kernel.
+static float benchmark_cold_l2(
+    void(*launcher)(const half*, const uint8_t*, half*, int, int, cudaStream_t),
+    const half* input, const uint8_t* weights, half* output, int K, int N, cudaStream_t stream
+) {
+    static void* flush = nullptr;
+    static size_t flush_bytes = 0;
+    if (!flush) {
+        int device = 0, l2 = 0;
+        cudaGetDevice(&device);
+        cudaDeviceGetAttribute(&l2, cudaDevAttrL2CacheSize, device);
+        flush_bytes = size_t(l2 > 0 ? l2 : (48 << 20)) * 2;
+        if (cudaMalloc(&flush, flush_bytes) != cudaSuccess) { flush = nullptr; flush_bytes = 0; }
+    }
+    if (!flush) return benchmark_compact_kernel(launcher, input, weights, output, K, N, stream);
+    for (int i = 0; i < 3; i++) launcher(input, weights, output, K, N, stream);
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    float total = 0;
+    for (int i = 0; i < 10; i++) {
+        cudaMemsetAsync(flush, i, flush_bytes, stream);
+        cudaEventRecord(start, stream);
+        launcher(input, weights, output, K, N, stream);
+        cudaEventRecord(stop, stream);
+        cudaEventSynchronize(stop);
+        float ms = 0;
+        cudaEventElapsedTime(&ms, start, stop);
+        total += ms;
+    }
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
+    return total / 10.0f;
+}
 void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
                          int M,int K,int N,cudaStream_t stream) {
     if (M<=0 || K<=0 || N<=0) return;
@@ -805,15 +842,16 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
         return;
     }
     using Fn = void(*)(const half*,const uint8_t*,half*,int,int,cudaStream_t);
-    static const Fn functions[] = {hqs_v4::launch_gemv<1,4>, hqs_v4::launch_gemv<2,8>,
-        hqs_v4::launch_gemv<2,4>, hqs_v4::launch_gemv<1,8>};
+    // Unrolled v2 layouts; the best differ by shape (down: 1x8u4/2x8u2, gate/up: 4x2u2/2x4u2).
+    static const Fn functions[] = {hqs_v4::launch_gemv2<1,8,4>, hqs_v4::launch_gemv2<2,8,2>,
+        hqs_v4::launch_gemv2<2,4,2>, hqs_v4::launch_gemv2<4,2,2>};
     constexpr int count = sizeof(functions)/sizeof(functions[0]);
     const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
     tune_sidecar_load_once();
     auto it = s_tune_cache_hq44k.find(key);
     if (it == s_tune_cache_hq44k.end() || it->second >= count) {
         int best = 0; float times[count];
-        for (int i=0;i<count;++i) times[i]=benchmark_compact_kernel(functions[i],input,weights,output,K,N,stream);
+        for (int i=0;i<count;++i) times[i]=benchmark_cold_l2(functions[i],input,weights,output,K,N,stream);
         for (int i=1;i<count;++i) if (times[i]<times[best]) best=i;
         s_tune_cache_hq44k[key]=best; tune_sidecar_append("hq44k_g16",K,N,best);
         if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] hq44k_g16 K=%d N=%d -> %c\n",K,N,'A'+best);
