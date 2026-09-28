@@ -1580,6 +1580,7 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     if (s == "hq52k") return dtype::HQ52K();
     const auto candidate = DTypeRegistry::instance().get_id(s);
     if (dtype::hqs_v3(candidate)) return candidate;
+    if (s == "hq44k_g16") return dtype::HQ44K();
     if (s == "int8") return dtype::INT8();
     if (s == "int32") return dtype::INT32();
     return DTYPE_INVALID;
@@ -1615,7 +1616,7 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
         }
         numel *= dim;
     }
-    if (helios::dtype::hqs_v3(dtype) &&
+    if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K()) &&
         (entry.shape.size() != 2 || entry.shape[1] % 256 != 0)) {
         std::cerr << "HnfLoader: x.3 requires a matrix with complete row blocks: " << entry.name << std::endl;
         return false;

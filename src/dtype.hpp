@@ -157,6 +157,7 @@ namespace dtype {
         return nullptr;
     }
 
+    inline DTypeID HQ44K() { return DTypeRegistry::instance().get_id("hq44k_g16"); }
     inline DTypeID FP32() { return DTypeRegistry::instance().get_id("fp32"); }
     inline DTypeID FP16() { return DTypeRegistry::instance().get_id("fp16"); }
     inline DTypeID BF16() { return DTypeRegistry::instance().get_id("bf16"); }

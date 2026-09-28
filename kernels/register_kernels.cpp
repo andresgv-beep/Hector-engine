@@ -443,6 +443,8 @@ void register_linear_kernels(Engine& engine) {
                 in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N, ctx.stream
             );
+        } else if (weight->dtype == dtype::HQ44K()) {
+            launch_matmul_hq44k(in_ptr, as_u8_const(weight), as_fp16(output), M, K, N, ctx.stream);
         } else if (const auto* format = dtype::hqs_v3(weight->dtype)) {
             launch_matmul_hqs_v3(in_ptr, as_u8_const(weight), as_fp16(output),
                                 M, K, N, format->bits, format->group, ctx.stream);

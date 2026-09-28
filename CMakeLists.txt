@@ -92,6 +92,7 @@ set(KERNEL_SOURCES
     kernels/matmul_hqs_compact.cu
     kernels/matmul_cublas.cu
     kernels/hqs_v3.cu
+    kernels/hqs_v4.cu
     kernels/attention.cu
     kernels/attention_flash_decode.cu
     kernels/attention_prefill_gemm.cu
@@ -409,3 +410,8 @@ message(STATUS "")
 add_executable(test_hqs_v3 tests/test_hqs_v3.cu)
 target_link_libraries(test_hqs_v3 PRIVATE helios-engine)
 add_test(NAME HqsV3Integration COMMAND test_hqs_v3)
+
+# HQS v4 kernel check and microbenchmark.
+add_executable(test_hqs_v4 tests/test_hqs_v4.cu)
+target_include_directories(test_hqs_v4 PRIVATE kernels)
+target_link_libraries(test_hqs_v4 PRIVATE helios-engine)

@@ -9,6 +9,7 @@
 
 #include "hqs_common.cuh"
 #include "hqs_v3_gemv.cuh"
+#include "hqs_v4_gemv.cuh"
 #include <stdexcept>
 #include <cuda_fp16.h>
 #include <unordered_map>
@@ -510,6 +511,7 @@ static std::unordered_map<uint64_t, int> s_tune_cache_hq51k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq42k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq52k;
 static std::unordered_map<std::string, std::unordered_map<uint64_t,int>> s_tune_cache_v3;
+static std::unordered_map<uint64_t, int> s_tune_cache_hq44k;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -579,6 +581,7 @@ static void tune_sidecar_load_once() {
                  strcmp(fmt,"hq43k_g16")==0 || strcmp(fmt,"hq43k_g32")==0 ||
                  strcmp(fmt,"hq53k_g16")==0 || strcmp(fmt,"hq53k_g32")==0)
             s_tune_cache_v3[fmt][key] = best;
+        else if (strcmp(fmt, "hq44k_g16") == 0) s_tune_cache_hq44k[key] = best;
         loaded++;
     }
     fclose(f);
@@ -790,6 +793,33 @@ void launch_matmul_hqs_v3(const half* input,const uint8_t* weights,half* output,
     if(bits==5 && group==16) return matmul_v3<5,16>(input,weights,output,M,K,N,stream);
     if(bits==5 && group==32) return matmul_v3<5,32>(input,weights,output,M,K,N,stream);
     throw std::runtime_error("Unsupported x.3 format");
+}
+
+void launch_matmul_hq44k_cublas(const half*,const uint8_t*,half*,int,int,int,cudaStream_t);
+void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
+                         int M,int K,int N,cudaStream_t stream) {
+    if (M<=0 || K<=0 || N<=0) return;
+    if (K%256) throw std::runtime_error("hq44k GEMV requires K divisible by 256");
+    if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hq44k_cublas(input,weights,output,M,K,N,stream);
+        return;
+    }
+    using Fn = void(*)(const half*,const uint8_t*,half*,int,int,cudaStream_t);
+    static const Fn functions[] = {hqs_v4::launch_gemv<1,4>, hqs_v4::launch_gemv<2,8>,
+        hqs_v4::launch_gemv<2,4>, hqs_v4::launch_gemv<1,8>};
+    constexpr int count = sizeof(functions)/sizeof(functions[0]);
+    const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+    tune_sidecar_load_once();
+    auto it = s_tune_cache_hq44k.find(key);
+    if (it == s_tune_cache_hq44k.end() || it->second >= count) {
+        int best = 0; float times[count];
+        for (int i=0;i<count;++i) times[i]=benchmark_compact_kernel(functions[i],input,weights,output,K,N,stream);
+        for (int i=1;i<count;++i) if (times[i]<times[best]) best=i;
+        s_tune_cache_hq44k[key]=best; tune_sidecar_append("hq44k_g16",K,N,best);
+        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] hq44k_g16 K=%d N=%d -> %c\n",K,N,'A'+best);
+        it=s_tune_cache_hq44k.find(key);
+    }
+    for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
 }
 
 } // namespace kernels

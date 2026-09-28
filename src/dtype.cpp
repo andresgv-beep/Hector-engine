@@ -150,6 +150,16 @@ void DTypeRegistry::register_builtins() {
         info.calc_size = [bytes](size_t n) { return ((n + 255) / 256) * bytes; };
         register_dtype(info);
     }
+    // HQS v4: affine, d/dmin FP16 + 16x(5-bit scale, 5-bit min) + 4-bit codes.
+    info = DTypeInfo{};
+    info.name = "hq44k_g16";
+    info.element_bits = 4;
+    info.block_elements = 256;
+    info.block_bytes = 152;
+    info.is_quantized = true;
+    info.is_signed = false;
+    info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 152; };
+    register_dtype(info);
 }
 
 DTypeID DTypeRegistry::register_dtype(const DTypeInfo& info) {
