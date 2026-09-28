@@ -512,6 +512,10 @@ static std::unordered_map<uint64_t, int> s_tune_cache_hq42k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq52k;
 static std::unordered_map<std::string, std::unordered_map<uint64_t,int>> s_tune_cache_v3;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq44k;
+// Sidecar tag for hq44k: bump the suffix whenever the candidate list changes, so
+// decisions recorded for another variant set are ignored and re-timed.
+static constexpr const char* HQ44K_TUNE_TAG = "hq44k_g16.v2";
+static constexpr int HQ44K_TUNE_VARIANTS = 4;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -571,7 +575,9 @@ static void tune_sidecar_load_once() {
         char fmt[16]; int K, N; char choice;
         if (sscanf(line, "%15s %d %d %c", fmt, &K, &N, &choice) != 4) continue;
         int best = choice - 'A';
-        if (best < 0 || best > 2) continue;
+        // hq44k has four candidates; the older formats keep A-C.
+        const int variants = strcmp(fmt, HQ44K_TUNE_TAG) == 0 ? HQ44K_TUNE_VARIANTS : 3;
+        if (best < 0 || best >= variants) continue;
         uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
         if      (strcmp(fmt, "hq41k") == 0) s_tune_cache_hq41k[key] = best;
         else if (strcmp(fmt, "hq51k") == 0) s_tune_cache_hq51k[key] = best;
@@ -581,7 +587,7 @@ static void tune_sidecar_load_once() {
                  strcmp(fmt,"hq43k_g16")==0 || strcmp(fmt,"hq43k_g32")==0 ||
                  strcmp(fmt,"hq53k_g16")==0 || strcmp(fmt,"hq53k_g32")==0)
             s_tune_cache_v3[fmt][key] = best;
-        else if (strcmp(fmt, "hq44k_g16") == 0) s_tune_cache_hq44k[key] = best;
+        else if (strcmp(fmt, HQ44K_TUNE_TAG) == 0) s_tune_cache_hq44k[key] = best;
         loaded++;
     }
     fclose(f);
@@ -846,6 +852,7 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
     static const Fn functions[] = {hqs_v4::launch_gemv2<1,8,4>, hqs_v4::launch_gemv2<2,8,2>,
         hqs_v4::launch_gemv2<2,4,2>, hqs_v4::launch_gemv2<4,2,2>};
     constexpr int count = sizeof(functions)/sizeof(functions[0]);
+    static_assert(count == HQ44K_TUNE_VARIANTS, "update HQ44K_TUNE_TAG and HQ44K_TUNE_VARIANTS with the candidate list");
     const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
     tune_sidecar_load_once();
     auto it = s_tune_cache_hq44k.find(key);
@@ -853,8 +860,8 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
         int best = 0; float times[count];
         for (int i=0;i<count;++i) times[i]=benchmark_cold_l2(functions[i],input,weights,output,K,N,stream);
         for (int i=1;i<count;++i) if (times[i]<times[best]) best=i;
-        s_tune_cache_hq44k[key]=best; tune_sidecar_append("hq44k_g16",K,N,best);
-        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] hq44k_g16 K=%d N=%d -> %c\n",K,N,'A'+best);
+        s_tune_cache_hq44k[key]=best; tune_sidecar_append(HQ44K_TUNE_TAG,K,N,best);
+        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",HQ44K_TUNE_TAG,K,N,'A'+best);
         it=s_tune_cache_hq44k.find(key);
     }
     for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
