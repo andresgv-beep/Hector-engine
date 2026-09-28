@@ -411,7 +411,8 @@ add_executable(test_hqs_v3 tests/test_hqs_v3.cu)
 target_link_libraries(test_hqs_v3 PRIVATE helios-engine)
 add_test(NAME HqsV3Integration COMMAND test_hqs_v3)
 
-# HQS v4 kernel check and microbenchmark.
+# HQS v4 kernel check on synthetic blocks.
 add_executable(test_hqs_v4 tests/test_hqs_v4.cu)
 target_include_directories(test_hqs_v4 PRIVATE kernels)
 target_link_libraries(test_hqs_v4 PRIVATE helios-engine)
+add_test(NAME HqsV4Kernels COMMAND test_hqs_v4)
