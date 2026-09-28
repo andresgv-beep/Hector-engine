@@ -137,6 +137,19 @@ void DTypeRegistry::register_builtins() {
     info.is_signed = true;
     info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 184; };
     register_dtype(info);
+    // Experimental x.3 layouts. Register after existing types to preserve IDs.
+    for (int bits : {3,4,5}) for (int group : {16,32}) {
+        info = DTypeInfo{};
+        info.name = "hq" + std::to_string(bits) + "3k_g" + std::to_string(group);
+        info.element_bits = bits;
+        info.block_elements = 256;
+        const size_t bytes = (group == 16 ? 12 : 8) + bits * 32;
+        info.block_bytes = bytes;
+        info.is_quantized = true;
+        info.is_signed = true;
+        info.calc_size = [bytes](size_t n) { return ((n + 255) / 256) * bytes; };
+        register_dtype(info);
+    }
 }
 
 DTypeID DTypeRegistry::register_dtype(const DTypeInfo& info) {

@@ -8,6 +8,8 @@
 //
 
 #include "hqs_common.cuh"
+#include "hqs_v3_gemv.cuh"
+#include <stdexcept>
 #include <cuda_fp16.h>
 #include <unordered_map>
 #include <cstdio>
@@ -507,6 +509,7 @@ static std::unordered_map<uint64_t, int> s_tune_cache_hq41k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq51k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq42k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq52k;
+static std::unordered_map<std::string, std::unordered_map<uint64_t,int>> s_tune_cache_v3;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -572,6 +575,10 @@ static void tune_sidecar_load_once() {
         else if (strcmp(fmt, "hq51k") == 0) s_tune_cache_hq51k[key] = best;
         else if (strcmp(fmt, "hq42k") == 0) s_tune_cache_hq42k[key] = best;
         else if (strcmp(fmt, "hq52k") == 0) s_tune_cache_hq52k[key] = best;
+        else if (strcmp(fmt,"hq33k_g16")==0 || strcmp(fmt,"hq33k_g32")==0 ||
+                 strcmp(fmt,"hq43k_g16")==0 || strcmp(fmt,"hq43k_g32")==0 ||
+                 strcmp(fmt,"hq53k_g16")==0 || strcmp(fmt,"hq53k_g32")==0)
+            s_tune_cache_v3[fmt][key] = best;
         loaded++;
     }
     fclose(f);
@@ -743,6 +750,46 @@ void launch_matmul_hq52k(
         for (int m = 0; m < M; ++m)
             launch_matmul_hq52k(input + m * K, weights, output + m * N, 1, K, N, stream);
     }
+}
+
+
+void launch_matmul_hqs_v3_cublas(const half*,const uint8_t*,half*,int,int,int,int,int,cudaStream_t);
+template<int Bits, int Group>
+static void matmul_v3(const half* input,const uint8_t* weights,half* output,
+                      int M,int K,int N,cudaStream_t stream) {
+    if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hqs_v3_cublas(input,weights,output,M,K,N,Bits,Group,stream);
+        return;
+    }
+    using Fn = void(*)(const half*,const uint8_t*,half*,int,int,cudaStream_t);
+    static const Fn functions[] = {hqs_v3::launch_symmetric<Bits,Group,1,4>,
+        hqs_v3::launch_symmetric<Bits,Group,2,8>, hqs_v3::launch_symmetric<Bits,Group,2,4>};
+    const std::string format = "hq" + std::to_string(Bits) + "3k_g" + std::to_string(Group);
+    const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+    tune_sidecar_load_once();
+    auto& cache = s_tune_cache_v3[format];
+    auto it = cache.find(key);
+    if (it == cache.end()) {
+        int best = 0; float times[3];
+        for (int i=0;i<3;++i) times[i]=benchmark_compact_kernel(functions[i],input,weights,output,K,N,stream);
+        for (int i=1;i<3;++i) if (times[i]<times[best]) best=i;
+        cache[key]=best; tune_sidecar_append(format.c_str(),K,N,best);
+        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",format.c_str(),K,N,'A'+best);
+        it=cache.find(key);
+    }
+    for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
+}
+void launch_matmul_hqs_v3(const half* input,const uint8_t* weights,half* output,
+                          int M,int K,int N,int bits,int group,cudaStream_t stream) {
+    if (M<=0 || K<=0 || N<=0) return;
+    if (K%8) throw std::runtime_error("x.3 GEMV requires K divisible by eight");
+    if(bits==3 && group==16) return matmul_v3<3,16>(input,weights,output,M,K,N,stream);
+    if(bits==3 && group==32) return matmul_v3<3,32>(input,weights,output,M,K,N,stream);
+    if(bits==4 && group==16) return matmul_v3<4,16>(input,weights,output,M,K,N,stream);
+    if(bits==4 && group==32) return matmul_v3<4,32>(input,weights,output,M,K,N,stream);
+    if(bits==5 && group==16) return matmul_v3<5,16>(input,weights,output,M,K,N,stream);
+    if(bits==5 && group==32) return matmul_v3<5,32>(input,weights,output,M,K,N,stream);
+    throw std::runtime_error("Unsupported x.3 format");
 }
 
 } // namespace kernels

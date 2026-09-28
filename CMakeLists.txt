@@ -91,6 +91,7 @@ set(KERNEL_SOURCES
     kernels/matmul_hq31k.cu
     kernels/matmul_hqs_compact.cu
     kernels/matmul_cublas.cu
+    kernels/hqs_v3.cu
     kernels/attention.cu
     kernels/attention_flash_decode.cu
     kernels/attention_prefill_gemm.cu
@@ -403,3 +404,8 @@ message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER}")
 message(STATUS "CUDA compiler: ${CMAKE_CUDA_COMPILER}")
 message(STATUS "")
+
+# HQS x.3 integration check.
+add_executable(test_hqs_v3 tests/test_hqs_v3.cu)
+target_link_libraries(test_hqs_v3 PRIVATE helios-engine)
+add_test(NAME HqsV3Integration COMMAND test_hqs_v3)

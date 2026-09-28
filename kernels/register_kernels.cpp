@@ -443,6 +443,9 @@ void register_linear_kernels(Engine& engine) {
                 in_ptr, as_u8_const(weight), as_fp16(output),
                 M, K, N, ctx.stream
             );
+        } else if (const auto* format = dtype::hqs_v3(weight->dtype)) {
+            launch_matmul_hqs_v3(in_ptr, as_u8_const(weight), as_fp16(output),
+                                M, K, N, format->bits, format->group, ctx.stream);
         } else if (weight->dtype == dtype::FP16()) {
             launch_matmul_fp16(
                 in_ptr, as_fp16_const(weight), as_fp16(output),
@@ -502,6 +505,9 @@ void register_memory_kernels(Engine& engine) {
                 as_i32(indices), as_u8_const(table), as_fp16(output),
                 batch, seq, vocab, dim, ctx.stream
             );
+        } else if (const auto* format = dtype::hqs_v3(table->dtype)) {
+            launch_embedding_hqs_v3(as_i32(indices), as_u8_const(table), as_fp16(output),
+                                   batch, seq, vocab, dim, format->bits, format->group, ctx.stream);
         } else if (table->dtype == dtype::HQ62K()) {
             launch_embedding_hq62k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),

@@ -70,6 +70,14 @@ void launch_matmul_hq52k(
     int M, int K, int N, cudaStream_t stream = nullptr
 );
 
+// Experimental x.3. group is part of the on-disk dtype (16 or 32).
+void launch_matmul_hqs_v3(const half*, const uint8_t*, half*, int M, int K, int N,
+                           int bits, int group, cudaStream_t stream = nullptr);
+void launch_embedding_hqs_v3(const int32_t*, const uint8_t*, half*, int batch, int seq,
+                              int vocab, int dim, int bits, int group, cudaStream_t stream = nullptr);
+void launch_dequant_hqs_v3(const uint8_t*, half*, int K, int N,
+                           int bits, int group, cudaStream_t stream = nullptr);
+
 // FP16 x FP16 matmul (for activations, non-quantized weights)
 void launch_matmul_fp16(
     const half* A,          // [M, K]

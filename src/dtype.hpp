@@ -143,6 +143,20 @@ inline bool dtype_is_quantized(DTypeID id) {
 // ============================================================================
 
 namespace dtype {
+    struct HqsV3Spec { DTypeID id; int bits; int group; };
+    inline const HqsV3Spec* hqs_v3(DTypeID id) {
+        static const HqsV3Spec specs[] = {
+            {DTypeRegistry::instance().get_id("hq33k_g16"), 3, 16},
+            {DTypeRegistry::instance().get_id("hq33k_g32"), 3, 32},
+            {DTypeRegistry::instance().get_id("hq43k_g16"), 4, 16},
+            {DTypeRegistry::instance().get_id("hq43k_g32"), 4, 32},
+            {DTypeRegistry::instance().get_id("hq53k_g16"), 5, 16},
+            {DTypeRegistry::instance().get_id("hq53k_g32"), 5, 32}
+        };
+        for (const auto& spec : specs) if (id == spec.id) return &spec;
+        return nullptr;
+    }
+
     inline DTypeID FP32() { return DTypeRegistry::instance().get_id("fp32"); }
     inline DTypeID FP16() { return DTypeRegistry::instance().get_id("fp16"); }
     inline DTypeID BF16() { return DTypeRegistry::instance().get_id("bf16"); }
