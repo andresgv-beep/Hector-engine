@@ -18,7 +18,7 @@
   3. `alpha` entero → `scale` en float32, ya calculada (§3).
   4. El flag `IS_QLORA` desaparece: QLoRA cuantiza el modelo base al *entrenar*, pero el adaptador sale en FP16/BF16 (§8).
   5. El tipo de dato de cada tensor va en la tabla binaria, no solo en el JSON (§4).
-  6. La compatibilidad se comprueba con el hash del manifiesto HNF, no con el SHA del `.hnf` entero, que son 7,5 GB (§6).
+  6. La compatibilidad se comprueba con `base_id`, la huella del modelo **original**: vale para cualquier cuantización de ese modelo y rechaza cualquier otro, aunque tenga las mismas formas (§6.1). v1.0 usaba el SHA del `.hnf` entero: 7,5 GB de lectura y ligado a una sola cuantización.
   7. Particularidades de Gemma 4: capas de atención global sin `v_proj` (§5.1).
 
 ## 1. Filosofía
@@ -167,7 +167,8 @@ Son cuentas a partir de las formas de §5.1, no archivos medidos. Rango 16 en to
   "base_model": {
     "family": "gemma4",
     "name": "gemma-4-12b-it",
-    "hnf_manifest_sha256": "…",
+    "base_id": "hbase1:3f9c…",
+    "source": "google/gemma-4-12b-it",
     "text_layers": 48,
     "hidden_size": 3840
   },
@@ -185,8 +186,27 @@ Son cuentas a partir de las formas de §5.1, no archivos medidos. Rango 16 en to
 }
 ```
 
-- `hnf_manifest_sha256` es el hash de los bytes del manifiesto del `.hnf` base, que ya identifica modelo, formato y tipos de cada tensor. v1.0 pedía el SHA del `.hnf` entero: 7,5 GB de lectura en cada carga.
+- `base_id` empareja el LoRA con su modelo (§6.1). `source` es solo informativo: el nombre o la ruta que traía `adapter_config.json`.
 - El formato del modelo base (HQS v4, estable…) da igual: el LoRA se entrena contra el modelo original en BF16 y se aplica sobre cualquier cuantización de ese mismo modelo. Si un LoRA se ajustó sobre una cuantización concreta, se indica en `training`.
+
+### 6.1 `base_id`: la huella del modelo original
+
+Un LoRA solo vale para los pesos exactos con los que se entrenó. Otro modelo con las mismas formas (un reentrenamiento como el 12B de Fable) cargaría sin error y daría basura, así que la huella tiene que depender del **contenido** de los pesos originales, no de las formas ni del nombre.
+
+```
+base_id = "hbase1:" + SHA-256 de, en este orden:
+  1. "hbase1\n"
+  2. por cada tensor del checkpoint original, ordenados por nombre original:
+       nombre \n  dtype \n  forma separada por comas \n  SHA-256 de sus bytes crudos
+  3. SHA-256 del tokenizer.json
+```
+
+- **Se calcula al convertir.** El conversor ya lee todos los tensores del safetensors; hashearlos por el camino cuesta unos segundos sobre los ~9 minutos de conversión.
+- **Va en el manifiesto del `.hnf`** (`"base_id"`). Todas las cuantizaciones del mismo modelo (estable, HQS v4…) llevan el mismo, porque sale de los pesos de origen y no de los cuantizados.
+- **No depende de cómo se repartieron los shards** (`model-0000x-of-0000y`): se hashea tensor a tensor, no archivo a archivo.
+- **`helios-convert-lora` lo copia** del `.hnf` que se le indica con `--base`. Si además recibe `--source` (la carpeta del modelo original), lo recalcula y comprueba que coincide antes de escribir el `.hlora`.
+- **Héctor compara** el `base_id` del `.hlora` con el del `.hnf` cargado. Si no coinciden, o alguno no lo tiene, se niega a cargarlo.
+- **Los `.hnf` actuales no lo llevan.** Se añade en la próxima conversión, o con una herramienta que lo calcule desde el modelo original y lo escriba en el manifiesto.
 
 ## 7. Aplicación en el motor
 
@@ -194,7 +214,7 @@ Son cuentas a partir de las formas de §5.1, no archivos medidos. Rango 16 en to
 
 1. Cargar el `.hnf` base, igual que ahora.
 2. Leer la cabecera y la tabla del `.hlora` y validarlo (§9).
-3. Comprobar la compatibilidad: `base_model.hnf_manifest_sha256`, y que las formas de A y B casan con los tensores base.
+3. Comprobar la compatibilidad: `base_model.base_id` (§6.1), y que las formas de A y B casan con los tensores base.
 4. Subir A y B a la GPU tal cual (FP16/BF16). Son pocos MB, así que no hace falta mapearlos desde disco como los pesos grandes.
 
 ### 7.2 Cálculo: sin fusionar (cambio respecto a v1.0)
@@ -243,7 +263,7 @@ Un `.hlora` es válido si:
 - [ ] los offsets son múltiplos de 256, no se solapan y caben en el archivo;
 - [ ] `manifest_offset + manifest_size == file_size`;
 - [ ] los hashes de nombre son únicos y coinciden con `tensors[].name` del manifiesto;
-- [ ] `hnf_manifest_sha256` coincide con el del `.hnf` cargado. Si no, el motor se niega a cargarlo; no lo intenta «a ver qué sale».
+- [ ] `base_id` coincide con el del `.hnf` cargado, y ambos existen. Si no, el motor se niega a cargarlo; no lo intenta «a ver qué sale».
 
 ## 10. Herramientas
 
@@ -265,6 +285,7 @@ helios-merge-lora --model base.hnf --lora tono.hlora --output fusionado.hnf
 
 ## 11. Qué falta para usarlo
 
+0. `base_id` en `helios_convert_v9.1`: calcularlo al convertir y escribirlo en el manifiesto del `.hnf` (§6.1).
 1. Conversor PEFT → `.hlora` (Python o Rust, junto a `helios_convert_v9.1`).
 2. Cargador en Héctor: cabecera, tabla, validación y subida a GPU.
 3. Kernel del término `scale·B·(A·x)` para prefill y generación, con prueba de referencia.
