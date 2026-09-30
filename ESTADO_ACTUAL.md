@@ -51,6 +51,9 @@ puede mezclar tipos: no comparar su tamaño como si todos los pesos usaran HQ62K
 - GEMV cuantizado para decode y descuantización integrada con GEMM por tiles.
   Las escrituras vectorizadas HQ4.2/HQ5.2 **ya están hechas**; seguimos
   expandiendo la matriz a FP16 y el umbral M=9 sigue siendo fijo.
+- Decode con contexto largo: a 20k tokens Héctor paga +3,48 ms por token frente a +1,55 ms de llama.cpp
+  (44,3 frente a 53,0 tok/s). La medición de referencia, el protocolo y las hipótesis están en
+  [velocidad por contexto](informes/VELOCIDAD_CONTEXTO_2026-09-30.md) (30/09); no hace falta volver a medir la base.
 - Visión encoder-free del 12B y audio/vídeo: trabajo distinto del streaming.
 - Multi-GPU y continuous batching: no implementados.
 - Comprobar nuevas familias con pesos reales antes de generalizar resultados.
