@@ -194,19 +194,23 @@ Son cuentas a partir de las formas de §5.1, no archivos medidos. Rango 16 en to
 Un LoRA solo vale para los pesos exactos con los que se entrenó. Otro modelo con las mismas formas (un reentrenamiento como el 12B de Fable) cargaría sin error y daría basura, así que la huella tiene que depender del **contenido** de los pesos originales, no de las formas ni del nombre.
 
 ```
-base_id = "hbase1:" + SHA-256 de, en este orden:
+base_id = "hbase1:" + XXH3-128 (32 hex) de, en este orden:
   1. "hbase1\n"
   2. por cada tensor del checkpoint original, ordenados por nombre original:
-       nombre \n  dtype \n  forma separada por comas \n  SHA-256 de sus bytes crudos
-  3. SHA-256 del tokenizer.json
+       nombre \n  dtype \n  forma separada por comas \n  XXH3-128 de sus bytes crudos \n
+  3. "tokenizer\n" + XXH3-128 del tokenizer.json (o "-" si no hay) + "\n"
 ```
 
-- **Se calcula al convertir.** El conversor ya lee todos los tensores del safetensors; hashearlos por el camino cuesta unos segundos sobre los ~9 minutos de conversión.
+XXH3-128 y no SHA-256: el conversor ya lo incluye, es mucho más rápido y aquí no hay nadie de quien protegerse. Es una huella para no emparejar mal, no una firma. Implementado en `helios_convert_v9.1/src/base_id.rs`.
+
+Gemma 4 12B-it (el original de `models/gemma 4 12b-it`, 23 GB, unos 30 s): **`hbase1:5d50f99aedd63273491458187c6fde6e`**.
+
+- **Se calcula al convertir** (`helios-convert` lo escribe en cuanto hay modelo de texto): unos 30 s sobre los ~9 minutos de conversión.
 - **Va en el manifiesto del `.hnf`** (`"base_id"`). Todas las cuantizaciones del mismo modelo (estable, HQS v4…) llevan el mismo, porque sale de los pesos de origen y no de los cuantizados.
 - **No depende de cómo se repartieron los shards** (`model-0000x-of-0000y`): se hashea tensor a tensor, no archivo a archivo.
 - **`helios-convert-lora` lo copia** del `.hnf` que se le indica con `--base`. Si además recibe `--source` (la carpeta del modelo original), lo recalcula y comprueba que coincide antes de escribir el `.hlora`.
 - **Héctor compara** el `base_id` del `.hlora` con el del `.hnf` cargado. Si no coinciden, o alguno no lo tiene, se niega a cargarlo.
-- **Los `.hnf` actuales no lo llevan.** Se añade en la próxima conversión, o con una herramienta que lo calcule desde el modelo original y lo escriba en el manifiesto.
+- **Para los `.hnf` ya convertidos:** `hnf_base_id --source <modelo original> --hnf <archivo> --write`. Solo reescribe el manifiesto del final (los bloques de pesos no se mueven), guarda el anterior en `<archivo>.manifest.bak` y se niega si el archivo ya lleva otro `base_id`. Con Héctor parado.
 
 ## 7. Aplicación en el motor
 
@@ -285,7 +289,7 @@ helios-merge-lora --model base.hnf --lora tono.hlora --output fusionado.hnf
 
 ## 11. Qué falta para usarlo
 
-0. `base_id` en `helios_convert_v9.1`: calcularlo al convertir y escribirlo en el manifiesto del `.hnf` (§6.1).
+0. ~~`base_id` en `helios_convert_v9.1`~~ hecho (§6.1). Falta escribirlo en el `.hnf` de producción.
 1. Conversor PEFT → `.hlora` (Python o Rust, junto a `helios_convert_v9.1`).
 2. Cargador en Héctor: cabecera, tabla, validación y subida a GPU.
 3. Kernel del término `scale·B·(A·x)` para prefill y generación, con prueba de referencia.
