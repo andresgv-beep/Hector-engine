@@ -923,6 +923,19 @@ void register_attention_kernels(Engine& engine) {
                     partials->size_bytes < attention_flash_decode_workspace_bytes(num_heads, head_dim, splits)) {
                     throw std::runtime_error("ATTENTION_CACHED: invalid flash decode workspace");
                 }
+                // Grouped decode uses a linear cache; retain the generic path
+                // for other geometries or an explicitly smaller ring allocation.
+                const uint32_t slots = cache_slots ? cache_slots : max_seq_len;
+                if (cmd.get<uint32_t>("flash_grouped", 0) && num_heads == 16 &&
+                    num_kv_heads == 1 && head_dim == 512 && window_size == 0 &&
+                    slots >= max_seq_len) {
+                    launch_attention_global_grouped_dp(
+                        as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
+                        as_fp16(output), static_cast<float*>(partials->ptr), engine.device_total_seq(),
+                        scale, static_cast<int>(splits),
+                        static_cast<int>(cmd.get<uint32_t>("flash_min_chunk", 64)), ctx.stream);
+                    return;
+                }
                 launch_attention_flash_decode_dp(
                     as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),
                     as_fp16(output), static_cast<float*>(partials->ptr), engine.device_total_seq(),

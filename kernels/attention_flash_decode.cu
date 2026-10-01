@@ -211,6 +211,12 @@ __global__ __launch_bounds__(FD_THREADS) void flash_decode_merge_kernel(
 
 }  // namespace
 
+// Reuse the existing FP32 partial merge for the specialized global kernel.
+void launch_attention_flash_decode_merge_dp(const float* partials, half* output, const int32_t* seq,
+                                            int splits, int min_chunk, cudaStream_t stream) {
+    flash_decode_merge_kernel<<<16, FD_THREADS, 0, stream>>>(partials, output, seq, 512, 0, splits, min_chunk);
+}
+
 size_t attention_flash_decode_workspace_bytes(int num_heads, int head_dim, int splits) {
     return size_t(num_heads) * splits * (head_dim + 2) * sizeof(float);
 }

@@ -866,6 +866,9 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
             cache.cache_position + 1 >= engine.config().flash_decode_min_seq &&
             engine.tensors().exists(S("g4.flash_partials"))) {
             attention.in(S("g4.flash_partials")).set("flash_splits", kFlashDecodeSplits);
+            // Only the global 12B geometry shares one KV head across 16 Q heads.
+            if (H == 16 && HD == 512 && KVH == 1 && window == 0)
+                attention.set("flash_grouped", uint32_t{1});
         } else if (engine.config().use_split_attention && geometry &&
             cache.cache_position + 1 >= 2048 &&
             engine.tensors().exists(S("g4.attn_partials"))) {

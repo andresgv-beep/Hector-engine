@@ -95,3 +95,25 @@ No es un fallo del kernel.
 Criterio de éxito: bajar los **+3,48 ms** del contexto hacia los **+1,55 ms** de llama.cpp, repitiendo este
 mismo protocolo con el mismo script, sin tocar la salida a temperatura 0 salvo diferencias de redondeo
 justificadas.
+
+## Integración en main, 01/10
+
+Integrado el kernel corregido con `__syncwarp`, sin controles de archivos,
+volcados de logits ni ajuste experimental de particiones. Se conservan las
+64 particiones y el workspace original. La selección se limita a atención
+global H16/KVH1/HD512; el dispatcher conserva la ruta genérica para otras
+geometrías y para cachés circulares más pequeñas que el contexto configurado.
+No se cambian pesos, prefill ni atención local.
+
+Compilación Release con CUDA 13.1 y arquitectura nativa de la 4070 Ti, en
+`build-grouped/`. **CTest: 33/33**, incluido el contraste FP64 del nuevo kernel.
+El runtime integrado, sin variables experimentales, reproduce exactamente
+los 128 tokens del candidato validado en las cuatro entradas (45, 6.189,
+12.205 y 20.045 tokens). Comprobación funcional de una muestra por contexto:
+52,32 / 48,47 / 47,89 / 47,12 tok/s; no sustituye al benchmark repetido anterior.
+
+El binario de `build/helios_runtime` usado por Helios queda intacto: integrar
+el código en main no ha desplegado todavía ese binario. Evidencia local de
+compilación, CTest y generaciones en `../hector-context-lab/main-integration/`.
+No se encontró enumerada en las docs la lista de cuatro comprobaciones de
+Claude; las verificaciones realizadas aquí son las descritas arriba.

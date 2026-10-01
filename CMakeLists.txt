@@ -95,6 +95,7 @@ set(KERNEL_SOURCES
     kernels/hqs_v4.cu
     kernels/attention.cu
     kernels/attention_flash_decode.cu
+    kernels/attention_global_grouped.cu
     kernels/attention_prefill_gemm.cu
     kernels/attention_prefill_flash.cu
     kernels/sampling.cu
@@ -416,3 +417,7 @@ add_executable(test_hqs_v4 tests/test_hqs_v4.cu)
 target_include_directories(test_hqs_v4 PRIVATE kernels)
 target_link_libraries(test_hqs_v4 PRIVATE helios-engine)
 add_test(NAME HqsV4Kernels COMMAND test_hqs_v4)
+
+add_executable(test_global_grouped tests/test_global_grouped.cu)
+target_link_libraries(test_global_grouped PRIVATE helios-engine)
+add_test(NAME AttentionGlobalGroupedTest COMMAND test_global_grouped)

@@ -549,6 +549,9 @@ bool launch_attention_prefill_flash_fp16(
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
     int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots);
 
+// Specialized non-ring global decode: H16, KVH1, HD512, FP16 K/V.
+void launch_attention_global_grouped_dp(const half* q, const half* k, const half* v, half* out, float* partials,
+    const int32_t* seq, float scale, int splits, int min_chunk, cudaStream_t stream);
 size_t attention_flash_decode_workspace_bytes(int num_heads, int head_dim, int splits);
 void launch_attention_flash_decode_dp(
     const half* q, const half* k_cache, const half* v_cache, half* output,

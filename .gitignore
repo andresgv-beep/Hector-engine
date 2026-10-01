@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 
 # Modelos HNF (multi-GB, nunca al repo)
 *.hnf
