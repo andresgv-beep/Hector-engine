@@ -39,6 +39,22 @@ constexpr uint32_t kMultimodalPrefill = 6144;
 constexpr uint32_t kScratchTokens =
     kPrefillChunk > kMultimodalPrefill ? kPrefillChunk : kMultimodalPrefill;
 
+// Ventana automática (Model::Config::auto_max_seq_len): lo que se deja fuera
+// del KV al elegirla. Medido en el E4B el 29/10/2026, RTX 5070 Laptop:
+// el primer prefill deja ~350 MiB reservados (cuBLAS y descompresión) que no
+// dependen de la ventana, igual con 11k que con 126k tokens; la torre visual
+// mapeada tiene un pico de 336 MiB. Margen para lo que ocupen otros procesos
+// (en el sobremesa la misma GPU mueve los monitores). HELIOS_VRAM_RESERVA_MB
+// sustituye la suma entera.
+constexpr uint64_t kMiB = 1024ull * 1024;
+constexpr uint64_t kReservaPrefill = 512 * kMiB;
+constexpr uint64_t kReservaVision = 384 * kMiB;
+constexpr uint64_t kMargenMinimo = 256 * kMiB;
+constexpr uint32_t kVentanaAuxiliar = 4096;   // HexOS abre la auxiliar con 3072
+constexpr uint32_t kPasoVentana = 1024;
+constexpr uint32_t kVentanaMinima = 4096;
+constexpr uint32_t kVentanaSinLimite = 32768; // si el HNF no declara su máximo
+
 // Un fragmento solo se emite cuando es UTF-8 completo. El protocolo lo mete
 // en una cadena JSON, y un multibyte partido la invalida — ya nos mordió una
 // vez en la UI con "cr??ticas".
@@ -541,6 +557,53 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
                 *error = "no pude crear el adaptador multimodal: " + adapter_error;
                 return nullptr;
             }
+        }
+        if (config.auto_max_seq_len) {
+            // Pesos, buffers y adaptadores ya están en VRAM: lo que queda libre
+            // es lo que hay de verdad para el KV, monitores y otros procesos incluidos.
+            const uint32_t tanda = s.loader.has_gemma4_vision_config()
+                                       ? kScratchTokens : kPrefillChunk;
+            const uint32_t kv_heads = s.model_config.num_key_value_heads();
+            auto kv_bytes = [&](uint32_t n) -> uint64_t {
+                if (s.is_gemma4) {
+                    return Gemma4KVCache::bytes_required(s.loader.gemma4_config(),
+                                                         kv_heads, 1, n, tanda);
+                }
+                return 2ull * s.model_config.num_hidden_layers() * kv_heads *
+                       s.model_config.head_dim() * n * sizeof(half);
+            };
+            size_t libre = 0, total = 0;
+            if (cudaMemGetInfo(&libre, &total) != cudaSuccess) {
+                *error = "no pude medir la VRAM libre para elegir la ventana";
+                return nullptr;
+            }
+            uint64_t reserva = kReservaPrefill + (s.multimodal ? kReservaVision : 0) +
+                               kv_bytes(kVentanaAuxiliar) +
+                               std::max<uint64_t>(kMargenMinimo, (uint64_t)total * 3 / 100);
+            if (const char* r = getenv("HELIOS_VRAM_RESERVA_MB"); r && *r) {
+                reserva = strtoull(r, nullptr, 10) * kMiB;
+            }
+            const uint32_t limite = s.model_config.get<uint32_t>("max_position_embeddings", 0);
+            uint32_t techo = limite ? limite : kVentanaSinLimite;
+            if (config.auto_max_seq_cap) techo = std::min(techo, config.auto_max_seq_cap);
+            techo -= techo % kPasoVentana;
+            uint32_t elegida = 0;
+            for (uint32_t n = techo; n >= kVentanaMinima; n -= kPasoVentana) {
+                if (kv_bytes(n) + reserva <= libre) {
+                    elegida = n;
+                    break;
+                }
+            }
+            if (!elegida) {
+                *error = "no cabe una ventana de " + std::to_string(kVentanaMinima) +
+                         " tokens: quedan " + std::to_string(libre / kMiB) +
+                         " MiB libres con el modelo cargado y la reserva es de " +
+                         std::to_string(reserva / kMiB) + " MiB";
+                return nullptr;
+            }
+            s.max_seq_len = elegida;
+            s.info.memory = Model::MemoryPlan{true, total, libre, reserva, kv_bytes(elegida),
+                                              limite, config.auto_max_seq_cap};
         }
         s.info.architecture = caps.text_architecture;
         s.info.max_seq_len = s.max_seq_len;

@@ -46,6 +46,10 @@ public:
         // Optional modality-only HNF (Gemma 4 12B unified image/audio embedders).
         std::string multimodal_hnf_path;
         uint32_t max_seq_len = 4096;
+        // Ventana elegida al cargar según la VRAM libre (ver Model::load), con
+        // max_seq_len ignorado. auto_max_seq_cap la limita; 0 = el techo del modelo.
+        bool auto_max_seq_len = false;
+        uint32_t auto_max_seq_cap = 0;
         float temperature = 0.7f;   // base; cada turno puede cambiarla
         bool use_cuda_graphs = true; // replay frente a ejecución normal para A/B
         bool use_split_attention = true; // solo geometrías/longitudes validadas; false para A/B
@@ -56,9 +60,21 @@ public:
         bool use_flash_prefill = true;     // atención de prefill fusionada (HD128 sin ventana); false para A/B
     };
 
+    // De dónde sale la ventana cuando la elige Model::load, en bytes.
+    struct MemoryPlan {
+        bool automatic = false;
+        uint64_t total = 0;
+        uint64_t free_after_weights = 0;  // VRAM libre con pesos y buffers ya cargados
+        uint64_t reserve = 0;             // prefill, visión, sesión auxiliar y margen
+        uint64_t kv = 0;                  // KV de la sesión principal con la ventana elegida
+        uint32_t model_limit = 0;         // max_position_embeddings (0 si no consta)
+        uint32_t cap = 0;                 // tope pedido (0 = ninguno)
+    };
+
     struct Info {
         std::string architecture;
         uint32_t max_seq_len = 0;
+        MemoryPlan memory;
         bool multimodal = false;
         std::string vision_adapter;   // vacío si no hay
     };

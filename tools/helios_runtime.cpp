@@ -276,16 +276,23 @@ void hilo_lector() {
 int main(int argc, char** argv) {
     std::string hnf, multimodal;
     uint32_t ctx = 4096;
+    bool ctx_auto = false;
+    uint32_t ctx_max = 0;
     float temp = 0.7f;
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--model" && i + 1 < argc) hnf = argv[++i];
         else if (a == "--multimodal" && i + 1 < argc) multimodal = argv[++i];
-        else if (a == "--ctx" && i + 1 < argc) ctx = (uint32_t)atoi(argv[++i]);
+        else if (a == "--ctx" && i + 1 < argc) {
+            const std::string v = argv[++i];
+            ctx_auto = v == "auto";
+            if (!ctx_auto) ctx = (uint32_t)atoi(v.c_str());
+        }
+        else if (a == "--ctx-max" && i + 1 < argc) ctx_max = (uint32_t)atoi(argv[++i]);
         else if (a == "--temp" && i + 1 < argc) temp = (float)atof(argv[++i]);
         else {
-            std::fprintf(stderr, "uso: %s --model <hnf> [--multimodal <hnf>] [--ctx N] [--temp T]\n",
-                         argv[0]);
+            std::fprintf(stderr, "uso: %s --model <hnf> [--multimodal <hnf>] "
+                         "[--ctx N|auto] [--ctx-max N] [--temp T]\n", argv[0]);
             return 2;
         }
     }
@@ -304,6 +311,8 @@ int main(int argc, char** argv) {
     cfg.hnf_path = hnf;
     cfg.multimodal_hnf_path = multimodal;
     cfg.max_seq_len = ctx;
+    cfg.auto_max_seq_len = ctx_auto;
+    cfg.auto_max_seq_cap = ctx_max;
     cfg.temperature = temp;
     std::string err;
     auto pesos = Model::load(cfg, &err);
@@ -332,6 +341,15 @@ int main(int argc, char** argv) {
         return raw;
     };
     const auto& info = pesos->info();
+    const auto mib = [](uint64_t b) { return std::to_string(b / (1024ull * 1024)); };
+    const auto& plan = info.memory;
+    // Solo con --ctx auto: por qué la ventana es la que es, para poder revisarlo.
+    const std::string memoria = !plan.automatic ? std::string() :
+        ",\"memory\":{\"automatic\":true,\"total_mib\":" + mib(plan.total) +
+        ",\"free_after_weights_mib\":" + mib(plan.free_after_weights) +
+        ",\"reserve_mib\":" + mib(plan.reserve) + ",\"kv_mib\":" + mib(plan.kv) +
+        ",\"model_limit\":" + std::to_string(plan.model_limit) +
+        ",\"cap\":" + std::to_string(plan.cap) + "}";
 
     emit("{\"type\":\"ready\",\"protocol\":2,\"model\":{\"architecture\":\"" +
          json_escape(info.architecture) + "\",\"max_seq_len\":" +
@@ -342,7 +360,7 @@ int main(int argc, char** argv) {
          ",\"vision_adapter\":" +
          (info.vision_adapter.empty()
               ? std::string("null")
-              : "\"" + json_escape(info.vision_adapter) + "\"") + "}}");
+              : "\"" + json_escape(info.vision_adapter) + "\"") + memoria + "}}");
 
     // La sesión por defecto se abre DESPUÉS de `ready`: el protocolo exige que
     // `ready` sea el primer evento, y `session_opened` es un evento.

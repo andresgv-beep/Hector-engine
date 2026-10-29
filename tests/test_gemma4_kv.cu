@@ -557,6 +557,29 @@ void test_ring_rewind_validity() {
     std::cout << "PASS: ring rewind boundaries, partial writes, reset and move" << std::endl;
 }
 
+// La ventana automática se elige con bytes_required ANTES de reservar: si se
+// desviara de allocate(), el cálculo prometería una ventana que no cabe.
+void test_bytes_required_matches_allocation() {
+    auto gemma = synthetic_gemma();
+    for (const uint32_t seq : {8u, 512u, 4096u, 65536u}) {
+        for (const uint32_t prefill : {0u, 2u, 1024u, 6144u}) {
+            for (const uint32_t heads : {1u, 2u}) {
+                helios::Gemma4KVCache cache;
+                require(cache.allocate(gemma, heads, 1, seq, prefill), "allocate for bytes check");
+                require(cache.total_bytes() ==
+                            helios::Gemma4KVCache::bytes_required(gemma, heads, 1, seq, prefill),
+                        "bytes_required differs from allocate (seq " + std::to_string(seq) +
+                            ", prefill " + std::to_string(prefill) + ")");
+            }
+        }
+    }
+    require(helios::Gemma4KVCache::bytes_required(gemma, 0, 1, 64, 0) == 0, "invalid heads gives 0");
+    gemma.num_kv_shared_layers = static_cast<uint32_t>(gemma.layers.size());
+    require(helios::Gemma4KVCache::bytes_required(gemma, 1, 1, 64, 0) == 0,
+            "all-shared layout is invalid, like allocate");
+    std::cout << "PASS: bytes_required equals allocate for every window and ring" << std::endl;
+}
+
 int main(int argc, char** argv) {
     int devices = 0;
     cuda_require(cudaGetDeviceCount(&devices), "cudaGetDeviceCount");
@@ -571,6 +594,7 @@ int main(int argc, char** argv) {
     test_cached_graph_contract();
     test_split_decode_selection();
     test_local_window_and_global_hd512();
+    test_bytes_required_matches_allocation();
     std::cout << "ALL GEMMA 4 KV TESTS PASSED" << std::endl;
     return 0;
 }

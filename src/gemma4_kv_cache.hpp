@@ -45,6 +45,28 @@ public:
      * antes de atenderlas y no pueden pisarse entre ellas. Reservar max_seq_len
      * para las 40 capas deslizantes del 12B son 10 GB a 32k; el anillo son 480 MiB.
      * Con max_prefill 0 se conserva el comportamiento de siempre. */
+    /* Bytes de K y V que reservaría allocate() con estos parámetros, sin
+     * reservarlos: con esto se elige la ventana que cabe antes de crear la
+     * sesión. Mismo recorrido que allocate (capas físicas, anillo en las
+     * deslizantes); 0 si la configuración no es válida. */
+    static uint64_t bytes_required(const Gemma4Config& gemma, uint32_t num_kv_heads,
+                                   uint32_t max_batch_size, uint32_t max_seq_len,
+                                   uint32_t max_prefill = 0) {
+        if (gemma.layers.empty() || num_kv_heads == 0 || max_batch_size == 0 ||
+            max_seq_len == 0 || gemma.num_kv_shared_layers >= gemma.layers.size()) {
+            return 0;
+        }
+        const uint32_t first_shared =
+            static_cast<uint32_t>(gemma.layers.size()) - gemma.num_kv_shared_layers;
+        uint64_t elements = 0;
+        for (uint32_t i = 0; i < first_shared; ++i) {
+            const auto& layer = gemma.layers[i];
+            elements += (uint64_t)max_batch_size * layer.kv_heads_or(num_kv_heads) *
+                        ranuras(layer, max_seq_len, max_prefill) * layer.head_dim;
+        }
+        return 2 * elements * sizeof(half);
+    }
+
     bool allocate(const Gemma4Config& gemma, uint32_t num_kv_heads,
                   uint32_t max_batch_size, uint32_t max_seq_len,
                   uint32_t max_prefill = 0) {
