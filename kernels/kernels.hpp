@@ -631,6 +631,15 @@ void launch_embedding_hq62k(
 
 
 
+// Gemma 4 MoE. indices y weights son [L, K]: expertos por probabilidad descendente
+// y, si empatan, por id ascendente.
+void launch_moe_route(const half* logits, const half* expert_scale, int32_t* indices, float* weights,
+                      int L, int E, int K, cudaStream_t stream);
+// gate_up es [E, 2I, H] y down [E, H, I]. Sincroniza: no es capturable en un grafo.
+void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
+                               const half* gate_up, const half* down, half* output,
+                               int L, int E, int K, int H, int I, cudaStream_t stream);
+
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,
     int M, int K, int N, cudaStream_t stream = nullptr
