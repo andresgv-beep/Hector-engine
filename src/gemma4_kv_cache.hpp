@@ -44,10 +44,16 @@ public:
      * tanda hace falta porque durante el prefill se escriben varias posiciones
      * antes de atenderlas y no pueden pisarse entre ellas. Reservar max_seq_len
      * para las 40 capas deslizantes del 12B son 10 GB a 32k; el anillo son 480 MiB.
-     * Con max_prefill 0 se conserva el comportamiento de siempre. */
+     * Con max_prefill 0 se conserva el comportamiento de siempre.
+     *
+     * Con `ring_owner`, las capas deslizantes con el mismo anillo no reservan
+     * nada: usan los buffers de ese caché. Son 640 MiB en el 12B y los turnos van
+     * en serie, así que dos sesiones pueden turnarse el mismo sitio. Quien presta
+     * guarda sus anillos con save_rings y quien toma prestado empieza vacío. */
     bool allocate(const Gemma4Config& gemma, uint32_t num_kv_heads,
                   uint32_t max_batch_size, uint32_t max_seq_len,
-                  uint32_t max_prefill = 0) {
+                  uint32_t max_prefill = 0,
+                  const Gemma4KVCache* ring_owner = nullptr) {
         free();
         if (gemma.layers.empty() || num_kv_heads == 0 ||
             max_batch_size == 0 || max_seq_len == 0 ||
@@ -69,6 +75,8 @@ public:
         kv_heads_.resize(layers);
         slots_.resize(layers);
         windows_.resize(layers);
+        borrowed_k_.assign(layers, nullptr);
+        borrowed_v_.assign(layers, nullptr);
 
         int32_t last_local = -1;
         int32_t last_global = -1;
@@ -85,6 +93,12 @@ public:
             windows_[i] = layer.is_global_attention() ? 0 : layer.sliding_window;
             if (layer.is_global_attention()) last_global = static_cast<int32_t>(i);
             else last_local = static_cast<int32_t>(i);
+
+            if (ring_owner && ring_owner->matches_ring(i, *this)) {
+                borrowed_k_[i] = ring_owner->k_data_ + ring_owner->offsets_[i];
+                borrowed_v_[i] = ring_owner->v_data_ + ring_owner->offsets_[i];
+                continue;
+            }
 
             size_t stride = 0;
             if (!checked_stride(layer.head_dim, kv_heads_[i], slots_[i], stride) ||
@@ -108,6 +122,8 @@ public:
             slots_[i] = slots_[source];
             windows_[i] = windows_[source];
             kv_heads_[i] = kv_heads_[source];
+            borrowed_k_[i] = borrowed_k_[source];
+            borrowed_v_[i] = borrowed_v_[source];
         }
 
         if (total_elements == 0 ||
@@ -145,6 +161,8 @@ public:
         kv_heads_.clear();
         slots_.clear();
         windows_.clear();
+        borrowed_k_.clear();
+        borrowed_v_.clear();
         num_kv_heads_ = 0;
         max_batch_size_ = 0;
         max_seq_len_ = 0;
@@ -176,16 +194,37 @@ public:
     }
 
     half* k_cache(uint32_t layer) {
-        return valid_layer(layer) ? k_data_ + offsets_[layer] : nullptr;
+        if (!valid_layer(layer)) return nullptr;
+        return borrowed_k_[layer] ? borrowed_k_[layer] : k_data_ + offsets_[layer];
     }
     const half* k_cache(uint32_t layer) const {
-        return valid_layer(layer) ? k_data_ + offsets_[layer] : nullptr;
+        return const_cast<Gemma4KVCache*>(this)->k_cache(layer);
     }
     half* v_cache(uint32_t layer) {
-        return valid_layer(layer) ? v_data_ + offsets_[layer] : nullptr;
+        if (!valid_layer(layer)) return nullptr;
+        return borrowed_v_[layer] ? borrowed_v_[layer] : v_data_ + offsets_[layer];
     }
     const half* v_cache(uint32_t layer) const {
-        return valid_layer(layer) ? v_data_ + offsets_[layer] : nullptr;
+        return const_cast<Gemma4KVCache*>(this)->v_cache(layer);
+    }
+
+    bool borrows_rings() const {
+        for (const half* p : borrowed_k_) {
+            if (p) return true;
+        }
+        return false;
+    }
+
+    /* Copia los anillos a RAM y de vuelta. Las capas globales no se tocan: cada
+     * sesión tiene las suyas. */
+    bool save_rings(std::vector<char>& host) const {
+        host.resize(ring_bytes());
+        return copy_rings(host.data(), true);
+    }
+    bool restore_rings(const std::vector<char>& host) {
+        return host.size() == ring_bytes() &&
+               const_cast<Gemma4KVCache*>(this)->copy_rings(
+                   const_cast<char*>(host.data()), false);
     }
 
     bool is_allocated() const { return k_data_ && v_data_; }
@@ -242,6 +281,45 @@ public:
     }
 
 private:
+    bool matches_ring(uint32_t layer, const Gemma4KVCache& other) const {
+        return is_allocated() && layer < first_shared_layer_ && !borrowed_k_[layer] &&
+               windows_[layer] && windows_[layer] == other.windows_[layer] &&
+               slots_[layer] == other.slots_[layer] &&
+               kv_heads_[layer] == other.kv_heads_[layer] &&
+               head_dims_[layer] == other.head_dims_[layer] &&
+               max_batch_size_ == other.max_batch_size_;
+    }
+
+    size_t ring_layer_bytes(uint32_t layer) const {
+        return (size_t)max_batch_size_ * slots_[layer] * kv_heads_[layer] *
+               head_dims_[layer] * sizeof(half);
+    }
+
+    size_t ring_bytes() const {
+        size_t total = 0;
+        for (uint32_t i = 0; i < first_shared_layer_; ++i) {
+            if (windows_[i]) total += 2 * ring_layer_bytes(i);
+        }
+        return total;
+    }
+
+    bool copy_rings(char* host, bool to_host) const {
+        for (uint32_t i = 0; i < first_shared_layer_; ++i) {
+            if (!windows_[i]) continue;
+            const size_t bytes = ring_layer_bytes(i);
+            for (const half* plane : {k_cache(i), v_cache(i)}) {
+                void* device = const_cast<half*>(plane);
+                if (cudaMemcpy(to_host ? host : device, to_host ? device : host, bytes,
+                               to_host ? cudaMemcpyDeviceToHost
+                                       : cudaMemcpyHostToDevice) != cudaSuccess) {
+                    return false;
+                }
+                host += bytes;
+            }
+        }
+        return true;
+    }
+
     bool checked_stride(uint32_t head_dim, size_t& stride) const {
         return checked_stride(head_dim, num_kv_heads_, max_seq_len_, stride);
     }
@@ -286,6 +364,8 @@ private:
         kv_heads_ = std::move(other.kv_heads_);
         slots_ = std::move(other.slots_);
         windows_ = std::move(other.windows_);
+        borrowed_k_ = std::move(other.borrowed_k_);
+        borrowed_v_ = std::move(other.borrowed_v_);
         num_kv_heads_ = other.num_kv_heads_;
         max_batch_size_ = other.max_batch_size_;
         max_seq_len_ = other.max_seq_len_;
@@ -309,6 +389,9 @@ private:
     /* Ranuras reales de cada capa: su ventana si es deslizante, la secuencia si no. */
     std::vector<uint32_t> slots_;
     std::vector<uint32_t> windows_;
+    // Por capa: el buffer de otro caché, o nullptr si la capa es propia.
+    std::vector<half*> borrowed_k_;
+    std::vector<half*> borrowed_v_;
     uint32_t num_kv_heads_ = 0;
     uint32_t max_batch_size_ = 0;
     uint32_t max_seq_len_ = 0;

@@ -320,7 +320,12 @@ int main(int argc, char** argv) {
         if (it != sesiones.end()) return it->second.get();
         auto nueva = std::make_unique<InferenceSession>();
         std::string e;
-        if (!nueva->attach(pesos, &e, capacity)) {
+        // Las sesiones secundarias se turnan los anillos con la principal.
+        InferenceSession* dueno = nullptr;
+        if (id != kSesionPorDefecto && !getenv("HELIOS_ANILLO_PROPIO")) {
+            dueno = sesiones.at(kSesionPorDefecto).get();
+        }
+        if (!nueva->attach(pesos, &e, capacity, dueno)) {
             std::fprintf(stderr, "[runtime] no pude abrir la sesión %s: %s\n",
                          id.c_str(), e.c_str());
             return nullptr;
@@ -535,9 +540,21 @@ int main(int argc, char** argv) {
                  ",\"total_tokens\":" + std::to_string(total) +
                  ",\"ms\":" + std::to_string(ms) + "}");
         };
-        const bool ok = session.run_turn(messages, adjuntos, gen, on_text,
-                                         on_think, on_prefill, g_cancelar,
-                                         &st, &reason, &code, &msg, on_progress);
+        InferenceSession* dueno = session.borrows_rings()
+                                      ? sesiones.at(kSesionPorDefecto).get() : nullptr;
+        bool ok = false;
+        if (dueno && !dueno->save_rings()) {
+            code = "engine_failure";
+            msg = "no pude guardar el KV de la sesión principal";
+        } else {
+            if (dueno) session.reset();
+            ok = session.run_turn(messages, adjuntos, gen, on_text,
+                                  on_think, on_prefill, g_cancelar,
+                                  &st, &reason, &code, &msg, on_progress);
+            // Sin los anillos el KV principal no sirve: se vacía y el adaptador
+            // reenvía la conversación en su turno siguiente.
+            if (dueno && !dueno->restore_rings()) dueno->reset();
+        }
         if (ok && !(reason == InferenceSession::FinishReason::Cancelled &&
                     st.generated_tokens == 0)) {
             // Fallo/cancelación sin generación permiten reintentar el adjunto

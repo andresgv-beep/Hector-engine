@@ -156,6 +156,7 @@ struct InferenceSession::Impl {
     KVCacheConfig kv_config;
     KVCache kv_cache;
     Gemma4KVCache gemma_kv_cache;
+    std::vector<char> saved_rings;
     Sampler sampler;
     SamplingConfig sample_config;
     CommandBuffer decode_cb;
@@ -554,8 +555,24 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
     }
 }
 
+bool InferenceSession::borrows_rings() const {
+    return impl_->is_gemma4 && impl_->gemma_kv_cache.borrows_rings();
+}
+
+bool InferenceSession::save_rings() {
+    std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
+    return cudaDeviceSynchronize() == cudaSuccess &&
+           impl_->gemma_kv_cache.save_rings(impl_->saved_rings);
+}
+
+bool InferenceSession::restore_rings() {
+    std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
+    return cudaDeviceSynchronize() == cudaSuccess &&
+           impl_->gemma_kv_cache.restore_rings(impl_->saved_rings);
+}
+
 bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
-                              uint32_t max_seq_len) {
+                              uint32_t max_seq_len, InferenceSession* ring_owner) {
     if (!model) { *error = "modelo nulo"; return false; }
     try {
         impl_ = std::make_unique<Impl>(std::move(model));
@@ -594,7 +611,9 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                                        ? kScratchTokens : kPrefillChunk;
             if (!s.gemma_kv_cache.allocate(s.loader.gemma4_config(),
                                            M.model_config.num_key_value_heads(),
-                                           1, s.kv_config.max_seq_len, tanda)) {
+                                           1, s.kv_config.max_seq_len, tanda,
+                                           ring_owner ? &ring_owner->impl_->gemma_kv_cache
+                                                      : nullptr)) {
                 *error = "no pude reservar el KV heterogeneo de Gemma 4";
                 return false;
             }

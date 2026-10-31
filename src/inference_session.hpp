@@ -179,8 +179,18 @@ public:
     // pide scratch por sesión, y eso todavía no está.
     // `max_seq_len` a 0 usa el del modelo. Una sesión auxiliar —preámbulos,
     // extracciones— no necesita la ventana entera y su KV cuesta VRAM.
+    // Con `ring_owner`, usa los anillos deslizantes de esa sesión en vez de
+    // reservar los suyos; ver save_rings.
     bool attach(std::shared_ptr<Model> model, std::string* error,
-                uint32_t max_seq_len = 0);
+                uint32_t max_seq_len = 0, InferenceSession* ring_owner = nullptr);
+
+    // Préstamo de anillos: el dueño los guarda en RAM antes del turno de quien
+    // los toma prestados y los recupera al acabar. Entre medias el KV del dueño
+    // no vale. Quien los toma debe empezar con reset: su contenido anterior ya
+    // se ha sobrescrito.
+    bool borrows_rings() const;
+    bool save_rings();
+    bool restore_rings();
 
     const ModelInfo& info() const;
 

@@ -557,6 +557,48 @@ void test_ring_rewind_validity() {
     std::cout << "PASS: ring rewind boundaries, partial writes, reset and move" << std::endl;
 }
 
+void test_borrowed_rings() {
+    const auto gemma = synthetic_gemma();
+    helios::Gemma4KVCache owner, guest;
+    require(owner.allocate(gemma, 1, 1, 4096, 64), "allocate ring owner");
+    require(guest.allocate(gemma, 1, 1, 2048, 64, &owner), "allocate ring guest");
+    require(guest.borrows_rings() && !owner.borrows_rings(), "only the guest borrows");
+    helios::Gemma4KVCache alone;
+    require(alone.allocate(gemma, 1, 1, 2048, 64), "allocate without owner");
+    require(guest.total_bytes() < alone.total_bytes(), "borrowed rings reserve nothing");
+
+    for (uint32_t i = 0; i < owner.num_layers(); ++i) {
+        const bool global = gemma.layers[i].is_global_attention();
+        require((guest.k_cache(i) == owner.k_cache(i)) == !global, "only sliding K is shared");
+        require((guest.v_cache(i) == owner.v_cache(i)) == !global, "only sliding V is shared");
+    }
+
+    helios::Gemma4KVCache different;
+    require(different.allocate(gemma, 1, 1, 2048, 128, &owner), "allocate another ring size");
+    require(!different.borrows_rings(), "a different ring is never borrowed");
+
+    const uint32_t local = 0;
+    const size_t count = (size_t)owner.slots(local) * owner.num_kv_heads(local) * owner.head_dim(local);
+    std::vector<half> original(count), read(count), scribble(count, __float2half(9.0f));
+    for (size_t i = 0; i < count; ++i) original[i] = __float2half(float(i % 1000));
+    cuda_require(cudaMemcpy(owner.k_cache(local), original.data(), count * sizeof(half),
+                            cudaMemcpyHostToDevice), "write ring");
+    std::vector<char> saved;
+    require(owner.save_rings(saved), "save rings");
+    cuda_require(cudaMemcpy(guest.k_cache(local), scribble.data(), count * sizeof(half),
+                            cudaMemcpyHostToDevice), "guest writes");
+    require(owner.restore_rings(saved), "restore rings");
+    cuda_require(cudaMemcpy(read.data(), owner.k_cache(local), count * sizeof(half),
+                            cudaMemcpyDeviceToHost), "read ring");
+    require(std::memcmp(read.data(), original.data(), count * sizeof(half)) == 0,
+            "owner ring survives the guest");
+
+    guest.free();
+    cuda_require(cudaMemcpy(read.data(), owner.k_cache(local), count * sizeof(half),
+                            cudaMemcpyDeviceToHost), "ring outlives guest");
+    std::cout << "PASS: borrowed rings, save and restore" << std::endl;
+}
+
 int main(int argc, char** argv) {
     int devices = 0;
     cuda_require(cudaGetDeviceCount(&devices), "cudaGetDeviceCount");
@@ -568,6 +610,7 @@ int main(int argc, char** argv) {
     }
     test_layout_and_aliases();
     test_ring_rewind_validity();
+    test_borrowed_rings();
     test_cached_graph_contract();
     test_split_decode_selection();
     test_local_window_and_global_hd512();
