@@ -39,7 +39,9 @@ __global__ void moe_route_kernel(
     float sum = 0.0f;
     float best[MOE_MAX_TOP_K];
     int best_id[MOE_MAX_TOP_K];
-    for (int k = 0; k < K; ++k) { best[k] = -1.0f; best_id[k] = -1; }
+    // Con logits NaN ninguna comparación es cierta: los ids deben seguir siendo
+    // válidos, porque el decode calcula con ellos direcciones de pesos.
+    for (int k = 0; k < K; ++k) { best[k] = -1.0f; best_id[k] = k; }
     for (int e = 0; e < E; ++e) {
         const float value = expf(__half2float(row[e]) - top);
         sum += value;

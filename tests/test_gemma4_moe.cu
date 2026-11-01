@@ -249,6 +249,19 @@ std::vector<uint8_t> random_hq44(std::mt19937& rng, size_t blocks) {
     return bytes;
 }
 
+void test_nan_logits_keep_valid_ids() {
+    constexpr int E = 16, K = 4;
+    const std::vector<float> nans(E, std::nanf(""));
+    const std::vector<float> scale(E, 1.0f);
+    half* dlogits = upload(halves(nans));
+    half* dscale = upload(halves(scale));
+    int32_t* dindices = device_array<int32_t>(K);
+    float* dweights = device_array<float>(K);
+    launch_moe_route(dlogits, dscale, dindices, dweights, 1, E, K, nullptr);
+    for (int32_t id : download(dindices, K)) require(id >= 0 && id < E, "id válido con logits NaN");
+    std::cout << "  logits NaN: ids validos" << std::endl;
+}
+
 void test_hq44_decode_follows_the_indices() {
     constexpr int E = 12, K = 4, H = 512, I = 176, P = 256;
     constexpr int warps = 1, rows_per_block = 8, unroll = 4;
@@ -325,6 +338,7 @@ int main(int argc, char** argv) {
     test_ties_use_the_lowest_id();
     test_reference(argv[1]);
     test_graph_replay_follows_the_router(argv[1]);
+    test_nan_logits_keep_valid_ids();
     test_hq44_decode_follows_the_indices();
     std::cout << "Gemma 4 MoE OK" << std::endl;
     return 0;
