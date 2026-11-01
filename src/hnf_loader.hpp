@@ -339,6 +339,7 @@ constexpr uint32_t GEMMA4_EXT_FLAG_LOGIT_SOFTCAP    = (1u << 2);
 constexpr uint32_t GEMMA4_EXT_FLAG_SHARED_KV        = (1u << 3);
 constexpr uint32_t GEMMA4_EXT_FLAG_DOUBLE_WIDE_MLP  = (1u << 4);
 constexpr uint32_t GEMMA4_EXT_FLAG_FOUR_NORM_BLOCK  = (1u << 5);
+constexpr uint32_t GEMMA4_EXT_FLAG_MOE              = (1u << 6);
 
 // Flags de Gemma4LayerConfigBin.flags (por CAPA, no confundir con los EXT del
 // modelo).  Bit 0: la capa no tiene v_proj y reutiliza la proyeccion K como V
@@ -388,6 +389,10 @@ struct Gemma4Config {
     uint32_t global_head_dim = 0;
     uint32_t ple_hidden_size = 0;
     uint32_t num_kv_shared_layers = 0;
+    // Expertos por capa, expertos usados por token y filas de la matriz gate/up.
+    uint32_t moe_experts = 0;
+    uint32_t moe_top_k = 0;
+    uint32_t moe_intermediate_size = 0;
     std::vector<Gemma4LayerConfig> layers;
 
     bool has_flag(uint32_t flag) const { return (flags & flag) != 0; }
