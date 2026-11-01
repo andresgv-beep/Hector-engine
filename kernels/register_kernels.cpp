@@ -470,6 +470,10 @@ void register_linear_kernels(Engine& engine) {
 // MEMORY KERNEL REGISTRATION
 // ============================================================================
 
+static bool moe_expert_dtype(const TensorInfo& tensor) {
+    return tensor.dtype == dtype::FP16() || tensor.dtype == dtype::HQ44K();
+}
+
 struct MoeExpertShape {
     uint32_t experts, hidden, inner, physical;
 };
@@ -598,6 +602,41 @@ void register_memory_kernels(Engine& engine) {
             static_cast<int>(output->numel() / row_width), ctx.stream);
     });
 
+    engine.register_kernel(op::MOE_ROUTER_INPUT(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* hidden = ctx.in(0);
+        TensorInfo* scale = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        if (!hidden || !scale || !output || output->dtype != dtype::FP32() ||
+            scale->numel() != hidden->shape.back() || output->numel() != hidden->numel()) {
+            throw std::runtime_error("MOE_ROUTER_INPUT: invalid tensors");
+        }
+        const uint32_t width = hidden->shape.back();
+        launch_moe_router_input(as_fp16_const(hidden), as_fp16_const(scale),
+                                static_cast<float*>(output->ptr),
+                                static_cast<int>(hidden->numel() / width), static_cast<int>(width),
+                                cmd.get<float>("eps", 1e-6f), cmd.get<float>("factor", 1.0f), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_LOGITS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* router = ctx.in(1);
+        TensorInfo* logits = ctx.output;
+        if (!input || !router || !logits) throw std::runtime_error("MOE_LOGITS: missing tensors");
+        if (input->dtype != dtype::FP32() || router->dtype != dtype::FP16() ||
+            logits->dtype != dtype::FP32()) {
+            throw std::runtime_error("MOE_LOGITS: needs an FP16 router, FP32 input and logits");
+        }
+        if (router->shape.size() != 2 || input->shape.back() != router->shape[1] ||
+            logits->numel() != input->numel() / router->shape[1] * router->shape[0]) {
+            throw std::runtime_error("MOE_LOGITS: incompatible shapes");
+        }
+        const uint32_t experts = router->shape[0], hidden = router->shape[1];
+        launch_moe_logits(static_cast<const float*>(input->ptr), as_fp16_const(router),
+                          static_cast<float*>(logits->ptr),
+                          static_cast<int>(input->numel() / hidden), static_cast<int>(experts),
+                          static_cast<int>(hidden), ctx.stream);
+    });
+
     engine.register_kernel(op::MOE_ROUTE(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* logits = ctx.in(0);
         TensorInfo* expert_scale = ctx.in(1);
@@ -607,8 +646,9 @@ void register_memory_kernels(Engine& engine) {
         if (!logits || !expert_scale || !weights || !indices || top_k == 0) {
             throw std::runtime_error("MOE_ROUTE: missing tensors or top_k");
         }
-        if (indices->dtype != dtype::INT32() || weights->dtype != dtype::FP32()) {
-            throw std::runtime_error("MOE_ROUTE: indices must be INT32 and weights FP32");
+        if (indices->dtype != dtype::INT32() || weights->dtype != dtype::FP32() ||
+            logits->dtype != dtype::FP32()) {
+            throw std::runtime_error("MOE_ROUTE: indices must be INT32, logits and weights FP32");
         }
         const size_t experts = expert_scale->numel();
         if (experts == 0 || logits->numel() % experts != 0) {
@@ -619,7 +659,7 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("MOE_ROUTE: outputs must be [tokens, top_k]");
         }
         launch_moe_route(
-            as_fp16_const(logits), as_fp16_const(expert_scale), as_i32(indices),
+            static_cast<const float*>(logits->ptr), as_fp16_const(expert_scale), as_i32(indices),
             static_cast<float*>(weights->ptr), static_cast<int>(tokens),
             static_cast<int>(experts), static_cast<int>(top_k), ctx.stream);
     });
@@ -634,9 +674,8 @@ void register_memory_kernels(Engine& engine) {
         if (!input || !indices || !weights || !gate_up || !down || !output) {
             throw std::runtime_error("MOE_EXPERTS: missing tensors");
         }
-        // La referencia multiplica FP16 plano: HQS va en los kernels fundidos.
-        if (gate_up->dtype != dtype::FP16() || down->dtype != dtype::FP16()) {
-            throw std::runtime_error("MOE_EXPERTS: reference path needs FP16 experts");
+        if (!moe_expert_dtype(*gate_up) || !moe_expert_dtype(*down)) {
+            throw std::runtime_error("MOE_EXPERTS: experts must be FP16 or HQ44");
         }
         const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
         const uint32_t hidden = shape.hidden;
@@ -647,8 +686,8 @@ void register_memory_kernels(Engine& engine) {
         }
         run_moe_experts_reference(
             as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
-            as_fp16_const(gate_up), as_fp16_const(down), as_fp16(output),
-            static_cast<int>(tokens), static_cast<int>(shape.experts),
+            gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
+            as_fp16(output), static_cast<int>(tokens), static_cast<int>(shape.experts),
             static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
             static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream);
     });
@@ -667,10 +706,7 @@ void register_memory_kernels(Engine& engine) {
             !hidden_scratch || !rows_scratch || !output) {
             throw std::runtime_error("MOE_EXPERTS_DECODE: missing tensors");
         }
-        const auto supported = [](const TensorInfo& t) {
-            return t.dtype == dtype::FP16() || t.dtype == dtype::HQ44K();
-        };
-        if (!supported(*gate_up) || !supported(*down)) {
+        if (!moe_expert_dtype(*gate_up) || !moe_expert_dtype(*down)) {
             throw std::runtime_error("MOE_EXPERTS_DECODE: experts must be FP16 or HQ44");
         }
         const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);

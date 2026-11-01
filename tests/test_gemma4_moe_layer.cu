@@ -102,6 +102,12 @@ std::vector<half> to_half(const std::vector<float>& values) {
 
 std::vector<float> scratch_floats(helios::Engine& engine, const std::string& name, size_t count) {
     engine.sync();
+    if (engine.tensors().at(name).dtype == helios::dtype::FP32()) {
+        std::vector<float> values(count);
+        cuda_require(cudaMemcpy(values.data(), engine.tensors().at(name).ptr, count * sizeof(float),
+                                cudaMemcpyDeviceToHost), "leer " + name);
+        return values;
+    }
     std::vector<half> host(count);
     cuda_require(cudaMemcpy(host.data(), engine.tensors().at(name).ptr, count * sizeof(half),
                             cudaMemcpyDeviceToHost), "leer " + name);
@@ -160,7 +166,7 @@ void dump_outputs(helios::Engine& engine, const helios::CommandBuffer& tail,
     const std::map<std::pair<std::string, int>, std::string> steps{
         {{"_s.normed", 1}, "shared_input"},
         {{"_s.mlp_out", 2}, "shared_branch_post"},
-        {{"_s.g4.moe_router", 2}, "router_input"},
+        {{"_s.g4.moe_router", 1}, "router_input"},
         {{"_s.g4.moe_logits", 1}, "router_logits"},
         {{"_s.normed", 2}, "expert_input"},
         {{"_s.g4.moe_out", 1}, "expert_sum"},
@@ -200,10 +206,10 @@ void dump_outputs(helios::Engine& engine, const helios::CommandBuffer& tail,
     cuda_require(cudaMalloc(&unit_scale, E * sizeof(half)), "escala");
     const std::vector<half> ones(E, __float2half(1.0f));
     cuda_require(cudaMemcpy(unit_scale, ones.data(), E * sizeof(half), cudaMemcpyHostToDevice), "escala");
-    launch_moe_probabilities(static_cast<const half*>(logits), probabilities, TOKENS, E, 0);
+    launch_moe_probabilities(static_cast<const float*>(logits), probabilities, TOKENS, E, 0);
     write_file(out + "/router_probabilities.f32", download<float>(probabilities, tokens * E));
     // Con escala 1 moe_route deja justo los pesos renormalizados.
-    launch_moe_route(static_cast<const half*>(logits), unit_scale, route_ids, normalized, TOKENS, E, K, 0);
+    launch_moe_route(static_cast<const float*>(logits), unit_scale, route_ids, normalized, TOKENS, E, K, 0);
     write_file(out + "/normalized_weights.f32", download<float>(normalized, tokens * K));
 
     const half* input = static_cast<const half*>(engine.tensors().at("_s.normed").ptr);
@@ -247,13 +253,13 @@ void dump_outputs(helios::Engine& engine, const helios::CommandBuffer& tail,
 }
 
 void test_ties(helios::Engine& engine, const std::string& oracle, const std::string& out) {
-    const auto logits = to_half(read_file<float>(oracle + "/tie_logits.f32"));
+    const auto logits = read_file<float>(oracle + "/tie_logits.f32");
     const auto scale = to_half(read_file<float>(oracle + "/tie_scales.f32"));
     const auto want_ids = read_file<int32_t>(oracle + "/tie_ids.i32");
     const auto want_weights = read_file<float>(oracle + "/tie_weights.f32");
     auto& tensors = engine.tensors();
-    cudaMemcpy(tensors.allocate_and_register("test.tie.logits", {1, E}, FP16()), logits.data(),
-               logits.size() * sizeof(half), cudaMemcpyHostToDevice);
+    cudaMemcpy(tensors.allocate_and_register("test.tie.logits", {1, E}, helios::dtype::FP32()), logits.data(),
+               logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(tensors.allocate_and_register("test.tie.scale", {E}, FP16()), scale.data(),
                scale.size() * sizeof(half), cudaMemcpyHostToDevice);
     void* ids = tensors.allocate_and_register("test.tie.ids", {1, K}, helios::dtype::INT32());
@@ -385,7 +391,7 @@ DecodeDump dump_decode(helios::Engine& engine, helios::GraphBuilder& builder, co
     const std::map<std::pair<std::string, int>, std::string> steps{
         {{"_s.normed", 1}, "shared_input"},
         {{"_s.mlp_out", 2}, "shared_branch_post"},
-        {{"_s.g4.moe_router", 2}, "router_input"},
+        {{"_s.g4.moe_router", 1}, "router_input"},
         {{"_s.g4.moe_logits", 1}, "router_logits"},
         {{"_s.normed", 2}, "expert_input"},
         {{"_s.g4.moe_out", 1}, "expert_sum"},
@@ -431,7 +437,7 @@ DecodeDump dump_decode(helios::Engine& engine, helios::GraphBuilder& builder, co
         dump.ids.insert(dump.ids.end(), ids.begin(), ids.end());
         dump.weights.insert(dump.weights.end(), weights.begin(), weights.end());
 
-        const half* logits = static_cast<const half*>(engine.tensors().at("_s.g4.moe_logits").ptr);
+        const float* logits = static_cast<const float*>(engine.tensors().at("_s.g4.moe_logits").ptr);
         launch_moe_probabilities(logits, probabilities, 1, E, 0);
         keep("router_probabilities", download<float>(probabilities, E));
         launch_moe_route(logits, unit_scale, route_ids, normalized, 1, E, K, 0);
@@ -471,6 +477,12 @@ DecodeDump dump_decode(helios::Engine& engine, helios::GraphBuilder& builder, co
 double median_ms(std::vector<double> values) {
     std::sort(values.begin(), values.end());
     return values[values.size() / 2];
+}
+
+size_t unique_experts(const std::vector<int32_t>& ids) {
+    std::vector<int32_t> sorted = ids;
+    std::sort(sorted.begin(), sorted.end());
+    return size_t(std::unique(sorted.begin(), sorted.end()) - sorted.begin());
 }
 
 // Los expertos que eligió el router real, solos, dentro de un grafo.
@@ -547,6 +559,70 @@ void test_payloads(helios::Engine& engine, helios::GraphBuilder& builder, const 
     const auto hq44_dump = dump_decode(engine, builder, config, padded, arch, residual, oracle, out, out + "-hq44");
     time_decode(engine, "expertos HQ44", hq44_dump);
     require(fp16_dump.ids == hq44_dump.ids, "el router no depende de los expertos");
+
+    // Prefill: los mismos tokens en lote, contra el decode token a token.
+    std::vector<float> one_by_one;
+    for (uint32_t token = 0; token < TOKENS; ++token) {
+        set_residual(engine, std::vector<half>(residual.begin() + size_t(token) * H,
+                                               residual.begin() + size_t(token + 1) * H));
+        engine.execute(builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, 1));
+        const auto row = scratch_floats(engine, HIDDEN, H);
+        one_by_one.insert(one_by_one.end(), row.begin(), row.end());
+    }
+    set_residual(engine, residual);
+    const auto batch = builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, TOKENS);
+    engine.execute(batch);
+    const auto batched = scratch_floats(engine, HIDDEN, size_t(TOKENS) * H);
+    check_error("prefill HQ44 contra decode", batched, one_by_one, 2e-3);
+    check_error("prefill HQ44 contra oraculo", batched, read_file<float>(oracle + "/output.f32"), 0.08);
+
+    // Tanda larga: cada experto recibe 9 filas o más y pasa a descuantizar y GEMM.
+    constexpr uint32_t REPEATS = 16, LONG = TOKENS * REPEATS;
+    std::vector<half> long_residual;
+    std::vector<float> long_decode;
+    for (uint32_t repeat = 0; repeat < REPEATS; ++repeat) {
+        long_residual.insert(long_residual.end(), residual.begin(), residual.end());
+        long_decode.insert(long_decode.end(), one_by_one.begin(), one_by_one.end());
+    }
+    builder.allocate_gemma4_scratch(engine, config, padded, arch, 1, LONG);
+    set_residual(engine, long_residual);
+    const auto long_batch = builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, LONG);
+    engine.execute(long_batch);
+    check_error("prefill largo HQ44 contra decode", scratch_floats(engine, HIDDEN, size_t(LONG) * H),
+                long_decode, 2e-3);
+    // Un token elige los mismos expertos en lote y en decode: no puede depender del camino.
+    const auto long_ids = download<int32_t>(engine.tensors().at("_s.g4.moe_indices").ptr, size_t(LONG) * K);
+    for (size_t i = 0; i < long_ids.size(); ++i) {
+        require(long_ids[i] == hq44_dump.ids[i % hq44_dump.ids.size()], "ids del prefill largo");
+    }
+    std::cout << "  ids del prefill largo: identicos al decode" << std::endl;
+    std::vector<double> long_prefill;
+    for (int run = 0; run < 12; ++run) {
+        set_residual(engine, long_residual);
+        const auto start = std::chrono::steady_clock::now();
+        engine.execute(long_batch);
+        engine.sync();
+        if (run >= 2) {
+            long_prefill.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+    }
+    std::cout << "  TIEMPO cola de prefill HQ44, " << LONG << " tokens: " << median_ms(long_prefill)
+              << " ms por capa" << std::endl;
+    builder.allocate_gemma4_scratch(engine, config, padded, arch, 1, TOKENS);
+
+    const auto short_batch = builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, TOKENS);
+    std::vector<double> prefill;
+    for (int run = 0; run < 24; ++run) {
+        set_residual(engine, residual);
+        const auto start = std::chrono::steady_clock::now();
+        engine.execute(short_batch);
+        engine.sync();
+        if (run >= 4) {
+            prefill.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
+    }
+    std::cout << "  TIEMPO cola de prefill HQ44, " << TOKENS << " tokens y " << unique_experts(hq44_dump.ids)
+              << " expertos: " << median_ms(prefill) << " ms por capa" << std::endl;
 
     set_residual(engine, std::vector<half>(residual.begin(), residual.begin() + H));
     const auto tail = builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, 1);
@@ -715,12 +791,10 @@ void test_layer(const std::string& references, const std::string& out, const std
                                "text.layer0.moe.experts.down.weight",
                                "_s.g4.moe_gate_up", "_s.g4.moe_hidden", "_s.g4.moe_rows");
     const auto set_logits = [&](uint32_t token) {
-        std::vector<half> logits(E);
-        for (uint32_t e = 0; e < E; ++e) {
-            logits[e] = __float2half(std::sin(float(e * (token + 3)) * 0.7f) * 4.0f);
-        }
+        std::vector<float> logits(E);
+        for (uint32_t e = 0; e < E; ++e) logits[e] = std::sin(float(e * (token + 3)) * 0.7f) * 4.0f;
         cuda_require(cudaMemcpy(engine.tensors().at("_s.g4.moe_logits").ptr, logits.data(),
-                                E * sizeof(half), cudaMemcpyHostToDevice), "logits");
+                                E * sizeof(float), cudaMemcpyHostToDevice), "logits");
     };
     std::vector<std::vector<float>> direct_out;
     for (uint32_t token = 0; token < TOKENS; ++token) {

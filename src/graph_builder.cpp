@@ -479,8 +479,10 @@ void GraphBuilder::allocate_gemma4_scratch(
             throw std::invalid_argument("GraphBuilder: invalid Gemma 4 MoE dimensions");
         }
         const uint32_t K = gemma.moe_top_k;
-        alloc(S("g4.moe_router"), {B, L, D});
-        alloc(S("g4.moe_logits"), {B, L, gemma.moe_experts});
+        engine.tensors().allocate_and_register(S("g4.moe_router"), {B, L, D}, dtype::FP32());
+        scratch_names_.push_back(S("g4.moe_router"));
+        engine.tensors().allocate_and_register(S("g4.moe_logits"), {B, L, gemma.moe_experts}, dtype::FP32());
+        scratch_names_.push_back(S("g4.moe_logits"));
         alloc(S("g4.moe_out"), {B, L, D});
         engine.tensors().allocate_and_register(S("g4.moe_indices"), {B, L, K}, dtype::INT32());
         scratch_names_.push_back(S("g4.moe_indices"));
@@ -1061,14 +1063,11 @@ void GraphBuilder::append_gemma4_moe_branch(
     cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
                    W(arch, layer_idx, "ln_mlp_branch_post.weight"), eps);
 
-    // rmsnorm con peso es justo rms(x) * router.scale.
-    cb.add_rmsnorm(S("g4.moe_router"), S("hidden"),
-                   W(arch, layer_idx, "moe.router.input_scale"), eps);
-    cb.add_scale(S("g4.moe_router"), S("g4.moe_router"),
-                 std::pow(static_cast<float>(config.hidden_size()), -0.5f));
-    cb.add_matmul(S("g4.moe_logits"), S("g4.moe_router"),
-                  W(arch, layer_idx, "moe.router.weight"));
-    cb.commands().back().set("seq_len", seq_len);
+    cb.add_moe_router_input(S("g4.moe_router"), S("hidden"),
+                            W(arch, layer_idx, "moe.router.input_scale"), eps,
+                            std::pow(static_cast<float>(config.hidden_size()), -0.5f));
+    cb.add_moe_logits(S("g4.moe_logits"), S("g4.moe_router"),
+                      W(arch, layer_idx, "moe.router.weight"));
     cb.add_moe_route(S("g4.moe_indices"), S("g4.moe_weights"), S("g4.moe_logits"),
                      W(arch, layer_idx, "moe.router.expert_scale"), gemma.moe_top_k);
 

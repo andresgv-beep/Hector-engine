@@ -170,6 +170,10 @@ namespace op {
     inline OpTypeID PLE_SLICE() { return OpTypeRegistry::instance().get_id("ple_slice"); }
     /// Gemma 4 «unified»: suma la posicion factorizada (X+Y) a cada parche.
     inline OpTypeID G4U_POS_ADD() { return OpTypeRegistry::instance().get_id("g4u_pos_add"); }
+    /// Gemma 4 MoE: entrada del router en FP32.
+    inline OpTypeID MOE_ROUTER_INPUT() { return OpTypeRegistry::instance().get_id("moe_router_input"); }
+    /// Gemma 4 MoE: logits del router en FP32.
+    inline OpTypeID MOE_LOGITS() { return OpTypeRegistry::instance().get_id("moe_logits"); }
     /// Gemma 4 MoE: top-k por token desde los logits del router.
     inline OpTypeID MOE_ROUTE() { return OpTypeRegistry::instance().get_id("moe_route"); }
     /// Gemma 4 MoE: suma ponderada de expertos, version de referencia.

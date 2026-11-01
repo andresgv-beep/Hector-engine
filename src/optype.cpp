@@ -182,6 +182,14 @@ void OpTypeRegistry::register_builtins() {
     info.min_inputs = 3; info.max_inputs = 3; info.is_inplace = true;
     register_op(info);
 
+    info = OpTypeInfo{}; info.name = "moe_router_input"; info.category = "moe";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "moe_logits"; info.category = "moe";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
     // Gemma 4 MoE. Salida: indices [tokens,K]. Entradas: logits, escala por
     // experto y pesos [tokens,K], que el kernel tambien escribe.
     info = OpTypeInfo{}; info.name = "moe_route"; info.category = "moe";

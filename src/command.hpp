@@ -222,6 +222,10 @@ public:
                           const std::string& indices);
     void add_ple_slice(const std::string& dst, const std::string& packed,
                        uint32_t layer, uint32_t layers, uint32_t dim);
+    void add_moe_router_input(const std::string& dst, const std::string& hidden,
+                              const std::string& scale, float eps, float factor);
+    void add_moe_logits(const std::string& logits, const std::string& input,
+                        const std::string& router);
     void add_moe_route(const std::string& indices, const std::string& weights,
                        const std::string& logits, const std::string& expert_scale,
                        uint32_t top_k);

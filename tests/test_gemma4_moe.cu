@@ -84,9 +84,9 @@ double relative_error(const std::vector<float>& got, const std::vector<float>& w
 
 // Probabilidades iguales: gana el id menor, también cuando el empate cruza el puesto k.
 void test_ties_use_the_lowest_id() {
-    const std::vector<half> logits = halves({1, 3, 3, 0, 3, 3});
+    const std::vector<float> logits{1, 3, 3, 0, 3, 3};
     const std::vector<half> scale = halves({1, 1, 1, 1, 1, 1});
-    half* dl = upload(logits);
+    float* dl = upload(logits);
     half* ds = upload(scale);
     int32_t* di = nullptr;
     float* dw = nullptr;
@@ -122,20 +122,14 @@ void test_reference(const std::string& path) {
 
     // Lo que hace Gemma4TextRouter antes de elegir, con los kernels que ya existen.
     half* dresidual = upload(halves(residual));
-    half* dnorm = nullptr, *dscaled = nullptr, *dlogits = nullptr;
-    cuda_require(cudaMalloc(&dnorm, size_t(L) * H * sizeof(half)), "norm");
-    cuda_require(cudaMalloc(&dscaled, size_t(L) * H * sizeof(half)), "scaled");
-    cuda_require(cudaMalloc(&dlogits, size_t(L) * E * sizeof(half)), "logits");
-    launch_rmsnorm_no_weight_fp16(dresidual, dnorm, L, H, 1e-6f, 0);
-    std::vector<float> full_scale(size_t(L) * H);
-    for (int l = 0; l < L; ++l) {
-        for (int h = 0; h < H; ++h) full_scale[size_t(l) * H + h] = router_scale[h] * std::pow(float(H), -0.5f);
-    }
-    half* dfull = upload(halves(full_scale));
-    launch_mul_fp16(dnorm, dfull, dscaled, size_t(L) * H, 0);
+    float* dscaled = nullptr, *dlogits = nullptr;
+    cuda_require(cudaMalloc(&dscaled, size_t(L) * H * sizeof(float)), "scaled");
+    cuda_require(cudaMalloc(&dlogits, size_t(L) * E * sizeof(float)), "logits");
+    half* dscale = upload(halves(router_scale));
+    launch_moe_router_input(dresidual, dscale, dscaled, L, H, 1e-6f, std::pow(float(H), -0.5f), 0);
     half* dproj = upload(halves(proj));
-    launch_matmul_fp16_cublas(dscaled, dproj, dlogits, L, H, E, 0);
-    const double logits_error = relative_error(floats(download(dlogits, size_t(L) * E)), want_logits);
+    launch_moe_logits(dscaled, dproj, dlogits, L, E, H, 0);
+    const double logits_error = relative_error(download(dlogits, size_t(L) * E), want_logits);
     std::cout << "  logits: error relativo " << logits_error << std::endl;
     require(logits_error < 2e-3, "logits del router");
 
@@ -160,7 +154,7 @@ void test_reference(const std::string& path) {
     cuda_require(cudaMalloc(&doutput, size_t(L) * H * sizeof(half)), "output");
     cudaStream_t stream;
     cuda_require(cudaStreamCreate(&stream), "stream");
-    run_moe_experts_reference(dinput, dindices, dexact, dgate_up, ddown, doutput, L, E, K, H, I, I, stream);
+    run_moe_experts_reference(dinput, dindices, dexact, dgate_up, false, ddown, false, doutput, L, E, K, H, I, I, stream);
     const double output_error = relative_error(floats(download(doutput, size_t(L) * H)), want_output);
     std::cout << "  expertos: error relativo " << output_error << std::endl;
     require(output_error < 2e-3, "salida de los expertos");
@@ -186,7 +180,7 @@ void test_graph_replay_follows_the_router(const std::string& path) {
     half* dscale = upload(halves(expert_scale));
     half* dgate_up = upload(halves(gate_up));
     half* ddown = upload(halves(down));
-    half* dlogits = device_array<half>(E);
+    float* dlogits = device_array<float>(E);
     half* dinput = device_array<half>(H);
     int32_t* dindices = device_array<int32_t>(K);
     float* dweights = device_array<float>(K);
@@ -212,16 +206,15 @@ void test_graph_replay_follows_the_router(const std::string& path) {
     for (int token = 0; token < L; ++token) {
         std::vector<float> logits(E);
         for (int e = 0; e < E; ++e) logits[e] = std::sin(float(e * (token + 3)) * 0.7f) * 4.0f;
-        const auto host_logits = halves(logits);
         const std::vector<half> row = halves(std::vector<float>(input.begin() + size_t(token) * H,
                                                                 input.begin() + size_t(token + 1) * H));
-        cuda_require(cudaMemcpy(dlogits, host_logits.data(), E * sizeof(half), cudaMemcpyHostToDevice), "logits");
+        cuda_require(cudaMemcpy(dlogits, logits.data(), E * sizeof(float), cudaMemcpyHostToDevice), "logits");
         cuda_require(cudaMemcpy(dinput, row.data(), H * sizeof(half), cudaMemcpyHostToDevice), "input");
         cuda_require(cudaGraphLaunch(exec, stream), "graph launch");
         cuda_require(cudaStreamSynchronize(stream), "graph sync");
         seen.push_back(download(dindices, K));
         const auto got = floats(download(doutput, H));
-        run_moe_experts_reference(dinput, dindices, dweights, dgate_up, ddown, dreference, 1, E, K, H, I, I, stream);
+        run_moe_experts_reference(dinput, dindices, dweights, dgate_up, false, ddown, false, dreference, 1, E, K, H, I, I, stream);
         const double error = relative_error(got, floats(download(dreference, H)));
         require(error < 1e-3, "replay frente a la referencia, token " + std::to_string(token));
     }
@@ -253,7 +246,7 @@ void test_nan_logits_keep_valid_ids() {
     constexpr int E = 16, K = 4;
     const std::vector<float> nans(E, std::nanf(""));
     const std::vector<float> scale(E, 1.0f);
-    half* dlogits = upload(halves(nans));
+    float* dlogits = upload(nans);
     half* dscale = upload(halves(scale));
     int32_t* dindices = device_array<int32_t>(K);
     float* dweights = device_array<float>(K);
