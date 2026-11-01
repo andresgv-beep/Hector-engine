@@ -25,7 +25,9 @@ using helios::dtype::FP16;
 
 constexpr uint32_t LAYERS = 6, BOUNDARY = 2, D = 512, HEADS = 16, LOCAL_KV = 8, VOCAB = 32;
 constexpr uint32_t E = 8, K = 2, I = 128, P = 256, SHARED = 384, SHARED_P = 512;
-constexpr uint32_t PREFILL = 6, DECODE = 8, MAX_SEQ = 32;
+// El prefill pasa de 32 tokens para entrar en la ruta GEMM de la atención, que tiene
+// su propio espacio de trabajo por GPU.
+constexpr uint32_t PREFILL = 40, DECODE = 8, MAX_SEQ = 64;
 
 void require(bool condition, const std::string& message) {
     if (!condition) {

@@ -9,6 +9,7 @@
 // from the ring, so sliding windows and wrapped caches need no reordering.
 #include "kernels.hpp"
 #include "cublas_context.hpp"
+#include "per_device.hpp"
 #include <cuda_fp16.h>
 #include <algorithm>
 #include <cstdint>
@@ -26,7 +27,7 @@ struct Workspace {
     float* acc = nullptr; float* stats = nullptr;
     size_t score_elems = 0, out_elems = 0, stat_elems = 0;
 };
-Workspace g_ws;
+PerDevice<Workspace> g_workspaces;
 
 bool ensure(float*& p, size_t& have, size_t need) {
     if (need <= have) return true;
@@ -38,6 +39,7 @@ bool ensure(float*& p, size_t& have, size_t need) {
 }
 
 bool ensure_workspace(size_t score_elems, size_t out_elems, size_t stat_elems) {
+    Workspace& g_ws = g_workspaces.current();
     if (score_elems > g_ws.score_elems) {
         if (g_ws.probs) cudaFree(g_ws.probs);
         g_ws.probs = nullptr;
@@ -162,6 +164,7 @@ bool launch_attention_prefill_gemm_fp16(
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
     int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots,
     int bidir_begin, int bidir_end) {
+    Workspace& g_ws = g_workspaces.current();
     if (cache_slots <= 0) cache_slots = max_seq_len;
     // The block may only reach keys already written by this chunk.
     if (bidir_end > bidir_begin &&
