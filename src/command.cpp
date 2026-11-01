@@ -199,6 +199,24 @@ void CommandBuffer::add_scatter_rows(const std::string& dst,
     add_op(op::SCATTER_ROWS(), dst).in({rows, indices});
 }
 
+void CommandBuffer::add_moe_route(const std::string& indices,
+                                  const std::string& weights,
+                                  const std::string& logits,
+                                  const std::string& expert_scale,
+                                  uint32_t top_k) {
+    add_op(op::MOE_ROUTE(), indices)
+        .in({logits, expert_scale, weights}).set("top_k", top_k);
+}
+
+void CommandBuffer::add_moe_experts(const std::string& dst,
+                                    const std::string& input,
+                                    const std::string& indices,
+                                    const std::string& weights,
+                                    const std::string& gate_up,
+                                    const std::string& down) {
+    add_op(op::MOE_EXPERTS(), dst).in({input, indices, weights, gate_up, down});
+}
+
 void CommandBuffer::add_ple_slice(const std::string& dst,
                                   const std::string& packed,
                                   uint32_t layer, uint32_t layers,

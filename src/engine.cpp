@@ -66,7 +66,21 @@ void Engine::execute(const CommandBuffer& commands) {
     }
 }
 
+// La referencia MoE sincroniza y lee indices en la CPU: capturarla dejaria un
+// grafo con los expertos del primer token para siempre.
+static bool has_host_synchronized_op(const CommandBuffer& commands) {
+    for (const auto& cmd : commands.commands()) {
+        if (cmd.op == op::MOE_EXPERTS()) return true;
+    }
+    return false;
+}
+
 void Engine::execute_graphed(const CommandBuffer& commands) {
+    if (has_host_synchronized_op(commands)) {
+        execute(commands);
+        return;
+    }
+
     // Always capture a new graph (captures current kernel arguments)
     cudaGraph_t new_graph = nullptr;
     
@@ -149,6 +163,11 @@ void Engine::update_device_cache_pos(int32_t cache_pos, int32_t seq_len) {
 // ============================================================================
 
 void Engine::execute_graph_replay(const CommandBuffer& commands) {
+    if (has_host_synchronized_op(commands)) {
+        execute(commands);
+        return;
+    }
+
     // CUDA Graph cannot capture a kernel that dereferences Linux pageable HMM
     // (`mmap` embeddings). Execute only those tiny row lookups before the
     // graph; their outputs feed the captured scale/PLE/decoder commands on the

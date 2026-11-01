@@ -222,6 +222,12 @@ public:
                           const std::string& indices);
     void add_ple_slice(const std::string& dst, const std::string& packed,
                        uint32_t layer, uint32_t layers, uint32_t dim);
+    void add_moe_route(const std::string& indices, const std::string& weights,
+                       const std::string& logits, const std::string& expert_scale,
+                       uint32_t top_k);
+    void add_moe_experts(const std::string& dst, const std::string& input,
+                         const std::string& indices, const std::string& weights,
+                         const std::string& gate_up, const std::string& down);
     void add_concat(const std::string& dst, 
                     const std::vector<std::string>& inputs, int32_t dim);
     

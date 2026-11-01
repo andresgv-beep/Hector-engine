@@ -220,6 +220,11 @@ target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
 add_executable(test_gemma4_moe tests/test_gemma4_moe.cu)
 target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 
+# Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
+# un add_test porque esos datos no viven en el repositorio.
+add_executable(test_gemma4_moe_layer tests/test_gemma4_moe_layer.cu)
+target_link_libraries(test_gemma4_moe_layer PRIVATE helios-engine)
+
 # Gemma 4 complete PLE preparation path and real-weight numerical reference
 add_executable(test_gemma4_ple tests/test_gemma4_ple.cu)
 target_link_libraries(test_gemma4_ple PRIVATE helios-engine)

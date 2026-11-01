@@ -443,6 +443,15 @@ private:
         uint32_t seq_len
     );
 
+    void append_gemma4_moe_branch(
+        CommandBuffer& cb,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t seq_len
+    );
+
     void append_gemma4_mlp_ple_tail(
         CommandBuffer& cb,
         const ModelConfig& config,

@@ -471,6 +471,23 @@ void GraphBuilder::allocate_gemma4_scratch(
     alloc(S("g4.up_backing"), {B, L, max_intermediate});
     alloc(S("g4.mlp_h_backing"), {B, L, max_intermediate});
 
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_MOE)) {
+        // Con la bandera y sin dimensiones, la cola correria con top-k 0.
+        if (gemma.moe_experts == 0 || gemma.moe_top_k == 0 ||
+            gemma.moe_top_k > gemma.moe_experts ||
+            gemma.moe_intermediate_size == 0) {
+            throw std::invalid_argument("GraphBuilder: invalid Gemma 4 MoE dimensions");
+        }
+        const uint32_t K = gemma.moe_top_k;
+        alloc(S("g4.moe_router"), {B, L, D});
+        alloc(S("g4.moe_logits"), {B, L, gemma.moe_experts});
+        alloc(S("g4.moe_out"), {B, L, D});
+        engine.tensors().allocate_and_register(S("g4.moe_indices"), {B, L, K}, dtype::INT32());
+        scratch_names_.push_back(S("g4.moe_indices"));
+        engine.tensors().allocate_and_register(S("g4.moe_weights"), {B, L, K}, dtype::FP32());
+        scratch_names_.push_back(S("g4.moe_weights"));
+    }
+
     if (has_ple) {
         alloc(S("g4.ple"), {B, L, PW});
         alloc(S("g4.ple_context"), {B, L, PW});
@@ -980,6 +997,42 @@ CommandBuffer GraphBuilder::build_gemma4_multimodal_forward_cached(
     return cb;
 }
 
+// Deja en mlp_out la suma de las dos ramas, cada una con su norma propia. El
+// router y la rama de expertos leen hidden, que sigue siendo el residual.
+void GraphBuilder::append_gemma4_moe_branch(
+    CommandBuffer& cb,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t seq_len
+) {
+    const float eps = config.rms_norm_eps();
+    cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
+                   W(arch, layer_idx, "ln_mlp_branch_post.weight"), eps);
+
+    // rmsnorm con peso es justo rms(x) * router.scale.
+    cb.add_rmsnorm(S("g4.moe_router"), S("hidden"),
+                   W(arch, layer_idx, "moe.router.input_scale"), eps);
+    cb.add_scale(S("g4.moe_router"), S("g4.moe_router"),
+                 std::pow(static_cast<float>(config.hidden_size()), -0.5f));
+    cb.add_matmul(S("g4.moe_logits"), S("g4.moe_router"),
+                  W(arch, layer_idx, "moe.router.weight"));
+    cb.commands().back().set("seq_len", seq_len);
+    cb.add_moe_route(S("g4.moe_indices"), S("g4.moe_weights"), S("g4.moe_logits"),
+                     W(arch, layer_idx, "moe.router.expert_scale"), gemma.moe_top_k);
+
+    cb.add_rmsnorm(S("normed"), S("hidden"),
+                   W(arch, layer_idx, "ln_moe_in.weight"), eps);
+    cb.add_moe_experts(S("g4.moe_out"), S("normed"), S("g4.moe_indices"),
+                       S("g4.moe_weights"),
+                       W(arch, layer_idx, "moe.experts.gate_up.weight"),
+                       W(arch, layer_idx, "moe.experts.down.weight"));
+    cb.add_rmsnorm(S("g4.moe_out"), S("g4.moe_out"),
+                   W(arch, layer_idx, "ln_moe_branch_post.weight"), eps);
+    cb.add_add(S("mlp_out"), S("mlp_out"), S("g4.moe_out"));
+}
+
 void GraphBuilder::append_gemma4_mlp_ple_tail(
     CommandBuffer& cb,
     const ModelConfig& config,
@@ -1007,6 +1060,9 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
     cb.add_matmul(S("mlp_out"), mlp_h,
                   W(arch, layer_idx, "mlp.down.weight"));
     set_seq(cb);
+    if (gemma.has_flag(GEMMA4_EXT_FLAG_MOE)) {
+        append_gemma4_moe_branch(cb, config, gemma, arch, layer_idx, seq_len);
+    }
     cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
                    W(arch, layer_idx, "ln_mlp_post.weight"),
                    config.rms_norm_eps());

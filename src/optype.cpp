@@ -181,6 +181,18 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "g4u_pos_add"; info.category = "memory";
     info.min_inputs = 3; info.max_inputs = 3; info.is_inplace = true;
     register_op(info);
+
+    // Gemma 4 MoE. Salida: indices [tokens,K]. Entradas: logits, escala por
+    // experto y pesos [tokens,K], que el kernel tambien escribe.
+    info = OpTypeInfo{}; info.name = "moe_route"; info.category = "moe";
+    info.min_inputs = 3; info.max_inputs = 3;
+    register_op(info);
+
+    // Entradas: filas, indices, pesos, gate_up [E,2I,H] y down [E,H,I].
+    // Sincroniza y lee indices en la CPU: no entra en un CUDA Graph.
+    info = OpTypeInfo{}; info.name = "moe_experts"; info.category = "moe";
+    info.min_inputs = 5; info.max_inputs = 5;
+    register_op(info);
 }
 
 OpTypeID OpTypeRegistry::register_op(const OpTypeInfo& info) {

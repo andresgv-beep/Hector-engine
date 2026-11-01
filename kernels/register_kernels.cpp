@@ -576,6 +576,70 @@ void register_memory_kernels(Engine& engine) {
             static_cast<int>(output->numel() / row_width), ctx.stream);
     });
 
+    engine.register_kernel(op::MOE_ROUTE(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* logits = ctx.in(0);
+        TensorInfo* expert_scale = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* indices = ctx.output;
+        const uint32_t top_k = cmd.get<uint32_t>("top_k", 0);
+        if (!logits || !expert_scale || !weights || !indices || top_k == 0) {
+            throw std::runtime_error("MOE_ROUTE: missing tensors or top_k");
+        }
+        if (indices->dtype != dtype::INT32() || weights->dtype != dtype::FP32()) {
+            throw std::runtime_error("MOE_ROUTE: indices must be INT32 and weights FP32");
+        }
+        const size_t experts = expert_scale->numel();
+        if (experts == 0 || logits->numel() % experts != 0) {
+            throw std::runtime_error("MOE_ROUTE: logits do not match the expert count");
+        }
+        const size_t tokens = logits->numel() / experts;
+        if (indices->numel() != tokens * top_k || weights->numel() != tokens * top_k) {
+            throw std::runtime_error("MOE_ROUTE: outputs must be [tokens, top_k]");
+        }
+        launch_moe_route(
+            as_fp16_const(logits), as_fp16_const(expert_scale), as_i32(indices),
+            static_cast<float*>(weights->ptr), static_cast<int>(tokens),
+            static_cast<int>(experts), static_cast<int>(top_k), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_EXPERTS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* indices = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* gate_up = ctx.in(3);
+        TensorInfo* down = ctx.in(4);
+        TensorInfo* output = ctx.output;
+        if (!input || !indices || !weights || !gate_up || !down || !output) {
+            throw std::runtime_error("MOE_EXPERTS: missing tensors");
+        }
+        // La referencia multiplica FP16 plano: HQS va en los kernels fundidos.
+        if (gate_up->dtype != dtype::FP16() || down->dtype != dtype::FP16()) {
+            throw std::runtime_error("MOE_EXPERTS: reference path needs FP16 experts");
+        }
+        if (gate_up->shape.size() != 3 || down->shape.size() != 3 ||
+            gate_up->shape[0] != down->shape[0]) {
+            throw std::runtime_error("MOE_EXPERTS: experts must be rank 3 with equal E");
+        }
+        const uint32_t experts = gate_up->shape[0];
+        const uint32_t hidden = gate_up->shape[2];
+        const uint32_t inner = down->shape[2];
+        if (gate_up->shape[1] != 2 * inner || down->shape[1] != hidden ||
+            input->shape.back() != hidden || input->numel() != output->numel()) {
+            throw std::runtime_error("MOE_EXPERTS: incompatible expert shapes");
+        }
+        const size_t tokens = input->numel() / hidden;
+        if (tokens == 0 || indices->numel() % tokens != 0 ||
+            indices->numel() != weights->numel()) {
+            throw std::runtime_error("MOE_EXPERTS: indices and weights must be [tokens, top_k]");
+        }
+        run_moe_experts_reference(
+            as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
+            as_fp16_const(gate_up), as_fp16_const(down), as_fp16(output),
+            static_cast<int>(tokens), static_cast<int>(experts),
+            static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
+            static_cast<int>(inner), ctx.stream);
+    });
+
     engine.register_kernel(op::PLE_SLICE(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* packed = ctx.in(0);
         TensorInfo* output = ctx.output;
