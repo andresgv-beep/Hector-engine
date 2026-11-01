@@ -393,6 +393,50 @@ void test_gm4x_v2_rejections() {
     std::cout << "PASS: GM4X v2 rejections" << std::endl;
 }
 
+void test_moe_tensor_contract() {
+    HnfLoader loader;
+    require(load_extension(read_fixture("valid-layer0-hq44.bin"), loader),
+            "HQ44 GM4X v2 must load: " + loader.last_error());
+    const Gemma4Config& gemma = loader.gemma4_config();
+    constexpr uint32_t D = 2816, E = 128;
+    const auto entry = [](const std::string& name, std::vector<uint32_t> shape, const char* dtype, uint64_t size) {
+        TensorEntry tensor{};
+        tensor.name = name;
+        tensor.shape = std::move(shape);
+        tensor.dtype = dtype;
+        tensor.size = size;
+        return tensor;
+    };
+    const std::string p = "text.layer0.";
+    std::vector<TensorEntry> tensors{
+        entry(p + "moe.experts.gate_up.weight", {E, 1408, D}, "hq44k_g16", E * uint64_t{2354176}),
+        entry(p + "moe.experts.down.weight", {E, D, 768}, "hq44k_g16", E * uint64_t{1284096}),
+        entry(p + "mlp.down.weight", {D, 2304}, "hq44k_g16", 3852288),
+        entry(p + "moe.router.weight", {E, D}, "fp16", E * uint64_t{D} * 2),
+        entry(p + "moe.router.input_scale", {D}, "fp16", D * 2),
+        entry(p + "moe.router.expert_scale", {E}, "fp16", E * 2),
+        entry(p + "ln_mlp_branch_post.weight", {D}, "fp16", D * 2),
+        entry(p + "ln_moe_in.weight", {D}, "fp16", D * 2),
+        entry(p + "ln_moe_branch_post.weight", {D}, "fp16", D * 2),
+    };
+    const auto errors = validate_gemma4_moe_tensors(gemma, D, tensors);
+    for (const auto& error : errors) std::cerr << "  " << error << std::endl;
+    require(errors.empty(), "tensores MoE coherentes");
+
+    const auto rejected = [&](const std::string& label, auto&& change) {
+        auto broken = tensors;
+        change(broken);
+        require(!validate_gemma4_moe_tensors(gemma, D, broken).empty(), label + " must be rejected");
+    };
+    rejected("missing expert tensor", [](auto& all) { all.erase(all.begin()); });
+    rejected("unpadded down", [](auto& all) { all[1].shape[2] = 704; });
+    rejected("expert dtype", [](auto& all) { all[0].dtype = "fp16"; });
+    rejected("truncated expert tensor", [](auto& all) { all[1].size -= 152; });
+    rejected("unpadded shared down", [](auto& all) { all[2].shape[1] = 2112; });
+    rejected("quantized router", [](auto& all) { all[3].dtype = "hq44k_g16"; });
+    std::cout << "PASS: tensores MoE contra GM4X v2" << std::endl;
+}
+
 void inspect_real_hnf(const std::string& path) {
     HnfLoader loader;
     require(loader.load_metadata(path), "real HNF metadata must load: " + loader.last_error());
@@ -462,6 +506,7 @@ int main(int argc, char** argv) {
     test_corrupt_mock_is_rejected();
     test_gm4x_v2_layouts();
     test_gm4x_v2_rejections();
+    test_moe_tensor_contract();
     if (argc == 2) inspect_real_hnf(argv[1]);
     if (argc > 2) {
         std::cerr << "Usage: test_gemma4_metadata [gemma4.hnf]" << std::endl;

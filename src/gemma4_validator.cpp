@@ -66,6 +66,66 @@ void add_error(Gemma4ValidationReport& report, const std::string& message) {
 
 } // namespace
 
+std::vector<std::string> validate_gemma4_moe_tensors(
+    const Gemma4Config& gemma, uint32_t hidden_size,
+    const std::vector<TensorEntry>& tensors) {
+    std::vector<std::string> errors;
+    std::unordered_map<std::string, const TensorEntry*> by_name;
+    by_name.reserve(tensors.size());
+    for (const TensorEntry& tensor : tensors) by_name.emplace(tensor.name, &tensor);
+
+    const auto expect = [&](const std::string& name, const Shape& shape, const std::string& dtype,
+                            uint64_t bytes) {
+        const auto found = by_name.find(name);
+        if (found == by_name.end()) {
+            errors.push_back("missing tensor: " + name);
+            return;
+        }
+        const TensorEntry& tensor = *found->second;
+        if (tensor.shape != shape) {
+            errors.push_back("shape mismatch for " + name + ": got " + shape_string(tensor.shape) +
+                             ", expected " + shape_string(shape));
+        }
+        if (tensor.dtype != dtype) {
+            errors.push_back("dtype mismatch for " + name + ": got " + tensor.dtype +
+                             ", expected " + dtype);
+        }
+        if (tensor.size != bytes) {
+            errors.push_back("stored byte size mismatch for " + name);
+        }
+    };
+    const auto expect_matrix = [&](const std::string& name, const Gemma4MoeMatrix& matrix,
+                                   const Shape& shape) {
+        if (matrix.storage != GEMMA4_MOE_STORAGE_FP16 && matrix.storage != GEMMA4_MOE_STORAGE_HQ44) {
+            errors.push_back("unsupported MoE storage for " + name);
+            return;
+        }
+        const char* dtype = matrix.storage == GEMMA4_MOE_STORAGE_HQ44 ? "hq44k_g16" : "fp16";
+        expect(name, shape, dtype, matrix.expert_stride * matrix.experts);
+    };
+
+    const uint32_t E = gemma.moe_experts;
+    for (size_t index = 0; index < gemma.layers.size(); ++index) {
+        const Gemma4LayerConfig& layer = gemma.layers[index];
+        const std::string prefix = "text.layer" + std::to_string(index) + '.';
+        expect_matrix(prefix + "moe.experts.gate_up.weight", layer.moe_gate_up,
+                      {E, layer.moe_gate_up.rows, layer.moe_gate_up.physical_cols});
+        expect_matrix(prefix + "moe.experts.down.weight", layer.moe_down,
+                      {E, layer.moe_down.rows, layer.moe_down.physical_cols});
+        expect_matrix(prefix + "mlp.down.weight", layer.moe_shared_down,
+                      {layer.moe_shared_down.rows, layer.moe_shared_down.physical_cols});
+        // El router va en FP16: sus kernels leen esos pesos sin descuantizar.
+        expect(prefix + "moe.router.weight", {E, hidden_size}, "fp16", uint64_t{E} * hidden_size * 2);
+        expect(prefix + "moe.router.input_scale", {hidden_size}, "fp16", uint64_t{hidden_size} * 2);
+        expect(prefix + "moe.router.expert_scale", {E}, "fp16", uint64_t{E} * 2);
+        for (const char* norm : {"ln_mlp_branch_post.weight", "ln_moe_in.weight",
+                                 "ln_moe_branch_post.weight"}) {
+            expect(prefix + norm, {hidden_size}, "fp16", uint64_t{hidden_size} * 2);
+        }
+    }
+    return errors;
+}
+
 Gemma4ValidationReport validate_gemma4_tensors(
     const HnfLoader& loader,
     uint32_t budget_batch_size,

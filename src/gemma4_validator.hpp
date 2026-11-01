@@ -35,4 +35,10 @@ Gemma4ValidationReport validate_gemma4_tensors(
     uint32_t budget_batch_size = 1,
     uint32_t budget_sequence_length = 512);
 
+// Cruza los tensores MoE con sus descriptores GM4X v2: un HNF incoherente debe
+// fallar al cargar, no a mitad de un token. Devuelve los errores encontrados.
+std::vector<std::string> validate_gemma4_moe_tensors(
+    const Gemma4Config& gemma, uint32_t hidden_size,
+    const std::vector<TensorEntry>& tensors);
+
 } // namespace helios
