@@ -17,6 +17,7 @@
 #include "memory.hpp"
 #include "command.hpp"
 
+#include <array>
 #include <functional>
 #include <unordered_map>
 #include <vector>
@@ -75,6 +76,9 @@ struct EngineConfig {
     
     // Default stream (nullptr = default CUDA stream)
     cudaStream_t stream = nullptr;
+
+    // GPU de este motor con el modelo partido; -1 = la activa del hilo.
+    int device = -1;
 };
 
 // ============================================================================
@@ -143,7 +147,7 @@ public:
     // TRUE capture-once graph: uses device-pointer kernels
     // First call: captures graph. Subsequent calls: replay only (no re-capture).
     // Requires kernels that read cache_pos from device memory.
-    void execute_graph_replay(const CommandBuffer& commands);
+    void execute_graph_replay(const CommandBuffer& commands, uint32_t slot = 0);
     
     // Invalidate captured CUDA graph (call when graph topology changes)
     void invalidate_graph();
@@ -164,7 +168,9 @@ public:
     bool has_device_cache_pos() const { return d_cache_pos_ != nullptr; }
     
     // Is graph captured and ready for replay?
-    bool graph_ready() const { return graph_valid_; }
+    // CUDA guarda la GPU activa por hilo: hay que llamarlo antes de usar este motor.
+    void activate() const { if (config_.device >= 0) cudaSetDevice(config_.device); }
+    bool graph_ready(uint32_t slot = 0) const { return graph_slots_.at(slot).valid; }
     
     // Reset scratch memory (call between inferences)
     void reset_scratch();
@@ -204,9 +210,13 @@ private:
     std::unordered_map<OpTypeID, KernelProfile> profiles_;
     
     // CUDA Graph state
-    cudaGraph_t captured_graph_ = nullptr;
-    cudaGraphExec_t graph_exec_ = nullptr;
-    bool graph_valid_ = false;
+    // Con el modelo partido, una GPU graba la entrada y la salida por separado.
+    struct GraphSlot {
+        cudaGraph_t graph = nullptr;
+        cudaGraphExec_t exec = nullptr;
+        bool valid = false;
+    };
+    std::array<GraphSlot, 2> graph_slots_{};
     
     // Device-side cache position (for capture-once CUDA Graphs)
     int32_t* d_cache_pos_ = nullptr;    // cache_pos on device

@@ -66,6 +66,7 @@ set(ENGINE_SOURCES
     src/multimodal_adapter.cpp
     src/mapped_weight_pipeline.cpp
     src/gemma4_ple.cpp
+    src/gemma4_split.cpp
     src/gemma4_multimodal.cpp
     src/gemma4_validator.cpp
     src/gemma4_vision_validator.cpp
@@ -224,6 +225,9 @@ target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 
 # Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
 # un add_test porque esos datos no viven en el repositorio.
+add_executable(test_gemma4_split tests/test_gemma4_split.cu)
+target_link_libraries(test_gemma4_split PRIVATE helios-engine)
+
 add_executable(test_gemma4_moe_layer tests/test_gemma4_moe_layer.cu)
 target_link_libraries(test_gemma4_moe_layer PRIVATE helios-engine)
 
@@ -279,6 +283,7 @@ add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
 add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
 add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
+add_test(NAME Gemma4SplitTest COMMAND test_gemma4_split)
 add_test(NAME Gemma4MoeTest COMMAND test_gemma4_moe ${CMAKE_SOURCE_DIR}/tests/data/gemma4_moe_small.bin)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)

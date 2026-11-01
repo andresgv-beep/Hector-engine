@@ -49,11 +49,16 @@ public:
      * Con `ring_owner`, las capas deslizantes con el mismo anillo no reservan
      * nada: usan los buffers de ese caché. Son 640 MiB en el 12B y los turnos van
      * en serie, así que dos sesiones pueden turnarse el mismo sitio. Quien presta
-     * guarda sus anillos con save_rings y quien toma prestado empieza vacío. */
+     * guarda sus anillos con save_rings y quien toma prestado empieza vacío.
+     *
+     * Con el modelo partido entre GPUs, cada una reserva solo [first_layer,
+     * end_layer); una capa compartida debe quedar en la GPU de su fuente. */
     bool allocate(const Gemma4Config& gemma, uint32_t num_kv_heads,
                   uint32_t max_batch_size, uint32_t max_seq_len,
                   uint32_t max_prefill = 0,
-                  const Gemma4KVCache* ring_owner = nullptr) {
+                  const Gemma4KVCache* ring_owner = nullptr,
+                  uint32_t first_layer = 0,
+                  uint32_t end_layer = std::numeric_limits<uint32_t>::max()) {
         free();
         if (gemma.layers.empty() || num_kv_heads == 0 ||
             max_batch_size == 0 || max_seq_len == 0 ||
@@ -77,6 +82,10 @@ public:
         windows_.resize(layers);
         borrowed_k_.assign(layers, nullptr);
         borrowed_v_.assign(layers, nullptr);
+        hosted_.resize(layers);
+        for (uint32_t i = 0; i < layers; ++i) {
+            hosted_[i] = i >= first_layer && i < end_layer;
+        }
 
         int32_t last_local = -1;
         int32_t last_global = -1;
@@ -93,6 +102,7 @@ public:
             windows_[i] = layer.is_global_attention() ? 0 : layer.sliding_window;
             if (layer.is_global_attention()) last_global = static_cast<int32_t>(i);
             else last_local = static_cast<int32_t>(i);
+            if (!hosted_[i]) continue;
 
             if (ring_owner && ring_owner->matches_ring(i, *this)) {
                 borrowed_k_[i] = ring_owner->k_data_ + ring_owner->offsets_[i];
@@ -112,7 +122,8 @@ public:
             const auto& layer = gemma.layers[i];
             const int32_t source = layer.is_global_attention() ? last_global : last_local;
             if (source < 0 || layer.head_dim != gemma.layers[source].head_dim ||
-                layer.kv_heads_or(num_kv_heads) != kv_heads_[source]) {
+                layer.kv_heads_or(num_kv_heads) != kv_heads_[source] ||
+                hosted_[i] != hosted_[source]) {
                 return fail_layout();
             }
             source_layers_[i] = static_cast<uint32_t>(source);
@@ -163,6 +174,7 @@ public:
         windows_.clear();
         borrowed_k_.clear();
         borrowed_v_.clear();
+        hosted_.clear();
         num_kv_heads_ = 0;
         max_batch_size_ = 0;
         max_seq_len_ = 0;
@@ -177,6 +189,7 @@ public:
             throw std::runtime_error("Gemma4KVCache: cache is not allocated");
         }
         for (uint32_t layer = 0; layer < num_layers(); ++layer) {
+            if (!hosted_[layer]) continue;
             const std::vector<uint32_t> shape{
                 max_batch_size_, slots_[layer], kv_heads_[layer], head_dims_[layer]};
             const std::string base = prefix + ".layer" + std::to_string(layer);
@@ -194,14 +207,14 @@ public:
     }
 
     half* k_cache(uint32_t layer) {
-        if (!valid_layer(layer)) return nullptr;
+        if (!valid_layer(layer) || !hosted_[layer]) return nullptr;
         return borrowed_k_[layer] ? borrowed_k_[layer] : k_data_ + offsets_[layer];
     }
     const half* k_cache(uint32_t layer) const {
         return const_cast<Gemma4KVCache*>(this)->k_cache(layer);
     }
     half* v_cache(uint32_t layer) {
-        if (!valid_layer(layer)) return nullptr;
+        if (!valid_layer(layer) || !hosted_[layer]) return nullptr;
         return borrowed_v_[layer] ? borrowed_v_[layer] : v_data_ + offsets_[layer];
     }
     const half* v_cache(uint32_t layer) const {
@@ -298,14 +311,14 @@ private:
     size_t ring_bytes() const {
         size_t total = 0;
         for (uint32_t i = 0; i < first_shared_layer_; ++i) {
-            if (windows_[i]) total += 2 * ring_layer_bytes(i);
+            if (windows_[i] && hosted_[i]) total += 2 * ring_layer_bytes(i);
         }
         return total;
     }
 
     bool copy_rings(char* host, bool to_host) const {
         for (uint32_t i = 0; i < first_shared_layer_; ++i) {
-            if (!windows_[i]) continue;
+            if (!windows_[i] || !hosted_[i]) continue;
             const size_t bytes = ring_layer_bytes(i);
             for (const half* plane : {k_cache(i), v_cache(i)}) {
                 void* device = const_cast<half*>(plane);
@@ -366,6 +379,7 @@ private:
         windows_ = std::move(other.windows_);
         borrowed_k_ = std::move(other.borrowed_k_);
         borrowed_v_ = std::move(other.borrowed_v_);
+        hosted_ = std::move(other.hosted_);
         num_kv_heads_ = other.num_kv_heads_;
         max_batch_size_ = other.max_batch_size_;
         max_seq_len_ = other.max_seq_len_;
@@ -392,6 +406,7 @@ private:
     // Por capa: el buffer de otro caché, o nullptr si la capa es propia.
     std::vector<half*> borrowed_k_;
     std::vector<half*> borrowed_v_;
+    std::vector<uint8_t> hosted_;  // esta GPU reservó la capa
     uint32_t num_kv_heads_ = 0;
     uint32_t max_batch_size_ = 0;
     uint32_t max_seq_len_ = 0;

@@ -80,6 +80,7 @@ void Engine::execute_graphed(const CommandBuffer& commands) {
         execute(commands);
         return;
     }
+    GraphSlot& slot = graph_slots_[0];
 
     // Always capture a new graph (captures current kernel arguments)
     cudaGraph_t new_graph = nullptr;
@@ -108,31 +109,31 @@ void Engine::execute_graphed(const CommandBuffer& commands) {
         return;
     }
     
-    if (graph_valid_ && graph_exec_) {
+    if (slot.valid && slot.exec) {
         // Try to update existing exec with new graph (avoids re-instantiation)
         cudaGraphExecUpdateResultInfo updateResult = {};
-        cudaError_t err = cudaGraphExecUpdate(graph_exec_, new_graph, &updateResult);
+        cudaError_t err = cudaGraphExecUpdate(slot.exec, new_graph, &updateResult);
         
         if (err == cudaSuccess && updateResult.result == cudaGraphExecUpdateSuccess) {
             // Updated in-place — fast path
             cudaGraphDestroy(new_graph);
         } else {
             // Topology changed — re-instantiate
-            cudaGraphExecDestroy(graph_exec_);
-            cudaGraphInstantiate(&graph_exec_, new_graph, nullptr, nullptr, 0);
-            if (captured_graph_) cudaGraphDestroy(captured_graph_);
-            captured_graph_ = new_graph;
+            cudaGraphExecDestroy(slot.exec);
+            cudaGraphInstantiate(&slot.exec, new_graph, nullptr, nullptr, 0);
+            if (slot.graph) cudaGraphDestroy(slot.graph);
+            slot.graph = new_graph;
         }
     } else {
         // First time — instantiate
-        cudaGraphInstantiate(&graph_exec_, new_graph, nullptr, nullptr, 0);
-        if (captured_graph_) cudaGraphDestroy(captured_graph_);
-        captured_graph_ = new_graph;
-        graph_valid_ = true;
+        cudaGraphInstantiate(&slot.exec, new_graph, nullptr, nullptr, 0);
+        if (slot.graph) cudaGraphDestroy(slot.graph);
+        slot.graph = new_graph;
+        slot.valid = true;
     }
     
     // Launch
-    cudaGraphLaunch(graph_exec_, config_.stream);
+    cudaGraphLaunch(slot.exec, config_.stream);
 }
 
 // ============================================================================
@@ -162,11 +163,12 @@ void Engine::update_device_cache_pos(int32_t cache_pos, int32_t seq_len) {
 // CUDA GRAPH — TRUE CAPTURE-ONCE REPLAY
 // ============================================================================
 
-void Engine::execute_graph_replay(const CommandBuffer& commands) {
+void Engine::execute_graph_replay(const CommandBuffer& commands, uint32_t slot_index) {
     if (has_host_synchronized_op(commands)) {
         execute(commands);
         return;
     }
+    GraphSlot& slot = graph_slots_.at(slot_index);
 
     // CUDA Graph cannot capture a kernel that dereferences Linux pageable HMM
     // (`mmap` embeddings). Execute only those tiny row lookups before the
@@ -191,7 +193,7 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
         return true;
     };
 
-    if (graph_valid_ && graph_exec_) {
+    if (slot.valid && slot.exec) {
         // ============================================================
         // REPLAY PATH: execute non-capturable ops, then replay graph
         // ============================================================
@@ -201,7 +203,7 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
         }
         
         // Replay the captured graph
-        cudaGraphLaunch(graph_exec_, config_.stream);
+        cudaGraphLaunch(slot.exec, config_.stream);
         return;
     }
     
@@ -269,36 +271,38 @@ void Engine::execute_graph_replay(const CommandBuffer& commands) {
     }
 
     // Instantiate
-    if (graph_exec_) cudaGraphExecDestroy(graph_exec_);
-    if (captured_graph_) cudaGraphDestroy(captured_graph_);
+    if (slot.exec) cudaGraphExecDestroy(slot.exec);
+    if (slot.graph) cudaGraphDestroy(slot.graph);
 
-    cudaError_t inst_err = cudaGraphInstantiate(&graph_exec_, new_graph, nullptr, nullptr, 0);
-    if (inst_err != cudaSuccess || !graph_exec_) {
+    cudaError_t inst_err = cudaGraphInstantiate(&slot.exec, new_graph, nullptr, nullptr, 0);
+    if (inst_err != cudaSuccess || !slot.exec) {
         fprintf(stderr, "[engine] Graph instantiate FAILED: %s\n", cudaGetErrorString(inst_err));
-        captured_graph_ = new_graph;
-        graph_valid_ = false;
+        slot.graph = new_graph;
+        slot.valid = false;
         execute(commands);
         return;
     }
-    captured_graph_ = new_graph;
-    graph_valid_ = true;
+    slot.graph = new_graph;
+    slot.valid = true;
     fprintf(stderr, "[engine] CUDA Graph capturado (%zu comandos) — decode en modo replay\n",
             commands.size());
     
     // Launch for first token
-    cudaGraphLaunch(graph_exec_, config_.stream);
+    cudaGraphLaunch(slot.exec, config_.stream);
 }
 
 void Engine::invalidate_graph() {
-    if (graph_exec_) {
-        cudaGraphExecDestroy(graph_exec_);
-        graph_exec_ = nullptr;
+    for (GraphSlot& slot : graph_slots_) {
+        if (slot.exec) {
+            cudaGraphExecDestroy(slot.exec);
+            slot.exec = nullptr;
+        }
+        if (slot.graph) {
+            cudaGraphDestroy(slot.graph);
+            slot.graph = nullptr;
+        }
+        slot.valid = false;
     }
-    if (captured_graph_) {
-        cudaGraphDestroy(captured_graph_);
-        captured_graph_ = nullptr;
-    }
-    graph_valid_ = false;
 }
 
 void Engine::execute_command(const Command& cmd) {

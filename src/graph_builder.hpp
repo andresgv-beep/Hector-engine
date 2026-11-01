@@ -338,6 +338,25 @@ public:
         const KVCacheParams& cache
     );
 
+    // Las piezas de ese forward, para repartirlo entre GPUs.
+    CommandBuffer build_gemma4_layers_cached(
+        Engine& engine,
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t first_layer,
+        uint32_t end_layer,
+        uint32_t batch_size,
+        uint32_t seq_len,
+        const KVCacheParams& cache
+    );
+    CommandBuffer build_gemma4_head(
+        const ModelConfig& config,
+        const Gemma4Config& gemma,
+        const ArchDescriptor& arch,
+        uint32_t seq_len
+    );
+
     CommandBuffer build_gemma4_multimodal_forward_cached(
         Engine& engine,
         const ModelConfig& config,

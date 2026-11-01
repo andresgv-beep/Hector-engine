@@ -939,11 +939,43 @@ CommandBuffer GraphBuilder::build_gemma4_forward_cached(
     CommandBuffer cb = build_gemma4_input(
         engine, config, gemma, arch, input_tokens, batch_size, seq_len);
     cb.reserve(cb.size() + arch.num_layers * 30 + 4);
-    for (uint32_t layer = 0; layer < arch.num_layers; ++layer) {
+    cb.append(build_gemma4_layers_cached(engine, config, gemma, arch, 0, arch.num_layers,
+                                         batch_size, seq_len, cache));
+    cb.append(build_gemma4_head(config, gemma, arch, seq_len));
+    return cb;
+}
+
+CommandBuffer GraphBuilder::build_gemma4_layers_cached(
+    Engine& engine,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t first_layer,
+    uint32_t end_layer,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    const KVCacheParams& cache
+) {
+    if (first_layer > end_layer || end_layer > arch.num_layers) {
+        throw std::invalid_argument("GraphBuilder: invalid Gemma 4 layer span");
+    }
+    CommandBuffer cb;
+    cb.reserve(size_t(end_layer - first_layer) * 30);
+    for (uint32_t layer = first_layer; layer < end_layer; ++layer) {
         cb.append(build_gemma4_layer_cached(
             engine, config, gemma, arch, layer, batch_size, seq_len, cache));
     }
+    return cb;
+}
 
+CommandBuffer GraphBuilder::build_gemma4_head(
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t seq_len
+) {
+    CommandBuffer cb;
+    cb.reserve(4);
     cb.add_rmsnorm(S("normed"), S("hidden"),
                    WG(arch, arch.final_norm_name), config.rms_norm_eps());
     const std::string& lm_head = arch.lm_head_name.empty()
