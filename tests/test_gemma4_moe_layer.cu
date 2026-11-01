@@ -1,7 +1,10 @@
 // Cola MLP + MoE de una capa real contra el oraculo FP32 de
 // converter/tools/gemma4_moe_layer_oracle.py. Pesos originales BF16 pasados a FP16.
 //
-// uso: test_gemma4_moe_layer references/
+// uso: test_gemma4_moe_layer references/ [salidas/]
+//
+// Con un segundo argumento vuelca los 23 tensores que pide
+// converter/tools/compare_moe_oracle.py en un directorio nuevo.
 #include "graph_builder.hpp"
 #include "kernels.hpp"
 
@@ -12,8 +15,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -125,7 +130,118 @@ void set_residual(helios::Engine& engine, const std::vector<half>& rows) {
                             rows.size() * sizeof(half), cudaMemcpyHostToDevice), "residual");
 }
 
-void test_ties(helios::Engine& engine, const std::string& oracle) {
+template <typename T>
+void write_file(const std::string& path, const std::vector<T>& values) {
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(T));
+    require(bool(file), "no escribo " + path);
+}
+
+template <typename T>
+std::vector<T> download(const void* device, size_t count) {
+    std::vector<T> host(count);
+    cuda_require(cudaDeviceSynchronize(), "sincronizar");
+    cuda_require(cudaMemcpy(host.data(), device, count * sizeof(T), cudaMemcpyDeviceToHost), "bajar");
+    return host;
+}
+
+// Ejecuta la cola comando a comando y guarda cada salida intermedia, así lo
+// volcado es lo que produce el grafo real y no una segunda implementación.
+void dump_outputs(helios::Engine& engine, const helios::CommandBuffer& tail,
+                  const std::vector<half>& residual, const std::string& oracle, const std::string& out) {
+    using namespace helios::kernels;
+    require(std::filesystem::create_directory(out), out + " ya existe");
+    const size_t tokens = TOKENS;
+    const std::map<std::pair<std::string, int>, std::string> steps{
+        {{"_s.normed", 1}, "shared_input"},
+        {{"_s.mlp_out", 2}, "shared_branch_post"},
+        {{"_s.g4.moe_router", 2}, "router_input"},
+        {{"_s.g4.moe_logits", 1}, "router_logits"},
+        {{"_s.normed", 2}, "expert_input"},
+        {{"_s.g4.moe_out", 1}, "expert_sum"},
+        {{"_s.g4.moe_out", 2}, "expert_branch_post"},
+        {{"_s.mlp_out", 3}, "combined_before_common_norm"},
+        {{"_s.mlp_out", 4}, "common_norm"},
+        {{HIDDEN, 2}, "output"},
+    };
+    set_residual(engine, residual);
+    std::map<std::string, int> seen;
+    int saved = 0;
+    for (const auto& command : tail.commands()) {
+        engine.execute_command(command);
+        const auto step = steps.find({command.output, ++seen[command.output]});
+        if (step == steps.end()) continue;
+        const uint32_t width = command.output == "_s.g4.moe_logits" ? E : H;
+        write_file(out + "/" + step->second + ".f32",
+                   scratch_floats(engine, command.output, tokens * width));
+        ++saved;
+    }
+    require(saved == int(steps.size()), "la cola no tiene los pasos esperados");
+
+    const void* logits = engine.tensors().at("_s.g4.moe_logits").ptr;
+    const void* indices = engine.tensors().at("_s.g4.moe_indices").ptr;
+    const auto ids = download<int32_t>(indices, tokens * K);
+    const auto weights = download<float>(engine.tensors().at("_s.g4.moe_weights").ptr, tokens * K);
+    write_file(out + "/expert_ids.i32", ids);
+    write_file(out + "/expert_weights.f32", weights);
+
+    float* probabilities = nullptr;
+    float* normalized = nullptr;
+    int32_t* route_ids = nullptr;
+    half* unit_scale = nullptr;
+    cuda_require(cudaMalloc(&probabilities, tokens * E * sizeof(float)), "probabilidades");
+    cuda_require(cudaMalloc(&normalized, tokens * K * sizeof(float)), "normalizados");
+    cuda_require(cudaMalloc(&route_ids, tokens * K * sizeof(int32_t)), "ids");
+    cuda_require(cudaMalloc(&unit_scale, E * sizeof(half)), "escala");
+    const std::vector<half> ones(E, __float2half(1.0f));
+    cuda_require(cudaMemcpy(unit_scale, ones.data(), E * sizeof(half), cudaMemcpyHostToDevice), "escala");
+    launch_moe_probabilities(static_cast<const half*>(logits), probabilities, TOKENS, E, 0);
+    write_file(out + "/router_probabilities.f32", download<float>(probabilities, tokens * E));
+    // Con escala 1 moe_route deja justo los pesos renormalizados.
+    launch_moe_route(static_cast<const half*>(logits), unit_scale, route_ids, normalized, TOKENS, E, K, 0);
+    write_file(out + "/normalized_weights.f32", download<float>(normalized, tokens * K));
+
+    const half* input = static_cast<const half*>(engine.tensors().at("_s.normed").ptr);
+    const half* gate_up = static_cast<const half*>(engine.tensors().at("text.layer0.moe.experts.gate_up.weight").ptr);
+    const half* down = static_cast<const half*>(engine.tensors().at("text.layer0.moe.experts.down.weight").ptr);
+    half* projected = nullptr;
+    half* activated = nullptr;
+    half* row = nullptr;
+    cuda_require(cudaMalloc(&projected, 2 * I * sizeof(half)), "gate_up");
+    cuda_require(cudaMalloc(&activated, I * sizeof(half)), "activado");
+    cuda_require(cudaMalloc(&row, H * sizeof(half)), "fila");
+    std::vector<float> gate, up, gelu_mul, contributions;
+    for (size_t token = 0; token < tokens; ++token) {
+        for (size_t slot = 0; slot < K; ++slot) {
+            const size_t expert = size_t(ids[token * K + slot]);
+            launch_matmul_fp16_cublas(input + token * H, gate_up + expert * 2 * I * H, projected, 1, H, 2 * I, 0);
+            launch_moe_gate_up_mul(projected, activated, 1, I, 0);
+            launch_matmul_fp16_cublas(activated, down + expert * H * I, row, 1, I, H, 0);
+            const auto gate_up_row = download<half>(projected, 2 * I);
+            for (size_t i = 0; i < I; ++i) gate.push_back(__half2float(gate_up_row[i]));
+            for (size_t i = 0; i < I; ++i) up.push_back(__half2float(gate_up_row[I + i]));
+            for (half value : download<half>(activated, I)) gelu_mul.push_back(__half2float(value));
+            const float weight = weights[token * K + slot];
+            for (half value : download<half>(row, H)) contributions.push_back(__half2float(value) * weight);
+        }
+    }
+    write_file(out + "/gate.f32", gate);
+    write_file(out + "/up.f32", up);
+    write_file(out + "/gelu_mul.f32", gelu_mul);
+    write_file(out + "/expert_contributions.f32", contributions);
+
+    // El residual y las entradas de empate son lo que recibió el motor, sin tocar.
+    for (const char* name : {"residual.f32", "tie_logits.f32", "tie_scales.f32"}) {
+        write_file(out + "/" + name, read_file<char>(oracle + "/" + name));
+    }
+    for (void* p : {static_cast<void*>(probabilities), static_cast<void*>(normalized), static_cast<void*>(route_ids),
+                    static_cast<void*>(unit_scale), static_cast<void*>(projected), static_cast<void*>(activated),
+                    static_cast<void*>(row)}) {
+        cudaFree(p);
+    }
+}
+
+void test_ties(helios::Engine& engine, const std::string& oracle, const std::string& out) {
     const auto logits = to_half(read_file<float>(oracle + "/tie_logits.f32"));
     const auto scale = to_half(read_file<float>(oracle + "/tie_scales.f32"));
     const auto want_ids = read_file<int32_t>(oracle + "/tie_ids.i32");
@@ -148,13 +264,18 @@ void test_ties(helios::Engine& engine, const std::string& oracle) {
     cuda_require(cudaMemcpy(got_weights.data(), weights, K * sizeof(float), cudaMemcpyDeviceToHost), "pesos");
     require(got_ids == want_ids, "empate que cruza el puesto k");
     check_error("empates", got_weights, want_weights, 1e-6);
+    if (!out.empty()) {
+        std::filesystem::create_directories(out + ".ties");
+        write_file(out + ".ties/tie_ids.i32", got_ids);
+        write_file(out + ".ties/tie_weights.f32", got_weights);
+    }
 }
 
-void test_layer(const std::string& references) {
+void test_layer(const std::string& references, const std::string& out) {
     const std::string oracle = references + "/layer-00-oracle-fp32";
     helios::Engine engine;
     helios::kernels::register_all_kernels(engine);
-    test_ties(engine, oracle);
+    test_ties(engine, oracle, out);
 
     helios::ModelConfig config;
     config.set("arch", std::string("gemma4"));
@@ -254,6 +375,15 @@ void test_layer(const std::string& references) {
     engine.execute_graph_replay(tail);
     check_error("execute_graph_replay", scratch_floats(engine, HIDDEN, size_t(TOKENS) * H), batched, 1e-6);
 
+    if (!out.empty()) {
+        dump_outputs(engine, tail, residual, oracle, out);
+        for (const char* name : {"tie_ids.i32", "tie_weights.f32"}) {
+            std::filesystem::rename(out + ".ties/" + name, out + "/" + name);
+        }
+        std::filesystem::remove(out + ".ties");
+        std::cout << "  salidas en " << out << std::endl;
+    }
+
     // Con la bandera y sin dimensiones hay que fallar, no correr con top-k 0.
     helios::Gemma4Config broken = gemma;
     broken.moe_top_k = 0;
@@ -269,8 +399,8 @@ void test_layer(const std::string& references) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    require(argc == 2, "uso: test_gemma4_moe_layer references/");
-    test_layer(argv[1]);
+    require(argc == 2 || argc == 3, "uso: test_gemma4_moe_layer references/ [salidas/]");
+    test_layer(argv[1], argc == 3 ? argv[2] : "");
     std::cout << "Gemma 4 MoE capa real OK" << std::endl;
     return 0;
 }

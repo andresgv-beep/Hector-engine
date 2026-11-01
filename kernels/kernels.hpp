@@ -635,6 +635,10 @@ void launch_embedding_hq62k(
 // y, si empatan, por id ascendente.
 void launch_moe_route(const half* logits, const half* expert_scale, int32_t* indices, float* weights,
                       int L, int E, int K, cudaStream_t stream);
+// Solo para comparar con el oráculo: las probabilidades que moe_route descarta.
+void launch_moe_probabilities(const half* logits, float* probabilities, int L, int E, cudaStream_t stream);
+// gelu(gate) * up de una salida [M, 2I] de gate_up.
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, cudaStream_t stream);
 // gate_up es [E, 2I, H] y down [E, H, I]. Sincroniza: no es capturable en un grafo.
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const half* gate_up, const half* down, half* output,

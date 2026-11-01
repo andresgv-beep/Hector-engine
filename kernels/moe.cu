@@ -61,6 +61,24 @@ __global__ void moe_route_kernel(
     }
 }
 
+// Solo inspección: la misma softmax de moe_route_kernel, sin descartar expertos.
+__global__ void moe_probabilities_kernel(
+    const half* __restrict__ logits, float* __restrict__ probabilities, int L, int E
+) {
+    const int token = blockIdx.x;
+    if (token >= L) return;
+    const half* row = logits + token * E;
+    float* out = probabilities + token * E;
+    float top = -INFINITY;
+    for (int e = 0; e < E; ++e) top = fmaxf(top, __half2float(row[e]));
+    float sum = 0.0f;
+    for (int e = 0; e < E; ++e) {
+        out[e] = expf(__half2float(row[e]) - top);
+        sum += out[e];
+    }
+    for (int e = 0; e < E; ++e) out[e] /= sum;
+}
+
 __global__ void moe_gather_rows_kernel(
     const half* __restrict__ input, const int32_t* __restrict__ tokens,
     half* __restrict__ output, int M, int H
@@ -131,6 +149,16 @@ void launch_moe_route(const half* logits, const half* expert_scale, int32_t* ind
         throw std::invalid_argument("MoE route: dimensiones inválidas");
     }
     moe_route_kernel<<<L, 1, 0, stream>>>(logits, expert_scale, indices, weights, L, E, K);
+}
+
+void launch_moe_probabilities(const half* logits, float* probabilities, int L, int E, cudaStream_t stream) {
+    if (L <= 0 || E <= 0) throw std::invalid_argument("MoE probabilidades: dimensiones inválidas");
+    moe_probabilities_kernel<<<L, 1, 0, stream>>>(logits, probabilities, L, E);
+}
+
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, cudaStream_t stream) {
+    if (M <= 0 || I <= 0) throw std::invalid_argument("MoE gate_up: dimensiones inválidas");
+    moe_gate_up_mul_kernel<<<blocks_for(size_t(M) * I), MOE_BLOCK, 0, stream>>>(gate_up, output, M, I);
 }
 
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
