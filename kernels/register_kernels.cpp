@@ -1056,8 +1056,8 @@ void register_attention_kernels(Engine& engine) {
                 // Grouped decode uses a linear cache; retain the generic path
                 // for other geometries or an explicitly smaller ring allocation.
                 const uint32_t slots = cache_slots ? cache_slots : max_seq_len;
-                if (cmd.get<uint32_t>("flash_grouped", 0) && num_heads == 16 &&
-                    num_kv_heads == 1 && head_dim == 512 && window_size == 0 &&
+                if (cmd.get<uint32_t>("flash_grouped", 0) && device_has_m16n8k16() &&
+                    num_heads == 16 && num_kv_heads == 1 && head_dim == 512 && window_size == 0 &&
                     slots >= max_seq_len) {
                     launch_attention_global_grouped_dp(
                         as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),

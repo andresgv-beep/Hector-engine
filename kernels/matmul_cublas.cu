@@ -14,6 +14,7 @@
 // The buffer is sized for the largest weight matrix encountered.
 
 #include "hqs_common.cuh"
+#include "per_device.hpp"
 #include "cublas_context.hpp"
 #include <cuda_fp16.h>
 #include <cublas_v2.h>
@@ -26,34 +27,37 @@ namespace kernels {
 // GLOBAL STATE — cuBLAS handle + dequant buffer
 // ============================================================================
 
-static cublasHandle_t g_cublas_handle = nullptr;
-static half* g_dequant_buffer = nullptr;
-static size_t g_dequant_buffer_size = 0;  // in elements
+struct CublasState {
+    cublasHandle_t handle = nullptr;
+    half* dequant_buffer = nullptr;
+    size_t dequant_buffer_size = 0;  // in elements
+};
+static PerDevice<CublasState> g_cublas;
 
 static void ensure_cublas() {
-    if (!g_cublas_handle) {
-        cublasCreate(&g_cublas_handle);
+    if (!g_cublas.current().handle) {
+        cublasCreate(&g_cublas.current().handle);
         // Enable tensor cores explicitly
-        cublasSetMathMode(g_cublas_handle, CUBLAS_DEFAULT_MATH);
+        cublasSetMathMode(g_cublas.current().handle, CUBLAS_DEFAULT_MATH);
     }
 }
 
 cublasHandle_t cublas_handle_for_stream(cudaStream_t stream) {
     ensure_cublas();
-    if (!g_cublas_handle ||
-        cublasSetStream(g_cublas_handle, stream) != CUBLAS_STATUS_SUCCESS) {
+    if (!g_cublas.current().handle ||
+        cublasSetStream(g_cublas.current().handle, stream) != CUBLAS_STATUS_SUCCESS) {
         return nullptr;
     }
-    return g_cublas_handle;
+    return g_cublas.current().handle;
 }
 
 static void ensure_dequant_buffer(size_t num_elements, cudaStream_t stream) {
-    if (num_elements > g_dequant_buffer_size) {
-        if (g_dequant_buffer) cudaFree(g_dequant_buffer);
+    if (num_elements > g_cublas.current().dequant_buffer_size) {
+        if (g_cublas.current().dequant_buffer) cudaFree(g_cublas.current().dequant_buffer);
         // Round up to 1M elements for headroom
         size_t alloc_elements = ((num_elements + 1048575) / 1048576) * 1048576;
-        cudaMalloc(&g_dequant_buffer, alloc_elements * sizeof(half));
-        g_dequant_buffer_size = alloc_elements;
+        cudaMalloc(&g_cublas.current().dequant_buffer, alloc_elements * sizeof(half));
+        g_cublas.current().dequant_buffer_size = alloc_elements;
     }
 }
 
@@ -218,14 +222,14 @@ void launch_matmul_hq41k_cublas(
     cudaStream_t stream
 ) {
     ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);
+    cublasSetStream(g_cublas.current().handle, stream);
     ensure_dequant_buffer((size_t)N * K, stream);
 
     const int num_superblocks = (K + 255) / 256;
     const int total_groups = num_superblocks * 32;
     dim3 grid_dq(N, (total_groups + 255) / 256);
     dequant_hq41k_kernel<<<grid_dq, 256, 0, stream>>>(
-        weights, g_dequant_buffer, K, N
+        weights, g_cublas.current().dequant_buffer, K, N
     );
 
     // Hgemm (acumulacion fp16) A PROPOSITO, no por descuido. En las GeForce
@@ -238,11 +242,11 @@ void launch_matmul_hq41k_cublas(
     // fp32 y no pasan por aqui.
     __half alpha_h = __float2half(1.0f);
     __half beta_h = __float2half(0.0f);
-    cublasHgemm(g_cublas_handle,
+    cublasHgemm(g_cublas.current().handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
         &alpha_h,
-        g_dequant_buffer, K,
+        g_cublas.current().dequant_buffer, K,
         input, K,
         &beta_h,
         output, N
@@ -257,14 +261,14 @@ void launch_matmul_hq51k_cublas(
     cudaStream_t stream
 ) {
     ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);
+    cublasSetStream(g_cublas.current().handle, stream);
     ensure_dequant_buffer((size_t)N * K, stream);
 
     const int num_superblocks = (K + 255) / 256;
     const int total_groups = num_superblocks * 32;
     dim3 grid_dq(N, (total_groups + 255) / 256);
     dequant_hq51k_kernel<<<grid_dq, 256, 0, stream>>>(
-        weights, g_dequant_buffer, K, N
+        weights, g_cublas.current().dequant_buffer, K, N
     );
 
     // Hgemm (acumulacion fp16) A PROPOSITO, no por descuido. En las GeForce
@@ -277,11 +281,11 @@ void launch_matmul_hq51k_cublas(
     // fp32 y no pasan por aqui.
     __half alpha_h = __float2half(1.0f);
     __half beta_h = __float2half(0.0f);
-    cublasHgemm(g_cublas_handle,
+    cublasHgemm(g_cublas.current().handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
         &alpha_h,
-        g_dequant_buffer, K,
+        g_cublas.current().dequant_buffer, K,
         input, K,
         &beta_h,
         output, N
@@ -294,21 +298,21 @@ static void launch_matmul_hq_symmetric_cublas(
     int M, int K, int N, cudaStream_t stream
 ) {
     ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);
+    cublasSetStream(g_cublas.current().handle, stream);
     ensure_dequant_buffer(size_t(N) * K, stream);
     const int total_groups = (K + hqs::GROUP_SIZE - 1) / hqs::GROUP_SIZE;
     dim3 grid(N, (total_groups + 255) / 256);
     if (K % hqs::GROUP_SIZE == 0) {
         dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES, true><<<grid, 256, 0, stream>>>(
-            weights, g_dequant_buffer, K, N);
+            weights, g_cublas.current().dequant_buffer, K, N);
     } else {
         dequant_hq_symmetric_kernel<BITS, BLOCK_BYTES><<<grid, 256, 0, stream>>>(
-            weights, g_dequant_buffer, K, N);
+            weights, g_cublas.current().dequant_buffer, K, N);
     }
     __half alpha = __float2half(1.0f);
     __half beta = __float2half(0.0f);
-    cublasHgemm(g_cublas_handle, CUBLAS_OP_T, CUBLAS_OP_N,
-        N, M, K, &alpha, g_dequant_buffer, K, input, K, &beta, output, N);
+    cublasHgemm(g_cublas.current().handle, CUBLAS_OP_T, CUBLAS_OP_N,
+        N, M, K, &alpha, g_cublas.current().dequant_buffer, K, input, K, &beta, output, N);
 }
 
 void launch_matmul_hq42k_cublas(
@@ -333,7 +337,7 @@ void launch_matmul_fp16_cublas(
     cudaStream_t stream
 ) {
     ensure_cublas();
-    cublasSetStream(g_cublas_handle, stream);  // ALWAYS set
+    cublasSetStream(g_cublas.current().handle, stream);  // ALWAYS set
 
     // GemmEx con CUBLAS_COMPUTE_32F, no Hgemm: entradas y salida en fp16 pero
     // ACUMULACION en fp32. Con K de miles, acumular en fp16 redondea en cada
@@ -353,7 +357,7 @@ void launch_matmul_fp16_cublas(
     float alpha = 1.0f;
     float beta = 0.0f;
 
-    cublasGemmEx(g_cublas_handle,
+    cublasGemmEx(g_cublas.current().handle,
         CUBLAS_OP_T, CUBLAS_OP_N,
         N, M, K,
         &alpha,
@@ -372,9 +376,16 @@ void launch_matmul_fp16_cublas(
 // ============================================================================
 
 void cleanup_cublas() {
-    if (g_dequant_buffer) { cudaFree(g_dequant_buffer); g_dequant_buffer = nullptr; }
-    if (g_cublas_handle) { cublasDestroy(g_cublas_handle); g_cublas_handle = nullptr; }
-    g_dequant_buffer_size = 0;
+    const int active = PerDevice<CublasState>::current_device();
+    for (int device = 0; device < PerDevice<CublasState>::MAX_DEVICES; ++device) {
+        CublasState& state = g_cublas.at(device);
+        if (!state.handle && !state.dequant_buffer) continue;
+        cudaSetDevice(device);
+        if (state.dequant_buffer) cudaFree(state.dequant_buffer);
+        if (state.handle) cublasDestroy(state.handle);
+        state = CublasState{};
+    }
+    cudaSetDevice(active);
 }
 
 } // namespace kernels

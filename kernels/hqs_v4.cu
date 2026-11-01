@@ -2,6 +2,7 @@
 #include "kernels.hpp"
 #include "cublas_context.hpp"
 #include "hqs_v4_gemv.cuh"
+#include "per_device.hpp"
 #include <stdexcept>
 namespace helios { namespace kernels {
 namespace {
@@ -36,7 +37,11 @@ void launch_dequant_hq44k(const uint8_t* w, half* y, int K, int N, cudaStream_t 
 }
 
 void launch_matmul_hq44k_cublas(const half* x, const uint8_t* w, half* y, int M, int K, int N, cudaStream_t s) {
-    static half* scratch = nullptr; static size_t capacity = 0;
+    struct Scratch { half* data = nullptr; size_t capacity = 0; };
+    static PerDevice<Scratch> scratches;
+    Scratch& current = scratches.current();
+    half*& scratch = current.data;
+    size_t& capacity = current.capacity;
     const size_t count = size_t(N) * K;
     if (count > capacity) {
         if (scratch) checked(cudaFree(scratch));

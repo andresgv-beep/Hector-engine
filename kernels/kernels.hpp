@@ -544,6 +544,10 @@ bool launch_attention_prefill_gemm_fp16(
 
 // Fused causal prefill (FlashAttention-2 style, tensor cores) for head_dim 128
 // full-attention layers. Returns false for shapes it does not handle.
+// mma m16n8k16 con FP16 pide sm_80: en una Turing esos kernels compilan vacíos y
+// hay que ir por la ruta genérica. Mira la GPU activa del hilo.
+bool device_has_m16n8k16();
+
 bool launch_attention_prefill_flash_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,

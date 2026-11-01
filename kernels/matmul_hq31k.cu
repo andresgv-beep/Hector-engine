@@ -2,6 +2,7 @@
 // Ruta aditiva: no comparte dispatch ni modifica los kernels HQ4.1K/HQ5.1K.
 
 #include "hqs_common.cuh"
+#include "per_device.hpp"
 #include <cuda_fp16.h>
 #include <stdexcept>
 #include <unordered_map>
@@ -150,7 +151,8 @@ static void launch_hq31k_gemv(
     const half* input, const uint8_t* weights, half* output,
     int K, int N, cudaStream_t stream
 ) {
-    uint64_t key = (uint64_t(uint32_t(K)) << 32) | uint32_t(N);
+    uint64_t key = (uint64_t(PerDevice<int>::current_device()) << 58) |
+                   (uint64_t(uint32_t(K)) << 32) | uint32_t(N);
     auto it = s_hq31k_tune_cache.find(key);
     if (it == s_hq31k_tune_cache.end()) {
         float a = benchmark_hq31k(launch_hq31k_A, input, weights, output, K, N, stream);

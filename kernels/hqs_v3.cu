@@ -1,6 +1,7 @@
 // Experimental x.3 embedding and prefill. GEMV lives beside the existing tuner.
 #include "kernels.hpp"
 #include "cublas_context.hpp"
+#include "per_device.hpp"
 #include <stdexcept>
 namespace helios { namespace kernels {
 namespace {
@@ -83,7 +84,10 @@ void launch_embedding_hqs_v3(const int32_t* ids,const uint8_t* w,half* y,int bat
     throw std::runtime_error("Unsupported x.3 embedding format");
 }
 void launch_matmul_hqs_v3_cublas(const half* x,const uint8_t* w,half* y,int M,int K,int N,int bits,int group,cudaStream_t s) {
-    static half* scratch=nullptr;static size_t capacity=0;
+    struct Scratch{half* data=nullptr;size_t capacity=0;};
+    static PerDevice<Scratch> scratches;
+    Scratch& current=scratches.current();
+    half*& scratch=current.data;size_t& capacity=current.capacity;
     const size_t count=size_t(N)*K;
     if(count>capacity) {
         if(scratch) checked(cudaFree(scratch));
