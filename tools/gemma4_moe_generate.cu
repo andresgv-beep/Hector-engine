@@ -42,24 +42,10 @@ using namespace helios;
 namespace {
 
 constexpr uint32_t PREFILL_CHUNK = 512;
-constexpr uint64_t VRAM_RESERVE = 900ull << 20;
 const char* const HIDDEN = "_s.hidden";
 
 void check(cudaError_t error, const std::string& what) {
     if (error != cudaSuccess) throw std::runtime_error(what + ": " + cudaGetErrorString(error));
-}
-
-// -1 para los tensores comunes.
-int layer_of(const std::string& name) {
-    const size_t mark = name.find(".layer");
-    return mark == std::string::npos ? -1 : std::atoi(name.c_str() + mark + 6);
-}
-
-uint64_t free_vram(int device) {
-    check(cudaSetDevice(device), "elegir GPU");
-    size_t free_bytes = 0, total = 0;
-    check(cudaMemGetInfo(&free_bytes, &total), "memoria libre");
-    return free_bytes;
 }
 
 EngineConfig engine_config(int device) {
@@ -89,8 +75,7 @@ struct Device {
         kernels::register_all_kernels(engine);
         if (!loader.open(path)) throw std::runtime_error(loader.last_error());
         loader.set_tensor_filter([=](const TensorEntry& tensor) {
-            const int layer = layer_of(tensor.name);
-            return layer < 0 ? common : layer >= int(first_layer) && layer < int(end_layer);
+            return gemma4_tensor_in_span(tensor, first_layer, end_layer, common);
         });
         if (!loader.load_block(BLOCK_TEXT_MODEL, engine)) throw std::runtime_error(loader.last_error());
         const ModelConfig& config = loader.config();
@@ -102,16 +87,6 @@ struct Device {
         cache.register_tensors(engine, "_kv");
     }
 };
-
-ArchDescriptor make_arch(uint32_t layers) {
-    // detect_architecture necesita ver todas las capas, y aquí cada motor tiene las suyas.
-    ArchDescriptor arch;
-    arch.prefix = "text";
-    arch.num_layers = layers;
-    arch.embedding_name = "token_embedding.weight";
-    arch.final_norm_name = "final_norm.weight";
-    return arch;
-}
 
 int32_t argmax(const std::vector<half>& logits) {
     int32_t best = 0;
@@ -268,33 +243,17 @@ int main(int argc, char** argv) {
         const ModelConfig& config = meta.config();
         const uint32_t layers = config.num_hidden_layers();
 
-        // Pesos más KV de cada capa, para que el reparto no se quede corto al reservarlos.
-        std::vector<uint64_t> layer_bytes(layers, 0);
-        uint64_t common_bytes = 0;
-        for (const TensorEntry& tensor : meta.tensors()) {
-            const int layer = layer_of(tensor.name);
-            (layer < 0 ? common_bytes : layer_bytes[layer]) += tensor.size;
-        }
-        for (uint32_t i = 0; i < layers; ++i) {
-            const Gemma4LayerConfig& layer = gemma.layers[i];
-            const uint64_t slots = layer.is_global_attention() ? max_seq : layer.sliding_window + PREFILL_CHUNK;
-            layer_bytes[i] += 2 * sizeof(half) * slots * layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
-        }
-
         int devices = 0;
         check(cudaGetDeviceCount(&devices), "contar GPUs");
-        const uint64_t first_free = free_vram(0) - VRAM_RESERVE;
-        const uint64_t second_free = devices > 1 ? free_vram(1) - VRAM_RESERVE : 0;
-        const auto plan = plan_gemma4_split(layer_bytes, common_bytes, first_free, second_free);
-        if (!plan && forced_boundary < 0) throw std::runtime_error("el modelo no cabe en las GPUs visibles");
-        const uint32_t boundary = forced_boundary >= 0 ? uint32_t(forced_boundary) : plan->boundary;
+        const uint32_t boundary = forced_boundary >= 0 ? uint32_t(forced_boundary)
+                                                       : gemma4_split_boundary(meta, max_seq, PREFILL_CHUNK);
         if (boundary == 0 || boundary >= layers || devices < 2) {
             throw std::runtime_error("esta herramienta necesita capas en dos GPUs");
         }
         std::cerr << "reparto: capas 0-" << boundary - 1 << " en GPU 0, " << boundary << "-" << layers - 1
                   << " en GPU 1" << std::endl;
 
-        const ArchDescriptor arch = make_arch(layers);
+        const ArchDescriptor arch = gemma4_split_arch(layers);
         auto start = std::chrono::steady_clock::now();
         Device secondary(1, path, boundary, layers, false, arch, max_seq);
         Device primary(0, path, 0, boundary, true, arch, max_seq);

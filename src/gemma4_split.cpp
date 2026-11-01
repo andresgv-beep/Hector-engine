@@ -1,6 +1,7 @@
 // src/gemma4_split.cpp
 #include "gemma4_split.hpp"
 
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 
@@ -16,6 +17,21 @@ void check(cudaError_t error, const char* where) {
 }
 
 constexpr uint32_t PRIMARY_INPUT_GRAPH = 0, PRIMARY_HEAD_GRAPH = 1, SECONDARY_GRAPH = 0;
+
+// Lo que no son pesos ni KV: scratch, cuBLAS, buffers de prefill y el escritorio.
+constexpr uint64_t VRAM_RESERVE = 1400ull << 20;
+
+uint64_t usable_vram(int device) {
+    check(cudaSetDevice(device), "elegir GPU");
+    size_t free_bytes = 0, total = 0;
+    check(cudaMemGetInfo(&free_bytes, &total), "leer memoria libre");
+    return free_bytes > VRAM_RESERVE ? free_bytes - VRAM_RESERVE : 0;
+}
+
+int layer_index(const std::string& name) {
+    const size_t mark = name.find(".layer");
+    return mark == std::string::npos ? -1 : std::atoi(name.c_str() + mark + 6);
+}
 
 }  // namespace
 
@@ -37,6 +53,44 @@ std::optional<Gemma4SplitPlan> plan_gemma4_split(
         plan.secondary_bytes += layer_bytes[layer];
     }
     return plan;
+}
+
+uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens) {
+    int devices = 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 2 || !loader.has_gemma4_config()) return 0;
+    const ModelConfig& config = loader.config();
+    const Gemma4Config& gemma = loader.gemma4_config();
+    std::vector<uint64_t> layer_bytes(gemma.layers.size(), 0);
+    uint64_t common_bytes = 0;
+    for (const TensorEntry& tensor : loader.tensors()) {
+        const int layer = layer_index(tensor.name);
+        if (layer >= int(layer_bytes.size())) return 0;
+        (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
+    }
+    for (size_t i = 0; i < layer_bytes.size(); ++i) {
+        const Gemma4LayerConfig& layer = gemma.layers[i];
+        const uint64_t slots = layer.is_global_attention() ? max_seq : layer.sliding_window + prefill_tokens;
+        layer_bytes[i] += 2 * sizeof(uint16_t) * slots * layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
+    }
+    const uint64_t primary_free = usable_vram(0);
+    const uint64_t secondary_free = usable_vram(1);
+    check(cudaSetDevice(0), "elegir GPU");
+    const auto plan = plan_gemma4_split(layer_bytes, common_bytes, primary_free, secondary_free);
+    return plan && plan->split(layer_bytes.size()) ? plan->boundary : 0;
+}
+
+bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer, bool common) {
+    const int layer = layer_index(tensor.name);
+    return layer < 0 ? common : layer >= int(first_layer) && layer < int(end_layer);
+}
+
+ArchDescriptor gemma4_split_arch(uint32_t layers) {
+    ArchDescriptor arch;
+    arch.prefix = "text";
+    arch.num_layers = layers;
+    arch.embedding_name = "token_embedding.weight";
+    arch.final_norm_name = "final_norm.weight";
+    return arch;
 }
 
 Gemma4SplitForward::Gemma4SplitForward(Engine& primary, Engine& secondary,

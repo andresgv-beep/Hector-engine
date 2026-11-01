@@ -12,6 +12,8 @@
 
 #include "command.hpp"
 #include "engine.hpp"
+#include "graph_builder.hpp"
+#include "hnf_loader.hpp"
 
 #include <cstdint>
 #include <optional>
@@ -32,6 +34,18 @@ struct Gemma4SplitPlan {
 std::optional<Gemma4SplitPlan> plan_gemma4_split(
     const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes,
     uint64_t primary_free, uint64_t secondary_free);
+
+// Capa en la que empieza la GPU 1, o 0 si no hace falta partir: un solo dispositivo,
+// un modelo que cabe en la GPU 0 o uno que no cabe ni entre las dos, que fallará
+// al cargar con su error de siempre. Cuenta pesos más KV hasta `max_seq`.
+uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens);
+
+// Registra solo los tensores de ese tramo: los comunes viven en la principal.
+bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer,
+                           bool common);
+
+// detect_architecture necesita ver todas las capas, y aquí cada motor tiene las suyas.
+ArchDescriptor gemma4_split_arch(uint32_t layers);
 
 class Gemma4SplitForward {
 public:
