@@ -2,9 +2,10 @@
 // con los pesos down del HNF y con los candidatos calibrados del conversor. La
 // captura termina en la entrada a down: esto cubre down, suma, normas y salida.
 // También guarda la entrada a down compartido y engine-checks.tsv con los IDs,
-// pesos y entradas distintos a la captura y los tiempos de cada cola.
+// pesos y entradas distintos a la captura y los tiempos de cada cola. Con
+// pilot-shared-down/ añade la variante S/n de expertos con down compartido S/n.
 //
-// uso: gemma4_moe_control_replay modelo.hnf captura/ pilot-down/ salida/
+// uso: gemma4_moe_control_replay modelo.hnf captura/ pilot-down/ salida/ [pilot-shared-down/]
 
 #include "graph_builder.hpp"
 #include "hnf_loader.hpp"
@@ -32,6 +33,8 @@ namespace {
 constexpr uint32_t K = 8, I = 704, H = 2816, P = 768, E = 128, SHARED = 2112;
 const std::vector<uint32_t> LAYERS{0, 5, 15, 29};
 const std::vector<std::string> VARIANTS{"unit", "second_moment", "routing_weighted"};
+const std::string SHARED_VARIANT = "second_moment_shared";
+constexpr size_t SHARED_STRIDE = size_t(H) * (2304 / 256) * 152;
 const char* const HIDDEN = "_s.hidden";
 
 void check(cudaError_t error, const std::string& what) {
@@ -72,11 +75,14 @@ int layer_of(const std::string& name) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 5) {
-        std::cerr << "uso: gemma4_moe_control_replay modelo.hnf captura/ pilot-down/ salida/\n";
+    if (argc != 5 && argc != 6) {
+        std::cerr << "uso: gemma4_moe_control_replay modelo.hnf captura/ pilot-down/ salida/ [pilot-shared-down/]\n";
         return 2;
     }
     const fs::path capture = argv[2], payloads = argv[3], output = argv[4];
+    const fs::path shared_payloads = argc == 6 ? argv[5] : "";
+    std::vector<std::string> variants = VARIANTS;
+    if (!shared_payloads.empty()) variants.push_back(SHARED_VARIANT);
     try {
         EngineConfig engine_config;
         check(cudaStreamCreate(&engine_config.stream), "stream");
@@ -106,6 +112,7 @@ int main(int argc, char** argv) {
         std::cout << properties.name << std::endl;
 
         const std::map<std::pair<std::string, int>, std::string> steps{
+            {{"_s.mlp_out", 1}, "shared_down_rows"},
             {{"_s.mlp_out", 2}, "shared_branch_post"},
             {{"_s.g4.moe_out", 1}, "expert_sum"},
             {{"_s.g4.moe_out", 2}, "expert_branch_post"},
@@ -115,7 +122,7 @@ int main(int argc, char** argv) {
 
         fs::create_directories(output);
         std::ofstream checks(output / "engine-checks.tsv");
-        checks << "gpu\tlayer\tvariant\ttokens\tcandidates\twrong_ids\twrong_weights\twrong_input\ttail_ms_p50\ttail_ms_p95\tgraph\n";
+        checks << "gpu\tlayer\tvariant\ttokens\tcandidates\twrong_ids\twrong_weights\twrong_input\ttail_ms_p50\ttail_ms_p95\tgraph\twrong_shared_input\n";
 
         for (uint32_t layer : LAYERS) {
             const fs::path control = capture / ("control-layer-" + std::to_string(layer));
@@ -138,14 +145,27 @@ int main(int argc, char** argv) {
             std::vector<uint8_t> original(STRIDE * E);
             check(cudaMemcpy(original.data(), down, original.size(), cudaMemcpyDeviceToHost), "leer down");
 
+            const std::string shared_name = "text.layer" + std::to_string(layer) + ".mlp.down.weight";
+            auto* shared_down = static_cast<uint8_t*>(engine.tensors().at(shared_name).ptr);
+            std::vector<uint8_t> shared_original(SHARED_STRIDE);
+            check(cudaMemcpy(shared_original.data(), shared_down, SHARED_STRIDE, cudaMemcpyDeviceToHost), "leer down compartido");
+            std::vector<float> unit_shared_input;
+
             const auto tail = builder.build_gemma4_mlp_ple_tail(engine, config, gemma, arch, layer, 1, 1);
-            for (const std::string& variant : VARIANTS) {
+            for (const std::string& variant : variants) {
                 check(cudaMemcpy(down, original.data(), original.size(), cudaMemcpyHostToDevice), "restaurar down");
+                check(cudaMemcpy(shared_down, shared_original.data(), SHARED_STRIDE, cudaMemcpyHostToDevice), "restaurar down compartido");
                 int replaced = 0;
-                if (variant != "unit") {
+                if (variant == SHARED_VARIANT) {
+                    const auto matrix = read_file<uint8_t>(shared_payloads / (std::string(name) + "-shared-down-second_moment.hq44"));
+                    if (matrix.size() != SHARED_STRIDE) throw std::runtime_error("payload compartido de tamaño incorrecto");
+                    check(cudaMemcpy(shared_down, matrix.data(), SHARED_STRIDE, cudaMemcpyHostToDevice), "subir candidato compartido");
+                }
+                const std::string expert_variant = variant == SHARED_VARIANT ? "second_moment" : variant;
+                if (expert_variant != "unit") {
                     for (uint32_t expert = 0; expert < E; ++expert) {
                         char payload[80];
-                        std::snprintf(payload, sizeof(payload), "%s-expert-%03u-%s.hq44", name, expert, variant.c_str());
+                        std::snprintf(payload, sizeof(payload), "%s-expert-%03u-%s.hq44", name, expert, expert_variant.c_str());
                         if (!fs::exists(payloads / payload)) continue;
                         const auto matrix = read_file<uint8_t>(payloads / payload);
                         if (matrix.size() != STRIDE) throw std::runtime_error("payload de tamaño incorrecto");
@@ -169,7 +189,7 @@ int main(int argc, char** argv) {
                             auto& all = saved[step->second];
                             all.insert(all.end(), values.begin(), values.end());
                         }
-                        if (command.op == op::PAD_COLUMNS() && variant == "unit") {
+                        if (command.op == op::PAD_COLUMNS()) {
                             const auto values = read_fp16(engine, command.output.c_str(), SHARED);
                             shared_input.insert(shared_input.end(), values.begin(), values.end());
                         }
@@ -195,7 +215,12 @@ int main(int argc, char** argv) {
                     }
                 }
                 write_file(layer_dir / (variant + "_expert_rows.f32"), rows);
-                if (variant == "unit") write_file(layer_dir / "shared_down_input.f32", shared_input);
+                if (variant == "unit") {
+                    write_file(layer_dir / "shared_down_input.f32", shared_input);
+                    unit_shared_input = shared_input;
+                }
+                size_t wrong_shared_input = 0;
+                for (size_t i = 0; i < shared_input.size(); ++i) wrong_shared_input += shared_input[i] != unit_shared_input[i];
                 for (const auto& [step, values] : saved) write_file(layer_dir / (variant + "_" + step + ".f32"), values);
 
                 engine.invalidate_graph();
@@ -215,12 +240,13 @@ int main(int argc, char** argv) {
                 std::sort(runs.begin(), runs.end());
                 checks << properties.name << '\t' << layer << '\t' << variant << '\t' << tokens << '\t' << replaced
                        << '\t' << wrong_ids << '\t' << wrong_weights << '\t' << wrong_input << '\t'
-                       << runs[runs.size() / 2] << '\t' << runs[runs.size() * 95 / 100] << '\t' << graph << '\n';
+                       << runs[runs.size() / 2] << '\t' << runs[runs.size() * 95 / 100] << '\t' << graph << '\t' << wrong_shared_input << '\n';
                 std::cout << "capa " << layer << ' ' << variant << ": candidatos " << replaced << ", ids distintos "
                           << wrong_ids << ", pesos distintos " << wrong_weights << ", entrada a down distinta "
                           << wrong_input << ", cola " << runs[runs.size() / 2] << " ms, grafo " << graph << std::endl;
             }
             check(cudaMemcpy(down, original.data(), original.size(), cudaMemcpyHostToDevice), "restaurar down");
+            check(cudaMemcpy(shared_down, shared_original.data(), SHARED_STRIDE, cudaMemcpyHostToDevice), "restaurar down compartido");
         }
     } catch (const std::exception& error) {
         std::cerr << "ERROR: " << error.what() << std::endl;
