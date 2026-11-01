@@ -225,6 +225,9 @@ target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 
 # Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
 # un add_test porque esos datos no viven en el repositorio.
+add_executable(gemma4_moe_generate tools/gemma4_moe_generate.cu)
+target_link_libraries(gemma4_moe_generate PRIVATE helios-engine)
+
 add_executable(test_gemma4_split tests/test_gemma4_split.cu)
 target_link_libraries(test_gemma4_split PRIVATE helios-engine)
 

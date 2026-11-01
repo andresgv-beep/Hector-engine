@@ -10,6 +10,7 @@
 
 #include "engine.hpp"
 #include "htf_tokenizer.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -664,6 +665,10 @@ public:
     // Load specific block to GPU
     // CK calls this when switching modality
     bool load_block(BlockID block_id, Engine& engine);
+    // Con el modelo partido, cada GPU sube solo los tensores de sus capas.
+    void set_tensor_filter(std::function<bool(const TensorEntry&)> filter) {
+        tensor_filter_ = std::move(filter);
+    }
     bool load_block(const std::string& block_name, Engine& engine);
     
     // Unload specific block from GPU (free VRAM)
@@ -786,6 +791,7 @@ private:
     mutable std::unordered_map<std::string, HTFTokenizer> tokenizers_;
     std::vector<uint8_t> htf_data_;  // Cached HTF blob for lazy loading
     bool htf_loaded_ = false;
+    std::function<bool(const TensorEntry&)> tensor_filter_;
     
     // Block loading state
     BlockState block_states_[HNF_BLOCK_COUNT];

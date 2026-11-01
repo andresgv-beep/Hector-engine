@@ -775,6 +775,7 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
     
     for (const auto& entry : tensors_) {
         if (entry.block != target) continue;
+        if (tensor_filter_ && !tensor_filter_(entry)) continue;
         if (!load_tensor(file_, entry, engine.tensors())) {
             for (const auto& n : state.tensor_names) engine.tensors().remove(n);
             state = BlockState{};

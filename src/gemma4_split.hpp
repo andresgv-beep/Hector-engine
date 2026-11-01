@@ -51,10 +51,9 @@ public:
     void run(const Parts& parts);
     void replay(const Parts& parts);
     bool graphs_ready() const;
-
-private:
     void cross(Engine& from, Engine& to);
 
+private:
     Engine& primary_;
     Engine& secondary_;
     std::string hidden_;
