@@ -1,6 +1,8 @@
 // Pasa los residuales de la muestra de control por la cola MLP/MoE real de la GPU,
 // con los pesos down del HNF y con los candidatos calibrados del conversor. La
 // captura termina en la entrada a down: esto cubre down, suma, normas y salida.
+// También guarda la entrada a down compartido y engine-checks.tsv con los IDs,
+// pesos y entradas distintos a la captura y los tiempos de cada cola.
 //
 // uso: gemma4_moe_control_replay modelo.hnf captura/ pilot-down/ salida/
 
@@ -27,7 +29,7 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr uint32_t TOKENS = 256, K = 8, I = 704, H = 2816, P = 768, E = 128;
+constexpr uint32_t K = 8, I = 704, H = 2816, P = 768, E = 128, SHARED = 2112;
 const std::vector<uint32_t> LAYERS{0, 5, 15, 29};
 const std::vector<std::string> VARIANTS{"unit", "second_moment", "routing_weighted"};
 const char* const HIDDEN = "_s.hidden";
@@ -111,9 +113,14 @@ int main(int argc, char** argv) {
             {{HIDDEN, 2}, "output"},
         };
 
+        fs::create_directories(output);
+        std::ofstream checks(output / "engine-checks.tsv");
+        checks << "gpu\tlayer\tvariant\ttokens\tcandidates\twrong_ids\twrong_weights\twrong_input\ttail_ms_p50\ttail_ms_p95\tgraph\n";
+
         for (uint32_t layer : LAYERS) {
             const fs::path control = capture / ("control-layer-" + std::to_string(layer));
             const auto residual = read_file<float>(control / "residual.f32");
+            const uint32_t tokens = uint32_t(residual.size() / H);
             const auto want_ids = read_file<int32_t>(control / "expert_ids.i32");
             const auto want_weights = read_file<float>(control / "expert_weights.f32");
             const auto want_input = read_file<float>(control / "down_input.f32");
@@ -148,9 +155,9 @@ int main(int argc, char** argv) {
                 }
 
                 std::map<std::string, std::vector<float>> saved;
-                std::vector<float> rows;
+                std::vector<float> rows, shared_input;
                 size_t wrong_ids = 0, wrong_weights = 0, wrong_input = 0;
-                for (uint32_t token = 0; token < TOKENS; ++token) {
+                for (uint32_t token = 0; token < tokens; ++token) {
                     check(cudaMemcpy(engine.tensors().at(HIDDEN).ptr, residual_half.data() + size_t(token) * H,
                                      H * sizeof(half), cudaMemcpyHostToDevice), "residual");
                     std::map<std::string, int> seen;
@@ -161,6 +168,10 @@ int main(int argc, char** argv) {
                             const auto values = read_fp16(engine, command.output.c_str(), H);
                             auto& all = saved[step->second];
                             all.insert(all.end(), values.begin(), values.end());
+                        }
+                        if (command.op == op::PAD_COLUMNS() && variant == "unit") {
+                            const auto values = read_fp16(engine, command.output.c_str(), SHARED);
+                            shared_input.insert(shared_input.end(), values.begin(), values.end());
                         }
                         if (command.op != op::MOE_EXPERTS_DECODE()) continue;
                         std::vector<int32_t> ids(K);
@@ -184,11 +195,12 @@ int main(int argc, char** argv) {
                     }
                 }
                 write_file(layer_dir / (variant + "_expert_rows.f32"), rows);
+                if (variant == "unit") write_file(layer_dir / "shared_down_input.f32", shared_input);
                 for (const auto& [step, values] : saved) write_file(layer_dir / (variant + "_" + step + ".f32"), values);
 
                 engine.invalidate_graph();
                 std::vector<double> runs;
-                for (uint32_t token = 0; token < TOKENS; ++token) {
+                for (uint32_t token = 0; token < tokens; ++token) {
                     check(cudaMemcpy(engine.tensors().at(HIDDEN).ptr, residual_half.data() + size_t(token) * H,
                                      H * sizeof(half), cudaMemcpyHostToDevice), "residual");
                     const auto start = std::chrono::steady_clock::now();
@@ -201,6 +213,9 @@ int main(int argc, char** argv) {
                 const bool graph = engine.graph_ready();
                 engine.invalidate_graph();
                 std::sort(runs.begin(), runs.end());
+                checks << properties.name << '\t' << layer << '\t' << variant << '\t' << tokens << '\t' << replaced
+                       << '\t' << wrong_ids << '\t' << wrong_weights << '\t' << wrong_input << '\t'
+                       << runs[runs.size() / 2] << '\t' << runs[runs.size() * 95 / 100] << '\t' << graph << '\n';
                 std::cout << "capa " << layer << ' ' << variant << ": candidatos " << replaced << ", ids distintos "
                           << wrong_ids << ", pesos distintos " << wrong_weights << ", entrada a down distinta "
                           << wrong_input << ", cola " << runs[runs.size() / 2] << " ms, grafo " << graph << std::endl;

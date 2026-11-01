@@ -4,6 +4,7 @@
 // uso: gemma4_moe_generate modelo.hnf "pregunta" [--max N] [--ctx N] [--boundary N]
 //      gemma4_moe_generate modelo.hnf --prompts fichero --out dir/ [--max N]
 //      gemma4_moe_generate modelo.hnf --capture corpus/ --out dir/ [--limit N] [--seed N]
+//                          [--control-only 1] [--control-tokens N]
 //
 // --prompts responde una pregunta por línea y guarda cada conversación como .ids.
 // --capture acumula las activaciones de down por experto (ver
@@ -217,7 +218,8 @@ int main(int argc, char** argv) {
     }
     const std::string path = argv[1];
     std::string prompt, prompts_file, corpus_dir, out_dir;
-    uint32_t max_tokens = 128, max_seq = 4096, seed = 26;
+    uint32_t max_tokens = 128, max_seq = 4096, seed = 26, control_tokens = 256;
+    bool control_only = false;
     uint64_t limit = 64000;
     int forced_boundary = -1;
     int first_flag = 2;
@@ -235,6 +237,8 @@ int main(int argc, char** argv) {
         else if (flag == "--out") out_dir = argv[i + 1];
         else if (flag == "--limit") limit = std::strtoull(argv[i + 1], nullptr, 10);
         else if (flag == "--seed") seed = uint32_t(std::atoi(argv[i + 1]));
+        else if (flag == "--control-only") control_only = std::atoi(argv[i + 1]) != 0;
+        else if (flag == "--control-tokens") control_tokens = uint32_t(std::atoi(argv[i + 1]));
     }
     try {
         HnfLoader meta;
@@ -367,17 +371,16 @@ int main(int argc, char** argv) {
             const uint32_t PHYSICAL = gemma.layers[0].moe_down.physical_cols;
             const uint32_t SHARED_PHYSICAL = gemma.layers[0].moe_shared_down.physical_cols;
             const std::vector<uint32_t> control_layers{0, 5, 15, 29};
-            constexpr uint32_t CONTROL_TOKENS = 256;
 
             auto documents = read_corpus(corpus_dir, *tokenizer, max_seq - 1);
             std::mt19937 rng(seed);
             std::shuffle(documents.begin(), documents.end(), rng);
             std::vector<const Document*> train, held_out;
-            for (size_t i = 0; i < documents.size(); ++i) (i % 5 == 4 ? held_out : train).push_back(&documents[i]);
+            for (size_t i = 0; i < documents.size(); ++i) (control_only || i % 5 == 4 ? held_out : train).push_back(&documents[i]);
             // Tokens de control repartidos por los documentos reservados.
             uint64_t held_tokens = 0;
             for (const Document* document : held_out) held_tokens += document->ids.size();
-            const uint64_t control_step = std::max<uint64_t>(1, held_tokens / CONTROL_TOKENS);
+            const uint64_t control_step = std::max<uint64_t>(1, held_tokens / control_tokens);
 
             // Una sola construcción: la posición va en el dispositivo y 1024 elige flash.
             const KVCacheParams cache{"_kv", 1024, max_seq};
@@ -466,13 +469,15 @@ int main(int argc, char** argv) {
                 }
             }
             const double capture_seconds = seconds_since(start);
-            half_a.save(std::filesystem::path(out_dir) / "half-a");
-            half_b.save(std::filesystem::path(out_dir) / "half-b");
+            if (!control_only) {
+                half_a.save(std::filesystem::path(out_dir) / "half-a");
+                half_b.save(std::filesystem::path(out_dir) / "half-b");
+            }
 
             uint64_t seen = 0, kept = 0;
             for (const Document* document : held_out) {
                 for (uint32_t position = 0; position < document->ids.size(); ++position, ++seen) {
-                    const bool keep = seen % control_step == 0 && kept < CONTROL_TOKENS;
+                    const bool keep = seen % control_step == 0 && kept < control_tokens;
                     run_token(document->ids[position], position, nullptr, keep);
                     if (keep) {
                         control_index << document->name << '\t' << position << '\t' << document->ids[position] << '\n';

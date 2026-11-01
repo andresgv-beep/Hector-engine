@@ -16,7 +16,7 @@ from moe_capture_common import Weights, decode_hq44, h16
 capture, payloads, replay = Path(capture), Path(payloads), Path(replay)
 
 LAYERS, VARIANTS = (0, 5, 15, 29), ('unit', 'second_moment', 'routing_weighted')
-T, K, H, I, P = 256, 8, 2816, 704, 768
+K, H, I, P = 8, 2816, 704, 768
 
 
 def rel(got, want):
@@ -38,7 +38,26 @@ def read(path, shape):
     return np.fromfile(path, dtype='<f4').reshape(shape)
 
 
+def paired(base, cand, documents):
+    gain = 1-cand/base
+    names = sorted(set(documents))
+    groups = [gain[documents == name] for name in names]
+    rng = np.random.default_rng(26)
+    medians = [np.median(np.concatenate([groups[i] for i in rng.integers(len(groups), size=len(groups))]))
+               for _ in range(2000)]
+    domains = np.array([name.split('-')[0] for name in documents])
+    return {
+        'median_token_improvement': float(np.median(gain)),
+        'median_95_by_document_bootstrap': [float(x) for x in np.percentile(medians, [2.5, 97.5])],
+        'by_domain': {d: float(np.median(gain[domains == d])) for d in sorted(set(domains))},
+        'tokens_improved': int((cand < base).sum()),
+        'tokens_worse': int((cand > base).sum()),
+        'tokens_over_5_percent_worse': int((cand > 1.05*base).sum()),
+    }
+
+
 manifest = json.loads((capture/'manifest.json').read_text())
+documents = np.array([line.split('\t')[0] for line in (capture/'control-tokens.tsv').read_text().splitlines()[1:]])
 weights = Weights(hnf, model, manifest['model']['hnf_sha256'])
 report = {'kind': 'gpu_control_replay', 'weights_scope': 'down HQ44 unitario y candidatos; gate_up y rama compartida sin recalibrar', 'gpus': {}}
 for gpu in sorted(p.name for p in replay.iterdir() if p.is_dir()):
@@ -46,7 +65,8 @@ for gpu in sorted(p.name for p in replay.iterdir() if p.is_dir()):
     for layer in LAYERS:
         prefix = f'text.layer{layer}.'
         control = capture/f'control-layer-{layer}'
-        r = read(control/'residual.f32', (T, H))
+        r = read(control/'residual.f32', (-1, H))
+        T = len(r)
         ids = np.fromfile(control/'expert_ids.i32', dtype='<i4').reshape(T, K)
         w = read(control/'expert_weights.f32', (T, K)).astype(np.float64)
         a = read(control/'down_input.f32', (T, K, I)).astype(np.float64)
@@ -68,7 +88,7 @@ for gpu in sorted(p.name for p in replay.iterdir() if p.is_dir()):
         shared = read(directory/'unit_shared_branch_post.f32', (T, H)).astype(np.float64)
         target_output = (r+rms(shared+target_post, scale_common))*scalar
 
-        result = {}
+        result, tokens = {}, {}
         for variant in VARIANTS:
             rows = np.empty((T, K, H))
             for expert in down_unit:
@@ -105,6 +125,9 @@ for gpu in sorted(p.name for p in replay.iterdir() if p.is_dir()):
             for name in ('down_rows', 'expert_sum', 'branch_post'):
                 item = result[variant]['kernel_same_weights'][name]
                 item['ratio'] = item['gpu']/item['control']
+            tokens[variant] = per_token(got_post, target_post)
+            if variant != 'unit':
+                result[variant]['paired_vs_unit'] = paired(tokens['unit'], tokens[variant], documents)
         report['gpus'][gpu][str(layer)] = result
 Path(report_path).write_text(json.dumps(report, indent=1))
 print(f"{'GPU':8}{'capa':>5}{'variante':>18}{'filas':>8}{'suma':>7}{'norma':>7}{'suma%':>8}{'rama%':>8}{'p50%':>7}{'p95%':>7}{'salida%':>9}")
@@ -114,3 +137,5 @@ for gpu, layers in report['gpus'].items():
             k, q = item['kernel_same_weights'], item['quality_vs_original_down']
             print(f"{gpu:8}{layer:>5}{variant:>18}{k['down_rows']['ratio']:8.3f}{k['expert_sum']['ratio']:7.3f}{k['branch_post']['ratio']:7.3f}"
                   f"{q['expert_sum']*100:8.3f}{q['branch_post']*100:8.3f}{q['branch_post_token_p50']*100:7.2f}{q['branch_post_token_p95']*100:7.2f}{q['output']*100:9.4f}")
+            if 'paired_vs_unit' in item:
+                print(f"{'':31}pareada {item['paired_vs_unit']}")
