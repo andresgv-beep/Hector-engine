@@ -101,6 +101,7 @@ set(KERNEL_SOURCES
     kernels/sampling.cu
     kernels/fused_add_rmsnorm.cu
     kernels/gemma4_vision.cu
+    kernels/moe.cu
     kernels/register_kernels.cpp
 )
 
@@ -215,6 +216,10 @@ target_link_libraries(test_gemma4_multimodal PRIVATE helios-engine)
 add_executable(test_gemma4_primitives tests/test_gemma4_primitives.cu)
 target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
 
+# Gemma 4 MoE contra una referencia generada con Transformers
+add_executable(test_gemma4_moe tests/test_gemma4_moe.cu)
+target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
+
 # Gemma 4 complete PLE preparation path and real-weight numerical reference
 add_executable(test_gemma4_ple tests/test_gemma4_ple.cu)
 target_link_libraries(test_gemma4_ple PRIVATE helios-engine)
@@ -267,6 +272,7 @@ add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
 add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
 add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
+add_test(NAME Gemma4MoeTest COMMAND test_gemma4_moe ${CMAKE_SOURCE_DIR}/tests/data/gemma4_moe_small.bin)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)
