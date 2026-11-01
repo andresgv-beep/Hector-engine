@@ -32,6 +32,10 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # (ojo: CUDA 13 eliminó soporte para < sm_75)
 set(CMAKE_CUDA_ARCHITECTURES "native")
 
+# nvcc declara el directorio de su propio gcc. Si CXX es más nuevo, ese -L hace
+# enlazar un libstdc++ viejo que no tiene los símbolos del código ya compilado.
+list(FILTER CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES EXCLUDE REGEX "/gcc/")
+
 # ============================================================================
 # Compiler Flags
 # ============================================================================
