@@ -470,6 +470,28 @@ void register_linear_kernels(Engine& engine) {
 // MEMORY KERNEL REGISTRATION
 // ============================================================================
 
+struct MoeExpertShape {
+    uint32_t experts, hidden, inner, physical;
+};
+
+// I sale de gate_up y P de down: con padding GM4X v2 son distintas.
+static MoeExpertShape moe_expert_shape(const TensorInfo& input, const TensorInfo& gate_up,
+                                       const TensorInfo& down, const TensorInfo& output) {
+    if (gate_up.shape.size() != 3 || down.shape.size() != 3 ||
+        gate_up.shape[0] != down.shape[0]) {
+        throw std::runtime_error("MOE_EXPERTS: experts must be rank 3 with equal E");
+    }
+    const uint32_t hidden = gate_up.shape[2];
+    const uint32_t inner = gate_up.shape[1] / 2;
+    const uint32_t physical = down.shape[2];
+    if (gate_up.shape[1] % 2 != 0 || down.shape[1] != hidden ||
+        (physical != inner && physical != (inner + 255) / 256 * 256) ||
+        input.shape.back() != hidden || input.numel() != output.numel()) {
+        throw std::runtime_error("MOE_EXPERTS: incompatible expert shapes");
+    }
+    return {gate_up.shape[0], hidden, inner, physical};
+}
+
 void register_memory_kernels(Engine& engine) {
     
     // EMBEDDING
@@ -616,17 +638,8 @@ void register_memory_kernels(Engine& engine) {
         if (gate_up->dtype != dtype::FP16() || down->dtype != dtype::FP16()) {
             throw std::runtime_error("MOE_EXPERTS: reference path needs FP16 experts");
         }
-        if (gate_up->shape.size() != 3 || down->shape.size() != 3 ||
-            gate_up->shape[0] != down->shape[0]) {
-            throw std::runtime_error("MOE_EXPERTS: experts must be rank 3 with equal E");
-        }
-        const uint32_t experts = gate_up->shape[0];
-        const uint32_t hidden = gate_up->shape[2];
-        const uint32_t inner = down->shape[2];
-        if (gate_up->shape[1] != 2 * inner || down->shape[1] != hidden ||
-            input->shape.back() != hidden || input->numel() != output->numel()) {
-            throw std::runtime_error("MOE_EXPERTS: incompatible expert shapes");
-        }
+        const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        const uint32_t hidden = shape.hidden;
         const size_t tokens = input->numel() / hidden;
         if (tokens == 0 || indices->numel() % tokens != 0 ||
             indices->numel() != weights->numel()) {
@@ -635,9 +648,62 @@ void register_memory_kernels(Engine& engine) {
         run_moe_experts_reference(
             as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
             as_fp16_const(gate_up), as_fp16_const(down), as_fp16(output),
-            static_cast<int>(tokens), static_cast<int>(experts),
+            static_cast<int>(tokens), static_cast<int>(shape.experts),
             static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
-            static_cast<int>(inner), ctx.stream);
+            static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_EXPERTS_DECODE(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* indices = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* gate_up = ctx.in(3);
+        TensorInfo* down = ctx.in(4);
+        TensorInfo* gate_up_scratch = ctx.in(5);
+        TensorInfo* hidden_scratch = ctx.in(6);
+        TensorInfo* rows_scratch = ctx.in(7);
+        TensorInfo* output = ctx.output;
+        if (!input || !indices || !weights || !gate_up || !down || !gate_up_scratch ||
+            !hidden_scratch || !rows_scratch || !output) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: missing tensors");
+        }
+        const auto supported = [](const TensorInfo& t) {
+            return t.dtype == dtype::FP16() || t.dtype == dtype::HQ44K();
+        };
+        if (!supported(*gate_up) || !supported(*down)) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: experts must be FP16 or HQ44");
+        }
+        const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        const size_t top_k = indices->numel();
+        if (input->numel() != shape.hidden || top_k == 0 || weights->numel() != top_k) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: expects one token");
+        }
+        if (gate_up_scratch->numel() < top_k * 2 * shape.inner ||
+            hidden_scratch->numel() < top_k * shape.physical ||
+            rows_scratch->numel() < top_k * shape.hidden) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: scratch too small");
+        }
+        launch_moe_experts_decode(
+            as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
+            gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
+            as_fp16(gate_up_scratch), as_fp16(hidden_scratch), as_fp16(rows_scratch), as_fp16(output),
+            static_cast<int>(top_k), static_cast<int>(shape.hidden), static_cast<int>(shape.inner),
+            static_cast<int>(shape.physical), ctx.stream);
+    });
+
+    engine.register_kernel(op::PAD_COLUMNS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* output = ctx.output;
+        if (!input || !output || input->shape.empty() || output->shape.empty() ||
+            input->shape.back() > output->shape.back() ||
+            input->numel() / input->shape.back() != output->numel() / output->shape.back()) {
+            throw std::runtime_error("PAD_COLUMNS: incompatible shapes");
+        }
+        const uint32_t logical = input->shape.back();
+        launch_pad_columns_fp16(as_fp16_const(input), as_fp16(output),
+                                static_cast<int>(input->numel() / logical),
+                                static_cast<int>(logical),
+                                static_cast<int>(output->shape.back()), ctx.stream);
     });
 
     engine.register_kernel(op::PLE_SLICE(), [](ExecContext& ctx, const Command& cmd) {

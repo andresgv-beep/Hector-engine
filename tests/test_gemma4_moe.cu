@@ -1,4 +1,5 @@
 #include "kernels.hpp"
+#include "hqs_v4_gemv.cuh"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -6,8 +7,10 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -157,7 +160,7 @@ void test_reference(const std::string& path) {
     cuda_require(cudaMalloc(&doutput, size_t(L) * H * sizeof(half)), "output");
     cudaStream_t stream;
     cuda_require(cudaStreamCreate(&stream), "stream");
-    run_moe_experts_reference(dinput, dindices, dexact, dgate_up, ddown, doutput, L, E, K, H, I, stream);
+    run_moe_experts_reference(dinput, dindices, dexact, dgate_up, ddown, doutput, L, E, K, H, I, I, stream);
     const double output_error = relative_error(floats(download(doutput, size_t(L) * H)), want_output);
     std::cout << "  expertos: error relativo " << output_error << std::endl;
     require(output_error < 2e-3, "salida de los expertos");
@@ -198,7 +201,8 @@ void test_graph_replay_follows_the_router(const std::string& path) {
     cuda_require(cudaStreamCreate(&capture), "capture stream");
     cuda_require(cudaStreamBeginCapture(capture, cudaStreamCaptureModeThreadLocal), "begin capture");
     launch_moe_route(dlogits, dscale, dindices, dweights, 1, E, K, capture);
-    launch_moe_experts_decode(dinput, dindices, dweights, dgate_up, ddown, s1, s2, s3, doutput, K, H, I, capture);
+    launch_moe_experts_decode(dinput, dindices, dweights, dgate_up, false, ddown, false, s1, s2, s3, doutput,
+                              K, H, I, I, capture);
     cudaGraph_t graph = nullptr;
     cudaGraphExec_t exec = nullptr;
     cuda_require(cudaStreamEndCapture(capture, &graph), "end capture");
@@ -217,7 +221,7 @@ void test_graph_replay_follows_the_router(const std::string& path) {
         cuda_require(cudaStreamSynchronize(stream), "graph sync");
         seen.push_back(download(dindices, K));
         const auto got = floats(download(doutput, H));
-        run_moe_experts_reference(dinput, dindices, dweights, dgate_up, ddown, dreference, 1, E, K, H, I, stream);
+        run_moe_experts_reference(dinput, dindices, dweights, dgate_up, ddown, dreference, 1, E, K, H, I, I, stream);
         const double error = relative_error(got, floats(download(dreference, H)));
         require(error < 1e-3, "replay frente a la referencia, token " + std::to_string(token));
     }
@@ -231,6 +235,89 @@ void test_graph_replay_follows_the_router(const std::string& path) {
     cudaStreamDestroy(stream);
 }
 
+// Superbloques HQ44 al azar, con la cola de down llena de pesos no nulos: solo el
+// cero de la entrada puede anular esas columnas.
+std::vector<uint8_t> random_hq44(std::mt19937& rng, size_t blocks) {
+    std::vector<uint8_t> bytes(blocks * hqs_v4::BLOCK_BYTES);
+    for (uint8_t& byte : bytes) byte = uint8_t(rng());
+    const uint16_t d = __half_as_ushort(__float2half(0.002f));
+    const uint16_t dmin = __half_as_ushort(__float2half(0.003f));
+    for (size_t block = 0; block < blocks; ++block) {
+        std::memcpy(&bytes[block * hqs_v4::BLOCK_BYTES], &d, sizeof(d));
+        std::memcpy(&bytes[block * hqs_v4::BLOCK_BYTES + 2], &dmin, sizeof(dmin));
+    }
+    return bytes;
+}
+
+void test_hq44_decode_follows_the_indices() {
+    constexpr int E = 12, K = 4, H = 512, I = 176, P = 256;
+    constexpr int warps = 1, rows_per_block = 8, unroll = 4;
+    std::mt19937 rng(11);
+    const size_t gate_up_stride = size_t(2) * I * (H / 256) * hqs_v4::BLOCK_BYTES;
+    const size_t down_stride = size_t(H) * (P / 256) * hqs_v4::BLOCK_BYTES;
+    uint8_t* dgate_up = upload(random_hq44(rng, size_t(E) * 2 * I * (H / 256)));
+    uint8_t* ddown = upload(random_hq44(rng, size_t(E) * H * (P / 256)));
+
+    std::vector<float> row(H);
+    for (float& value : row) value = float(int(rng() % 2001) - 1000) * 1.0e-3f;
+    half* dinput = upload(halves(row));
+    int32_t* dindices = device_array<int32_t>(K);
+    float* dweights = device_array<float>(K);
+    half* s1 = device_array<half>(size_t(K) * 2 * I);
+    half* s2 = device_array<half>(size_t(K) * P);
+    half* s3 = device_array<half>(size_t(K) * H);
+    half* doutput = device_array<half>(H);
+    half* projected = device_array<half>(2 * I);
+    half* activated = device_array<half>(P);
+    half* expert_row = device_array<half>(H);
+
+    cudaStream_t stream, capture;
+    cuda_require(cudaStreamCreate(&stream), "stream");
+    cuda_require(cudaStreamCreate(&capture), "capture stream");
+    cuda_require(cudaStreamBeginCapture(capture, cudaStreamCaptureModeThreadLocal), "begin capture");
+    launch_moe_experts_decode(dinput, dindices, dweights, dgate_up, true, ddown, true, s1, s2, s3, doutput,
+                              K, H, I, P, capture);
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    cuda_require(cudaStreamEndCapture(capture, &graph), "end capture");
+    cuda_require(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+
+    const std::vector<std::vector<int32_t>> choices{{0, 3, 7, 11}, {11, 2, 5, 1}, {4, 9, 0, 6}};
+    const std::vector<float> weights{0.4f, 0.3f, 0.2f, 0.1f};
+    cuda_require(cudaMemcpy(dweights, weights.data(), K * sizeof(float), cudaMemcpyHostToDevice), "weights");
+    for (const auto& ids : choices) {
+        cuda_require(cudaMemcpy(dindices, ids.data(), K * sizeof(int32_t), cudaMemcpyHostToDevice), "indices");
+        cuda_require(cudaGraphLaunch(exec, stream), "graph launch");
+        cuda_require(cudaStreamSynchronize(stream), "graph sync");
+        const auto hidden = download(s2, size_t(K) * P);
+        for (int k = 0; k < K; ++k) {
+            for (int c = I; c < P; ++c) {
+                require(__half_as_ushort(hidden[size_t(k) * P + c]) == 0, "cola de relleno a cero");
+            }
+        }
+
+        // La misma cuenta con el GEMV sin indexar, un experto cada vez.
+        std::vector<float> want(H, 0.0f);
+        for (int k = 0; k < K; ++k) {
+            hqs_v4::launch_gemv2<warps, rows_per_block, unroll>(
+                dinput, dgate_up + ids[k] * gate_up_stride, projected, H, 2 * I, stream);
+            launch_moe_gate_up_mul(projected, activated, 1, I, P, stream);
+            hqs_v4::launch_gemv2<warps, rows_per_block, unroll>(
+                activated, ddown + ids[k] * down_stride, expert_row, P, H, stream);
+            const auto got_row = floats(download(s3 + size_t(k) * H, H));
+            const auto want_row = floats(download(expert_row, H));
+            require(got_row == want_row, "fila del experto " + std::to_string(ids[k]));
+            for (int c = 0; c < H; ++c) want[c] += want_row[c] * weights[k];
+        }
+        require(relative_error(floats(download(doutput, H)), want) < 1e-3, "suma ponderada HQ44");
+    }
+    std::cout << "  HQ44: " << choices.size() << " repeticiones identicas al GEMV por experto" << std::endl;
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(capture);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -238,6 +325,7 @@ int main(int argc, char** argv) {
     test_ties_use_the_lowest_id();
     test_reference(argv[1]);
     test_graph_replay_follows_the_router(argv[1]);
+    test_hq44_decode_follows_the_indices();
     std::cout << "Gemma 4 MoE OK" << std::endl;
     return 0;
 }

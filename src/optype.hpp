@@ -174,6 +174,10 @@ namespace op {
     inline OpTypeID MOE_ROUTE() { return OpTypeRegistry::instance().get_id("moe_route"); }
     /// Gemma 4 MoE: suma ponderada de expertos, version de referencia.
     inline OpTypeID MOE_EXPERTS() { return OpTypeRegistry::instance().get_id("moe_experts"); }
+    /// Gemma 4 MoE: un solo token, capturable en un CUDA Graph.
+    inline OpTypeID MOE_EXPERTS_DECODE() { return OpTypeRegistry::instance().get_id("moe_experts_decode"); }
+    /// Rellena con ceros las columnas fisicas que pasan de las logicas.
+    inline OpTypeID PAD_COLUMNS() { return OpTypeRegistry::instance().get_id("pad_columns"); }
 }
 
 } // namespace helios

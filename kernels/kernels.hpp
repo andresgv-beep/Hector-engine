@@ -637,18 +637,23 @@ void launch_moe_route(const half* logits, const half* expert_scale, int32_t* ind
                       int L, int E, int K, cudaStream_t stream);
 // Solo para comparar con el oráculo: las probabilidades que moe_route descarta.
 void launch_moe_probabilities(const half* logits, float* probabilities, int L, int E, cudaStream_t stream);
-// gelu(gate) * up de una salida [M, 2I] de gate_up.
-void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, cudaStream_t stream);
+// gelu(gate) * up de una salida [M, 2I] de gate_up. Escribe [M, P]: P >= I son las
+// columnas físicas de down, y las que sobran quedan a cero.
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream);
+// Rellena con ceros cada fila de [M, logical] hasta [M, physical].
+void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
+                             cudaStream_t stream);
 // Un solo token sin pasar por la CPU, capturable en un CUDA Graph: lee `indices` y
 // `weights` al ejecutarse, así que pueden cambiar entre repeticiones del grafo.
+// gate_up y down son FP16 o HQ44, cada uno por su lado.
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
-                               const half* gate_up, const half* down, half* gate_up_scratch,
-                               half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, cudaStream_t stream);
-// gate_up es [E, 2I, H] y down [E, H, I]. Sincroniza: no es capturable en un grafo.
+                               const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
+                               half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
+                               int K, int H, int I, int P, cudaStream_t stream);
+// gate_up es [E, 2I, H] y down [E, H, P]. Sincroniza: no es capturable en un grafo.
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const half* gate_up, const half* down, half* output,
-                               int L, int E, int K, int H, int I, cudaStream_t stream);
+                               int L, int E, int K, int H, int I, int P, cudaStream_t stream);
 
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,

@@ -228,6 +228,13 @@ public:
     void add_moe_experts(const std::string& dst, const std::string& input,
                          const std::string& indices, const std::string& weights,
                          const std::string& gate_up, const std::string& down);
+    void add_moe_experts_decode(const std::string& dst, const std::string& input,
+                                const std::string& indices, const std::string& weights,
+                                const std::string& gate_up, const std::string& down,
+                                const std::string& gate_up_scratch,
+                                const std::string& hidden_scratch,
+                                const std::string& rows_scratch);
+    void add_pad_columns(const std::string& dst, const std::string& input);
     void add_concat(const std::string& dst, 
                     const std::vector<std::string>& inputs, int32_t dim);
     

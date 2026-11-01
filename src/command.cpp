@@ -217,6 +217,24 @@ void CommandBuffer::add_moe_experts(const std::string& dst,
     add_op(op::MOE_EXPERTS(), dst).in({input, indices, weights, gate_up, down});
 }
 
+void CommandBuffer::add_moe_experts_decode(const std::string& dst,
+                                           const std::string& input,
+                                           const std::string& indices,
+                                           const std::string& weights,
+                                           const std::string& gate_up,
+                                           const std::string& down,
+                                           const std::string& gate_up_scratch,
+                                           const std::string& hidden_scratch,
+                                           const std::string& rows_scratch) {
+    add_op(op::MOE_EXPERTS_DECODE(), dst)
+        .in({input, indices, weights, gate_up, down,
+             gate_up_scratch, hidden_scratch, rows_scratch});
+}
+
+void CommandBuffer::add_pad_columns(const std::string& dst, const std::string& input) {
+    add_op(op::PAD_COLUMNS(), dst).in({input});
+}
+
 void CommandBuffer::add_ple_slice(const std::string& dst,
                                   const std::string& packed,
                                   uint32_t layer, uint32_t layers,

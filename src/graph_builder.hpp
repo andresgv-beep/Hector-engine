@@ -449,6 +449,7 @@ private:
         const Gemma4Config& gemma,
         const ArchDescriptor& arch,
         uint32_t layer_idx,
+        uint32_t batch_size,
         uint32_t seq_len
     );
 
@@ -458,6 +459,7 @@ private:
         const Gemma4Config& gemma,
         const ArchDescriptor& arch,
         uint32_t layer_idx,
+        uint32_t batch_size,
         uint32_t seq_len
     );
     

@@ -11,6 +11,7 @@
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -215,7 +216,7 @@ void dump_outputs(helios::Engine& engine, const helios::CommandBuffer& tail,
         for (size_t slot = 0; slot < K; ++slot) {
             const size_t expert = size_t(ids[token * K + slot]);
             launch_matmul_fp16_cublas(input + token * H, gate_up + expert * 2 * I * H, projected, 1, H, 2 * I, 0);
-            launch_moe_gate_up_mul(projected, activated, 1, I, 0);
+            launch_moe_gate_up_mul(projected, activated, 1, I, I, 0);
             launch_matmul_fp16_cublas(activated, down + expert * H * I, row, 1, I, H, 0);
             const auto gate_up_row = download<half>(projected, 2 * I);
             for (size_t i = 0; i < I; ++i) gate.push_back(__half2float(gate_up_row[i]));
@@ -273,7 +274,10 @@ void test_ties(helios::Engine& engine, const std::string& oracle, const std::str
 
 void test_layer(const std::string& references, const std::string& out) {
     const std::string oracle = references + "/layer-00-oracle-fp32";
-    helios::Engine engine;
+    // El stream por defecto no se puede capturar en un CUDA Graph.
+    helios::EngineConfig engine_config;
+    cuda_require(cudaStreamCreate(&engine_config.stream), "stream");
+    helios::Engine engine(engine_config);
     helios::kernels::register_all_kernels(engine);
     test_ties(engine, oracle, out);
 
@@ -382,6 +386,105 @@ void test_layer(const std::string& references, const std::string& out) {
         }
         std::filesystem::remove(out + ".ties");
         std::cout << "  salidas en " << out << std::endl;
+    }
+
+    // Un token va por el decode. Aqui los matmul FP16 van por cuBLAS y no se graban,
+    // asi que el replay cae a execute; la captura se prueba con la ruta MoE sola.
+    const auto count_ops = [](const helios::CommandBuffer& commands, helios::OpTypeID op) {
+        return std::count_if(commands.commands().begin(), commands.commands().end(),
+                             [&](const helios::Command& cmd) { return cmd.op == op; });
+    };
+    set_residual(engine, std::vector<half>(residual.begin(), residual.begin() + H));
+    const auto decode = builder.build_gemma4_mlp_ple_tail(engine, config, gemma, arch, 0, 1, 1);
+    require(count_ops(decode, helios::op::MOE_EXPERTS_DECODE()) == 1 &&
+            count_ops(decode, helios::op::MOE_EXPERTS()) == 0, "un token usa el decode");
+    engine.execute(decode);
+    const auto direct = scratch_floats(engine, HIDDEN, H);
+    check_error("decode contra lote", direct,
+                std::vector<float>(one_by_one.begin(), one_by_one.begin() + H), 1e-6);
+    for (uint32_t token = 0; token < TOKENS; ++token) {
+        set_residual(engine, std::vector<half>(residual.begin() + size_t(token) * H,
+                                               residual.begin() + size_t(token + 1) * H));
+        engine.execute_graph_replay(decode);
+        const auto row = scratch_floats(engine, HIDDEN, H);
+        check_error("replay del decode, token " + std::to_string(token), row,
+                    std::vector<float>(one_by_one.begin() + size_t(token) * H,
+                                       one_by_one.begin() + size_t(token + 1) * H), 1e-6);
+    }
+
+    helios::CommandBuffer moe;
+    moe.add_moe_route("_s.g4.moe_indices", "_s.g4.moe_weights", "_s.g4.moe_logits",
+                      "text.layer0.moe.router.expert_scale", K);
+    moe.add_moe_experts_decode("_s.g4.moe_out", HIDDEN, "_s.g4.moe_indices", "_s.g4.moe_weights",
+                               "text.layer0.moe.experts.gate_up.weight",
+                               "text.layer0.moe.experts.down.weight",
+                               "_s.g4.moe_gate_up", "_s.g4.moe_hidden", "_s.g4.moe_rows");
+    const auto set_logits = [&](uint32_t token) {
+        std::vector<half> logits(E);
+        for (uint32_t e = 0; e < E; ++e) {
+            logits[e] = __float2half(std::sin(float(e * (token + 3)) * 0.7f) * 4.0f);
+        }
+        cuda_require(cudaMemcpy(engine.tensors().at("_s.g4.moe_logits").ptr, logits.data(),
+                                E * sizeof(half), cudaMemcpyHostToDevice), "logits");
+    };
+    std::vector<std::vector<float>> direct_out;
+    for (uint32_t token = 0; token < TOKENS; ++token) {
+        set_residual(engine, std::vector<half>(residual.begin() + size_t(token) * H,
+                                               residual.begin() + size_t(token + 1) * H));
+        set_logits(token);
+        engine.execute(moe);
+        direct_out.push_back(scratch_floats(engine, "_s.g4.moe_out", H));
+    }
+    engine.invalidate_graph();
+    for (uint32_t token = 0; token < TOKENS; ++token) {
+        set_residual(engine, std::vector<half>(residual.begin() + size_t(token) * H,
+                                               residual.begin() + size_t(token + 1) * H));
+        set_logits(token);
+        engine.execute_graph_replay(moe);
+        require(engine.graph_ready(), "la ruta MoE de un token debe grabarse en el grafo");
+        check_error("grafo MoE, token " + std::to_string(token),
+                    scratch_floats(engine, "_s.g4.moe_out", H), direct_out[token], 1e-6);
+    }
+    engine.invalidate_graph();
+
+    // Con padding el resultado es el mismo. Las columnas extra llevan pesos de 1:
+    // si la entrada no llega a cero se nota en la salida.
+    const auto pad_weight = [&](const std::string& name, uint32_t rows, uint32_t cols, uint32_t physical) {
+        const helios::TensorInfo& tensor = engine.tensors().at(name);
+        const size_t matrices = tensor.numel() / (size_t(rows) * cols);
+        const std::vector<uint32_t> shape = tensor.shape.size() == 3
+            ? std::vector<uint32_t>{tensor.shape[0], rows, physical}
+            : std::vector<uint32_t>{rows, physical};
+        const auto values = download<half>(static_cast<const half*>(tensor.ptr), tensor.numel());
+        std::vector<half> padded(matrices * rows * physical, __float2half(1.0f));
+        for (size_t row = 0; row < matrices * rows; ++row) {
+            std::copy_n(values.begin() + row * cols, cols, padded.begin() + row * physical);
+        }
+        engine.tensors().remove(name);
+        void* device = engine.tensors().allocate_and_register(name, shape, FP16());
+        cuda_require(cudaMemcpy(device, padded.data(), padded.size() * sizeof(half),
+                                cudaMemcpyHostToDevice), "peso con relleno");
+    };
+    constexpr uint32_t PI = 768, PS = 2304;
+    pad_weight("text.layer0.moe.experts.down.weight", H, I, PI);
+    pad_weight("text.layer0.mlp.down.weight", H, 2112, PS);
+    helios::Gemma4Config padded = gemma;
+    padded.layers[0].moe_down.physical_cols = PI;
+    padded.layers[0].moe_shared_down.physical_cols = PS;
+    builder.allocate_gemma4_scratch(engine, config, padded, arch, 1, TOKENS);
+    set_residual(engine, residual);
+    const auto padded_batch = builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, TOKENS);
+    require(count_ops(padded_batch, helios::op::PAD_COLUMNS()) == 1, "el down compartido se rellena");
+    engine.execute(padded_batch);
+    check_error("lote con padding", scratch_floats(engine, HIDDEN, size_t(TOKENS) * H), batched, 2e-3);
+    for (uint32_t token = 0; token < TOKENS; ++token) {
+        set_residual(engine, std::vector<half>(residual.begin() + size_t(token) * H,
+                                               residual.begin() + size_t(token + 1) * H));
+        engine.execute(builder.build_gemma4_mlp_ple_tail(engine, config, padded, arch, 0, 1, 1));
+        check_error("decode con padding, token " + std::to_string(token),
+                    scratch_floats(engine, HIDDEN, H),
+                    std::vector<float>(one_by_one.begin() + size_t(token) * H,
+                                       one_by_one.begin() + size_t(token + 1) * H), 2e-3);
     }
 
     // Con la bandera y sin dimensiones hay que fallar, no correr con top-k 0.

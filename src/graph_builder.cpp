@@ -486,6 +486,23 @@ void GraphBuilder::allocate_gemma4_scratch(
         scratch_names_.push_back(S("g4.moe_indices"));
         engine.tensors().allocate_and_register(S("g4.moe_weights"), {B, L, K}, dtype::FP32());
         scratch_names_.push_back(S("g4.moe_weights"));
+
+        // Rango 2: un token de decode, no siguen la forma activa del lote.
+        const uint32_t I = gemma.moe_intermediate_size;
+        const uint32_t P = (I + 255) / 256 * 256;
+        auto alloc_fixed = [&](const std::string& name, const std::vector<uint32_t>& shape) {
+            engine.tensors().allocate_and_register(name, shape, dtype::FP16());
+            scratch_names_.push_back(name);
+        };
+        alloc_fixed(S("g4.moe_gate_up"), {K, 2 * I});
+        alloc_fixed(S("g4.moe_hidden"), {K, P});
+        alloc_fixed(S("g4.moe_rows"), {K, D});
+
+        uint32_t shared_cols = 0;
+        for (const Gemma4LayerConfig& layer : gemma.layers) {
+            shared_cols = std::max(shared_cols, layer.moe_shared_down.physical_cols);
+        }
+        if (shared_cols != 0) alloc(S("g4.mlp_h_padded"), {B, L, shared_cols});
     }
 
     if (has_ple) {
@@ -732,7 +749,7 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
 
     append_gemma4_mlp_ple_tail(
-        cb, config, gemma, arch, layer_idx, seq_len);
+        cb, config, gemma, arch, layer_idx, batch_size, seq_len);
     return cb;
 }
 
@@ -900,7 +917,7 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
                    W(arch, layer_idx, "ln_attn_post.weight"),
                    config.rms_norm_eps());
     cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
-    append_gemma4_mlp_ple_tail(cb, config, gemma, arch, layer_idx, seq_len);
+    append_gemma4_mlp_ple_tail(cb, config, gemma, arch, layer_idx, batch_size, seq_len);
     return cb;
 }
 
@@ -1005,6 +1022,7 @@ void GraphBuilder::append_gemma4_moe_branch(
     const Gemma4Config& gemma,
     const ArchDescriptor& arch,
     uint32_t layer_idx,
+    uint32_t batch_size,
     uint32_t seq_len
 ) {
     const float eps = config.rms_norm_eps();
@@ -1024,10 +1042,18 @@ void GraphBuilder::append_gemma4_moe_branch(
 
     cb.add_rmsnorm(S("normed"), S("hidden"),
                    W(arch, layer_idx, "ln_moe_in.weight"), eps);
-    cb.add_moe_experts(S("g4.moe_out"), S("normed"), S("g4.moe_indices"),
-                       S("g4.moe_weights"),
-                       W(arch, layer_idx, "moe.experts.gate_up.weight"),
-                       W(arch, layer_idx, "moe.experts.down.weight"));
+    if (batch_size == 1 && seq_len == 1) {
+        cb.add_moe_experts_decode(S("g4.moe_out"), S("normed"), S("g4.moe_indices"),
+                                  S("g4.moe_weights"),
+                                  W(arch, layer_idx, "moe.experts.gate_up.weight"),
+                                  W(arch, layer_idx, "moe.experts.down.weight"),
+                                  S("g4.moe_gate_up"), S("g4.moe_hidden"), S("g4.moe_rows"));
+    } else {
+        cb.add_moe_experts(S("g4.moe_out"), S("normed"), S("g4.moe_indices"),
+                           S("g4.moe_weights"),
+                           W(arch, layer_idx, "moe.experts.gate_up.weight"),
+                           W(arch, layer_idx, "moe.experts.down.weight"));
+    }
     cb.add_rmsnorm(S("g4.moe_out"), S("g4.moe_out"),
                    W(arch, layer_idx, "ln_moe_branch_post.weight"), eps);
     cb.add_add(S("mlp_out"), S("mlp_out"), S("g4.moe_out"));
@@ -1039,6 +1065,7 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
     const Gemma4Config& gemma,
     const ArchDescriptor& arch,
     uint32_t layer_idx,
+    uint32_t batch_size,
     uint32_t seq_len
 ) {
     const std::string gate = G4(layer_idx, "gate");
@@ -1057,11 +1084,16 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
     set_seq(cb);
     cb.add_gelu(gate, gate);
     cb.add_mul(mlp_h, gate, up);
-    cb.add_matmul(S("mlp_out"), mlp_h,
+    // GM4X v2 guarda down con columnas fisicas: mlp_h entra con su cola a cero.
+    const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
+    const bool padded_down = layer.moe_shared_down.physical_cols != 0 &&
+                             layer.moe_shared_down.physical_cols != layer.intermediate_size;
+    if (padded_down) cb.add_pad_columns(S("g4.mlp_h_padded"), mlp_h);
+    cb.add_matmul(S("mlp_out"), padded_down ? S("g4.mlp_h_padded") : mlp_h,
                   W(arch, layer_idx, "mlp.down.weight"));
     set_seq(cb);
     if (gemma.has_flag(GEMMA4_EXT_FLAG_MOE)) {
-        append_gemma4_moe_branch(cb, config, gemma, arch, layer_idx, seq_len);
+        append_gemma4_moe_branch(cb, config, gemma, arch, layer_idx, batch_size, seq_len);
     }
     cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
                    W(arch, layer_idx, "ln_mlp_post.weight"),
@@ -1110,7 +1142,7 @@ CommandBuffer GraphBuilder::build_gemma4_mlp_ple_tail(
     CommandBuffer cb;
     cb.reserve(18);
     append_gemma4_mlp_ple_tail(
-        cb, config, gemma, arch, layer_idx, seq_len);
+        cb, config, gemma, arch, layer_idx, batch_size, seq_len);
     return cb;
 }
 

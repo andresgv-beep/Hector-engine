@@ -9,6 +9,7 @@
 // de escribir los kernels fundidos.
 
 #include "kernels.hpp"
+#include "hqs_v4_gemv.cuh"
 #include <cuda_fp16.h>
 #include <cmath>
 #include <stdexcept>
@@ -89,13 +90,18 @@ __global__ void moe_gather_rows_kernel(
     output[i] = input[size_t(tokens[row]) * H + column];
 }
 
-// gate_up trae gate en la primera mitad de cada fila y up en la segunda.
+// gate_up trae gate en la primera mitad de cada fila y up en la segunda. La salida
+// tiene P columnas: las que pasan de I son el relleno de down y van a cero.
 __global__ void moe_gate_up_mul_kernel(
-    const half* __restrict__ gate_up, half* __restrict__ output, int M, int I
+    const half* __restrict__ gate_up, half* __restrict__ output, int M, int I, int P
 ) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
-    if (i >= size_t(M) * I) return;
-    const int row = int(i / I), column = int(i % I);
+    if (i >= size_t(M) * P) return;
+    const int row = int(i / P), column = int(i % P);
+    if (column >= I) {
+        output[i] = __float2half(0.0f);
+        return;
+    }
     const float x = __half2float(gate_up[size_t(row) * 2 * I + column]);
     const float up = __half2float(gate_up[size_t(row) * 2 * I + I + column]);
     const float x3 = x * x * x;
@@ -148,6 +154,15 @@ __global__ void moe_weighted_sum_kernel(
     output[column] = __float2half(sum);
 }
 
+__global__ void pad_columns_fp16_kernel(
+    const half* __restrict__ input, half* __restrict__ output, int M, int logical, int physical
+) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= size_t(M) * physical) return;
+    const int row = int(i / physical), column = int(i % physical);
+    output[i] = column < logical ? input[size_t(row) * logical + column] : __float2half(0.0f);
+}
+
 __global__ void moe_narrow_kernel(const float* __restrict__ input, half* __restrict__ output, size_t count) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < count) output[i] = __float2half(input[i]);
@@ -176,6 +191,23 @@ void check(cudaError_t error, const char* where) {
     }
 }
 
+// HQ44 usa 1x8u4 fijo: el sintonizador lanza y sincroniza, y eso no cabe en un
+// grafo. Es el mejor en la 4070 Ti y queda a menos del 2 % en la 2080 Ti.
+void indexed_gemv(const half* input, const int32_t* indices, const void* matrix, bool hq44, half* output,
+                  int input_stride, int K, int rows, int columns, cudaStream_t stream) {
+    if (hq44) {
+        if (columns % 256) throw std::invalid_argument("MoE decode: HQ44 exige columnas múltiplo de 256");
+        hqs_v4::launch_gemv2_indexed<1, 8, 4>(
+            input, indices, static_cast<const uint8_t*>(matrix), output,
+            size_t(rows) * (columns / 256) * hqs_v4::BLOCK_BYTES, input_stride, K, columns, rows, stream);
+        return;
+    }
+    const int threads = 128;
+    moe_indexed_gemv_fp16_kernel<<<K * rows, threads, threads * sizeof(float), stream>>>(
+        input, indices, static_cast<const half*>(matrix), output, size_t(rows) * columns, input_stride,
+        K, rows, columns);
+}
+
 }  // namespace
 
 void launch_moe_route(const half* logits, const half* expert_scale, int32_t* indices, float* weights,
@@ -187,17 +219,14 @@ void launch_moe_route(const half* logits, const half* expert_scale, int32_t* ind
 }
 
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
-                               const half* gate_up, const half* down, half* gate_up_scratch,
-                               half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, cudaStream_t stream) {
-    if (K <= 0 || H <= 0 || I <= 0) throw std::invalid_argument("MoE decode: dimensiones inválidas");
-    const int threads = 128;
-    const size_t shared = threads * sizeof(float);
-    moe_indexed_gemv_fp16_kernel<<<K * 2 * I, threads, shared, stream>>>(
-        input, indices, gate_up, gate_up_scratch, size_t(2) * I * H, 0, K, 2 * I, H);
-    moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * I), MOE_BLOCK, 0, stream>>>(gate_up_scratch, hidden_scratch, K, I);
-    moe_indexed_gemv_fp16_kernel<<<K * H, threads, shared, stream>>>(
-        hidden_scratch, indices, down, rows_scratch, size_t(H) * I, I, K, H, I);
+                               const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
+                               half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
+                               int K, int H, int I, int P, cudaStream_t stream) {
+    if (K <= 0 || H <= 0 || I <= 0 || P < I) throw std::invalid_argument("MoE decode: dimensiones inválidas");
+    indexed_gemv(input, indices, gate_up, gate_up_hq44, gate_up_scratch, 0, K, 2 * I, H, stream);
+    moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * P), MOE_BLOCK, 0, stream>>>(
+        gate_up_scratch, hidden_scratch, K, I, P);
+    indexed_gemv(hidden_scratch, indices, down, down_hq44, rows_scratch, P, K, H, P, stream);
     moe_weighted_sum_kernel<<<blocks_for(H), MOE_BLOCK, 0, stream>>>(rows_scratch, weights, output, K, H);
 }
 
@@ -206,15 +235,24 @@ void launch_moe_probabilities(const half* logits, float* probabilities, int L, i
     moe_probabilities_kernel<<<L, 1, 0, stream>>>(logits, probabilities, L, E);
 }
 
-void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, cudaStream_t stream) {
-    if (M <= 0 || I <= 0) throw std::invalid_argument("MoE gate_up: dimensiones inválidas");
-    moe_gate_up_mul_kernel<<<blocks_for(size_t(M) * I), MOE_BLOCK, 0, stream>>>(gate_up, output, M, I);
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream) {
+    if (M <= 0 || I <= 0 || P < I) throw std::invalid_argument("MoE gate_up: dimensiones inválidas");
+    moe_gate_up_mul_kernel<<<blocks_for(size_t(M) * P), MOE_BLOCK, 0, stream>>>(gate_up, output, M, I, P);
+}
+
+void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
+                             cudaStream_t stream) {
+    if (M <= 0 || logical <= 0 || physical < logical) {
+        throw std::invalid_argument("pad_columns: dimensiones inválidas");
+    }
+    pad_columns_fp16_kernel<<<blocks_for(size_t(M) * physical), MOE_BLOCK, 0, stream>>>(
+        input, output, M, logical, physical);
 }
 
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const half* gate_up, const half* down, half* output,
-                               int L, int E, int K, int H, int I, cudaStream_t stream) {
-    if (L <= 0 || E <= 0 || K <= 0 || H <= 0 || I <= 0) {
+                               int L, int E, int K, int H, int I, int P, cudaStream_t stream) {
+    if (L <= 0 || E <= 0 || K <= 0 || H <= 0 || I <= 0 || P < I) {
         throw std::invalid_argument("MoE expertos: dimensiones inválidas");
     }
     check(cudaStreamSynchronize(stream), "esperar al router");
@@ -238,12 +276,12 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
 
     const size_t max_rows = size_t(L);
     DeviceBuffer<float> sums(size_t(L) * H);
-    DeviceBuffer<half> gathered(max_rows * H), gate_up_out(max_rows * 2 * I), hidden(max_rows * I), rows(max_rows * H);
+    DeviceBuffer<half> gathered(max_rows * H), gate_up_out(max_rows * 2 * I), hidden(max_rows * P), rows(max_rows * H);
     DeviceBuffer<int32_t> device_tokens(max_rows);
     DeviceBuffer<float> device_weights(max_rows);
     check(cudaMemset(sums.data, 0, size_t(L) * H * sizeof(float)), "limpiar suma");
 
-    const size_t gate_up_stride = size_t(2) * I * H, down_stride = size_t(H) * I;
+    const size_t gate_up_stride = size_t(2) * I * H, down_stride = size_t(H) * P;
     for (int expert = 0; expert < E; ++expert) {
         const int M = int(tokens[expert].size());
         if (M == 0) continue;
@@ -251,13 +289,13 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
                          cudaMemcpyHostToDevice), "subir tokens");
         check(cudaMemcpy(device_weights.data, token_weights[expert].data(), M * sizeof(float),
                          cudaMemcpyHostToDevice), "subir pesos");
-        const size_t count = size_t(M) * H, inner = size_t(M) * I;
+        const size_t count = size_t(M) * H, inner = size_t(M) * P;
         moe_gather_rows_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
             input, device_tokens.data, gathered.data, M, H);
         launch_matmul_fp16_cublas(gathered.data, gate_up + expert * gate_up_stride, gate_up_out.data,
                                   M, H, 2 * I, stream);
-        moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I);
-        launch_matmul_fp16_cublas(hidden.data, down + expert * down_stride, rows.data, M, I, H, stream);
+        moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I, P);
+        launch_matmul_fp16_cublas(hidden.data, down + expert * down_stride, rows.data, M, P, H, stream);
         moe_scatter_add_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
             rows.data, device_tokens.data, device_weights.data, sums.data, M, H);
         check(cudaStreamSynchronize(stream), "esperar al experto");

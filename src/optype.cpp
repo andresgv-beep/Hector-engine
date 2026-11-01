@@ -188,10 +188,20 @@ void OpTypeRegistry::register_builtins() {
     info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
 
-    // Entradas: filas, indices, pesos, gate_up [E,2I,H] y down [E,H,I].
-    // Sincroniza y lee indices en la CPU: no entra en un CUDA Graph.
+    // Entradas: filas, indices, pesos, gate_up [E,2I,H] y down [E,H,P], con
+    // P las columnas fisicas de I. Sincroniza y lee indices en la CPU: no entra
+    // en un CUDA Graph.
     info = OpTypeInfo{}; info.name = "moe_experts"; info.category = "moe";
     info.min_inputs = 5; info.max_inputs = 5;
+    register_op(info);
+
+    // Las mismas entradas para un token, mas tres scratch: [K,2I], [K,P] y [K,H].
+    info = OpTypeInfo{}; info.name = "moe_experts_decode"; info.category = "moe";
+    info.min_inputs = 8; info.max_inputs = 8;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "pad_columns"; info.category = "moe";
+    info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
 }
 

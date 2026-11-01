@@ -1709,8 +1709,10 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
         }
         numel *= dim;
     }
+    // Rango 3 solo para los expertos MoE HQ44 empaquetados: [E, filas, columnas].
+    const bool packed_experts = dtype == helios::dtype::HQ44K() && entry.shape.size() == 3;
     if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K()) &&
-        (entry.shape.size() != 2 || entry.shape[1] % 256 != 0)) {
+        ((entry.shape.size() != 2 && !packed_experts) || entry.shape.back() % 256 != 0)) {
         std::cerr << "HnfLoader: x.3 requires a matrix with complete row blocks: " << entry.name << std::endl;
         return false;
     }

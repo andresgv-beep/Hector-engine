@@ -133,10 +133,9 @@ __device__ __forceinline__ float hq44_superblocks(const uint8_t* row_weights, co
 }
 
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK, int U>
-__global__ void gemv_hq44_v2_kernel(const half* __restrict__ input, const uint8_t* __restrict__ weights,
-                                    half* __restrict__ output, int K, int N) {
+__device__ __forceinline__ void gemv_hq44_v2_body(half* s_input, const half* input, const uint8_t* weights,
+                                                  half* output, int K, int N, int first_row) {
     static_assert(U == 1 || U == 2 || U == 4, "header lanes hold at most four superblocks");
-    extern __shared__ half s_input[];
     const int staged_k = K < INPUT_CHUNK ? K : INPUT_CHUNK;
     float* s_partial = reinterpret_cast<float*>(s_input + staged_k);
     const int threads_per_row = WARPS_PER_ROW * 32;
@@ -144,7 +143,7 @@ __global__ void gemv_hq44_v2_kernel(const half* __restrict__ input, const uint8_
     const int local_tid = threadIdx.x % threads_per_row;
     const int warp_in_group = local_tid / 32;
     const int lane = local_tid % 32;
-    const int row = blockIdx.x * ROWS_PER_BLOCK + row_group;
+    const int row = first_row + row_group;
     const uint8_t* row_weights = weights + size_t(row < N ? row : 0) * (K / 256) * BLOCK_BYTES;
     float acc = 0.0f;
 
@@ -179,6 +178,40 @@ __global__ void gemv_hq44_v2_kernel(const half* __restrict__ input, const uint8_
             value += __shfl_down_sync(mask, value, offset);
         if (lane == 0 && row < N) output[row] = __float2half(value);
     }
+}
+
+template<int WARPS_PER_ROW, int ROWS_PER_BLOCK, int U>
+__global__ void gemv_hq44_v2_kernel(const half* __restrict__ input, const uint8_t* __restrict__ weights,
+                                    half* __restrict__ output, int K, int N) {
+    extern __shared__ half s_input[];
+    gemv_hq44_v2_body<WARPS_PER_ROW, ROWS_PER_BLOCK, U>(s_input, input, weights, output, K, N,
+                                                        blockIdx.x * ROWS_PER_BLOCK);
+}
+
+// One GEMV per selected expert. The address is computed here because a CUDA Graph
+// freezes the arguments, while `indices` is read on every execution.
+// input_stride 0 feeds every expert the same row; otherwise each one has its own.
+template<int WARPS_PER_ROW, int ROWS_PER_BLOCK, int U>
+__global__ void gemv_hq44_indexed_kernel(const half* __restrict__ input, const int32_t* __restrict__ indices,
+                                         const uint8_t* __restrict__ weights, half* __restrict__ output,
+                                         size_t expert_stride, int input_stride, int K, int N) {
+    extern __shared__ half s_input[];
+    const int blocks_per_expert = (N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
+    const int slot = blockIdx.x / blocks_per_expert;
+    gemv_hq44_v2_body<WARPS_PER_ROW, ROWS_PER_BLOCK, U>(
+        s_input, input + size_t(slot) * input_stride, weights + size_t(indices[slot]) * expert_stride,
+        output + size_t(slot) * N, K, N, (blockIdx.x % blocks_per_expert) * ROWS_PER_BLOCK);
+}
+
+template<int WPR, int RPB, int U>
+static void launch_gemv2_indexed(const half* in, const int32_t* indices, const uint8_t* weights, half* out,
+                                 size_t expert_stride, int input_stride, int slots, int K, int N,
+                                 cudaStream_t stream) {
+    const int threads = WPR * RPB * 32;
+    const int blocks = slots * ((N + RPB - 1) / RPB);
+    const size_t shared = std::min(K, INPUT_CHUNK) * sizeof(half) + RPB * WPR * sizeof(float);
+    gemv_hq44_indexed_kernel<WPR, RPB, U><<<blocks, threads, shared, stream>>>(
+        in, indices, weights, out, expert_stride, input_stride, K, N);
 }
 
 template<int WPR, int RPB, int U>
