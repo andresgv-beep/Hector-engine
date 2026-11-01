@@ -109,7 +109,7 @@ def paired(base, cand, documents):
 manifest = json.loads((capture/'manifest.json').read_text())
 documents = np.array([line.split('\t')[0] for line in (capture/'control-tokens.tsv').read_text().splitlines()[1:]])
 weights = Weights(hnf, model, manifest['model']['hnf_sha256'])
-report = {'kind': 'gpu_control_replay', 'weights_scope': 'down HQ44 unitario y candidatos; gate_up y rama compartida sin recalibrar', 'gpus': {}}
+report = {'kind': 'gpu_control_replay', 'weights_scope': 'down HQ44 unitario y candidatos; gate_up sin recalibrar; down compartido solo en el bloque shared_down', 'gpus': {}}
 for gpu in sorted(p.name for p in replay.iterdir() if p.is_dir()):
     report['gpus'][gpu] = {}
     for layer in LAYERS:
