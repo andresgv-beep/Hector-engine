@@ -7,10 +7,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -119,8 +121,54 @@ std::vector<uint8_t> make_gemma4_hints(bool corrupt_record_size) {
     return result;
 }
 
-std::string write_mock_hnf(const std::string& path, bool corrupt_record_size) {
-    const std::vector<uint8_t> binary_hints = make_gemma4_hints(corrupt_record_size);
+std::vector<uint8_t> make_moe_hints(const std::vector<uint8_t>& extension) {
+    constexpr uint32_t extension_offset =
+        sizeof(ExecutionHintsBin) + sizeof(TextModelConfigBin);
+    const uint32_t extension_size = static_cast<uint32_t>(extension.size());
+    uint32_t layer_count = 0;
+    std::memcpy(&layer_count, extension.data() + 8, sizeof(layer_count));
+
+    std::vector<uint8_t> result(extension_offset + extension_size, 0);
+
+    ExecutionHintsBin hints{};
+    hints.magic = HINTS_MAGIC;
+    hints.version_major = 1;
+    hints.version_minor = 1;
+    hints.text_offset = sizeof(ExecutionHintsBin);
+    hints.num_text_models = 1;
+    hints.flags = 1;
+    std::memcpy(hints.reserved, &extension_offset, sizeof(extension_offset));
+    std::memcpy(hints.reserved + 4, &extension_size, sizeof(extension_size));
+    std::memcpy(hints.reserved + 8, "GM4X", 4);
+    write_at(result, 0, hints);
+
+    TextModelConfigBin text{};
+    text.rope_theta = 10000.0f;
+    text.rope_scaling_factor = 1.0f;
+    text.partial_rotary_factor = 1.0f;
+    text.rms_norm_eps = 1.0e-6f;
+    text.num_hidden_layers = layer_count;
+    text.hidden_size = 2816;
+    text.intermediate_size = 2112;
+    text.vocab_size = 262144;
+    text.max_position_embeddings = 262144;
+    text.num_attention_heads = 16;
+    text.num_key_value_heads = 8;
+    text.head_dim = 256;
+    text.attention_type = ATTN_MQA;
+    text.arch = ARCH_GEMMA4;
+    text.dtype = DTYPE_BF16;
+    text.mlp_type = MLP_GEGLU;
+    text.norm_type = NORM_RMSNORM;
+    text.flags = CFG_FLAG_USE_QK_NORM | CFG_FLAG_TIE_EMBEDDINGS;
+    write_at(result, hints.text_offset, text);
+
+    std::memcpy(result.data() + extension_offset, extension.data(), extension.size());
+    return result;
+}
+
+std::string write_mock_hnf(const std::string& path,
+                           const std::vector<uint8_t>& binary_hints) {
     const std::string json_hints = R"({
         "text_enabled": true,
         "text": {
@@ -183,6 +231,10 @@ std::string write_mock_hnf(const std::string& path, bool corrupt_record_size) {
     return path;
 }
 
+std::string write_mock_hnf(const std::string& path, bool corrupt_record_size) {
+    return write_mock_hnf(path, make_gemma4_hints(corrupt_record_size));
+}
+
 void test_valid_mock() {
     const std::string path = write_mock_hnf("/tmp/helios_gemma4_metadata.hnf", false);
     HnfLoader loader;
@@ -223,6 +275,122 @@ void test_corrupt_mock_is_rejected() {
             "corrupt GM4X must report its record-size error");
     std::remove(path.c_str());
     std::cout << "PASS: corrupt GM4X contract rejected" << std::endl;
+}
+
+std::vector<uint8_t> read_fixture(const std::string& name) {
+    std::ifstream input(std::string{GM4X_V2_FIXTURES} + "/" + name, std::ios::binary);
+    require(input.is_open(), "cannot open fixture " + name);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(input), {});
+}
+
+template <typename T>
+void poke(std::vector<uint8_t>& buffer, size_t offset, T value) {
+    write_at(buffer, offset, value);
+}
+
+bool load_extension(const std::vector<uint8_t>& extension, HnfLoader& loader) {
+    const std::string path =
+        write_mock_hnf("/tmp/helios_gemma4_moe_metadata.hnf", make_moe_hints(extension));
+    const bool loaded = loader.load_metadata(path);
+    std::remove(path.c_str());
+    return loaded;
+}
+
+void require_rejected(const std::string& label, const std::vector<uint8_t>& extension) {
+    HnfLoader loader;
+    require(!load_extension(extension, loader), label + " must be rejected");
+    require(loader.last_error().find("GM4X") != std::string::npos,
+            label + " must fail in GM4X, not elsewhere: " + loader.last_error());
+}
+
+void test_gm4x_v2_layouts() {
+    HnfLoader loader;
+    require(load_extension(read_fixture("valid-layer0-bf16.bin"), loader),
+            "BF16 GM4X v2 must load: " + loader.last_error());
+    const Gemma4Config& config = loader.gemma4_config();
+    require(config.version == 2, "GM4X v2 version");
+    require(config.has_flag(GEMMA4_EXT_FLAG_MOE), "GM4X v2 MoE flag");
+    require(config.moe_experts == 128 && config.moe_top_k == 8 &&
+            config.moe_intermediate_size == 704, "GM4X v2 topology");
+
+    const Gemma4LayerConfig& layer = config.layers.at(0);
+    require(layer.intermediate_size == 2112, "GM4X v2 keeps the v1 record");
+    require(layer.moe_gate_up.rows == 1408 && layer.moe_gate_up.logical_cols == 2816 &&
+            layer.moe_gate_up.physical_cols == 2816 &&
+            layer.moe_gate_up.experts == 128, "gate_up keeps its columns");
+    require(layer.moe_down.rows == 2816 && layer.moe_down.logical_cols == 704 &&
+            layer.moe_down.physical_cols == 768 && layer.moe_down.row_bytes == 1536 &&
+            layer.moe_down.expert_stride == 4325376, "down pads to 768 columns");
+    require(layer.moe_shared_down.logical_cols == 2112 &&
+            layer.moe_shared_down.physical_cols == 2304 &&
+            layer.moe_shared_down.experts == 1, "shared down pads to 2304 columns");
+    require(layer.moe_down.expert_offset(127) == 127 * uint64_t{4325376},
+            "last expert offset");
+
+    HnfLoader hq44;
+    require(load_extension(read_fixture("valid-layer0-hq44.bin"), hq44),
+            "HQ44 GM4X v2 must load: " + hq44.last_error());
+    const Gemma4LayerConfig& quantized = hq44.gemma4_config().layers.at(0);
+    require(quantized.moe_gate_up.storage == GEMMA4_MOE_STORAGE_HQ44 &&
+            quantized.moe_gate_up.row_bytes == 11 * 152 &&
+            quantized.moe_gate_up.expert_stride == 11 * 152 * 1408u, "HQ44 gate_up");
+    require(quantized.moe_down.row_bytes == 3 * 152 &&
+            quantized.moe_down.expert_stride == 3 * 152 * 2816u, "HQ44 down");
+
+    HnfLoader full;
+    require(load_extension(read_fixture("valid-full30-bf16.bin"), full),
+            "30-layer GM4X v2 must load: " + full.last_error());
+    require(full.gemma4_config().layers.size() == 30, "30 GM4X v2 layers");
+    require(full.gemma4_config().layers.back().moe_down.physical_cols == 768,
+            "last layer down layout");
+    std::cout << "PASS: GM4X v2 layouts" << std::endl;
+}
+
+void test_gm4x_v2_rejections() {
+    for (const char* name : {"reject-version.bin", "reject-topk.bin", "reject-down-stride.bin",
+                             "reject-physical-cols.bin", "reject-dtype.bin", "reject-reserved.bin",
+                             "reject-gate-rows.bin", "reject-overflow-stride.bin",
+                             "reject-truncated.bin"}) {
+        require_rejected(name, read_fixture(name));
+    }
+
+    constexpr size_t layer0 = sizeof(Gemma4ExtensionV2HeaderBin);
+    constexpr size_t moe = sizeof(Gemma4LayerConfigBin);
+    constexpr size_t gate_up = layer0 + offsetof(Gemma4LayerConfigV2Bin, gate_up);
+    constexpr size_t down = layer0 + offsetof(Gemma4LayerConfigV2Bin, down);
+    constexpr size_t shared = layer0 + offsetof(Gemma4LayerConfigV2Bin, shared_down);
+    const std::vector<uint8_t> valid = read_fixture("valid-layer0-hq44.bin");
+    const auto mutated = [&](size_t offset, auto value) {
+        std::vector<uint8_t> copy = valid;
+        poke(copy, offset, value);
+        return copy;
+    };
+
+    require_rejected("v2 without the MoE flag", mutated(12, uint32_t{0}));
+    require_rejected("zero top-k", mutated(layer0 + moe + 4, uint32_t{0}));
+    require_rejected("wrong descriptor mask", mutated(layer0 + moe + 12, uint32_t{6}));
+    require_rejected("wrong descriptor count", mutated(layer0 + moe + 16, uint32_t{2}));
+    require_rejected("swapped matrix role", mutated(gate_up, uint32_t{GEMMA4_MOE_ROLE_DOWN}));
+    require_rejected("HQ44 with a float layout", mutated(down + 28, uint32_t{0}));
+    require_rejected("physical rows differ", mutated(down + 16, uint32_t{2815}));
+    require_rejected("wrong row bytes", mutated(down + 32, uint64_t{304}));
+    require_rejected("shared down width", mutated(shared + 12, uint32_t{2111}));
+    require_rejected("shared down per expert", mutated(shared + 24, uint32_t{128}));
+
+    std::vector<uint8_t> uneven = read_fixture("valid-full30-bf16.bin");
+    poke(uneven, layer0 + 7 * sizeof(Gemma4LayerConfigV2Bin) + moe + 4, uint32_t{4});
+    require_rejected("top-k that changes between layers", uneven);
+
+    std::vector<uint8_t> flagged = make_gemma4_hints(false);
+    const size_t v1_flags = sizeof(ExecutionHintsBin) + sizeof(TextModelConfigBin) + 12;
+    uint32_t flags = 0;
+    std::memcpy(&flags, flagged.data() + v1_flags, sizeof(flags));
+    poke(flagged, v1_flags, flags | GEMMA4_EXT_FLAG_MOE);
+    const std::string path = write_mock_hnf("/tmp/helios_gemma4_v1_moe.hnf", flagged);
+    HnfLoader loader;
+    require(!loader.load_metadata(path), "v1 cannot carry the MoE flag");
+    std::remove(path.c_str());
+    std::cout << "PASS: GM4X v2 rejections" << std::endl;
 }
 
 void inspect_real_hnf(const std::string& path) {
@@ -292,6 +460,8 @@ void inspect_real_hnf(const std::string& path) {
 int main(int argc, char** argv) {
     test_valid_mock();
     test_corrupt_mock_is_rejected();
+    test_gm4x_v2_layouts();
+    test_gm4x_v2_rejections();
     if (argc == 2) inspect_real_hnf(argv[1]);
     if (argc > 2) {
         std::cerr << "Usage: test_gemma4_metadata [gemma4.hnf]" << std::endl;

@@ -192,6 +192,8 @@ target_link_libraries(test_hnf_loader PRIVATE helios-engine)
 # Gemma 4 HNF/GM4X metadata contract (no model weights or CUDA allocations)
 add_executable(test_gemma4_metadata tests/test_gemma4_metadata.cpp)
 target_link_libraries(test_gemma4_metadata PRIVATE helios-engine)
+target_compile_definitions(test_gemma4_metadata PRIVATE
+    GM4X_V2_FIXTURES="${CMAKE_SOURCE_DIR}/tests/data/gm4x-v2")
 
 # Gemma 4 GM4V, visual inventory and optional real block load/unload
 add_executable(test_gemma4_vision_metadata tests/test_gemma4_vision_metadata.cpp)

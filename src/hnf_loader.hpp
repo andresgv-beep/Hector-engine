@@ -331,7 +331,66 @@ struct Gemma4LayerConfigBin {
 static_assert(sizeof(Gemma4LayerConfigBin) == 40,
               "Gemma4LayerConfigBin must be 40 bytes");
 
+// GM4X v2 describes the MoE experts. The v1 header is kept as a prefix, with
+// base.reserved holding the size of this header.
+struct Gemma4ExtensionV2HeaderBin {
+    Gemma4ExtensionHeaderBin base;
+    uint32_t descriptor_size;
+    uint32_t descriptors_per_layer;
+    uint64_t extension_size;
+    uint32_t expert_order;           // 1 = packed by expert
+    uint32_t gate_up_order;          // 1 = gate before up inside each expert
+    uint64_t reserved;
+};
+static_assert(sizeof(Gemma4ExtensionV2HeaderBin) == 64,
+              "Gemma4ExtensionV2HeaderBin must be 64 bytes");
+
+// Physical columns are the logical ones rounded up to 256; the extra columns
+// are zeros and the engine must feed zeros in the matching input tail.
+struct Gemma4MoeMatrixBin {
+    uint32_t role;                   // Gemma4MoeRole
+    uint32_t storage;                // Gemma4MoeStorage
+    uint32_t rows;
+    uint32_t logical_cols;
+    uint32_t physical_rows;
+    uint32_t physical_cols;
+    uint32_t experts;
+    uint32_t layout;                 // 0=float, 1=HQ44
+    uint64_t row_bytes;
+    uint64_t expert_stride;
+};
+static_assert(sizeof(Gemma4MoeMatrixBin) == 48,
+              "Gemma4MoeMatrixBin must be 48 bytes");
+
+struct Gemma4LayerConfigV2Bin {
+    Gemma4LayerConfigBin base;
+    uint32_t experts;
+    uint32_t top_k;
+    uint32_t intermediate_size;
+    uint32_t descriptor_mask;        // Bit (role - 1) set per matrix present
+    uint32_t descriptor_count;
+    uint32_t reserved;
+    Gemma4MoeMatrixBin gate_up;
+    Gemma4MoeMatrixBin down;
+    Gemma4MoeMatrixBin shared_down;
+};
+static_assert(sizeof(Gemma4LayerConfigV2Bin) == 208,
+              "Gemma4LayerConfigV2Bin must be 208 bytes");
+
 #pragma pack(pop)
+
+enum Gemma4MoeRole : uint32_t {
+    GEMMA4_MOE_ROLE_GATE_UP = 1,
+    GEMMA4_MOE_ROLE_DOWN = 2,
+    GEMMA4_MOE_ROLE_SHARED_DOWN = 3,
+};
+
+enum Gemma4MoeStorage : uint32_t {
+    GEMMA4_MOE_STORAGE_FP16 = 0,
+    GEMMA4_MOE_STORAGE_BF16 = 1,
+    GEMMA4_MOE_STORAGE_FP32 = 2,
+    GEMMA4_MOE_STORAGE_HQ44 = 3,
+};
 
 constexpr uint32_t GEMMA4_EXT_FLAG_PLE              = (1u << 0);
 constexpr uint32_t GEMMA4_EXT_FLAG_LAYER_SCALAR     = (1u << 1);
@@ -363,6 +422,20 @@ constexpr uint32_t GEMMA4_VISION_FLAG_POOL_NORM_WEIGHTLESS = (1u << 13);
 constexpr uint32_t GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN = (1u << 14);
 constexpr uint32_t GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE = (1u << 15);
 
+struct Gemma4MoeMatrix {
+    uint32_t storage = GEMMA4_MOE_STORAGE_FP16;
+    uint32_t rows = 0;
+    uint32_t logical_cols = 0;
+    uint32_t physical_cols = 0;
+    uint32_t experts = 0;
+    uint64_t row_bytes = 0;
+    uint64_t expert_stride = 0;
+
+    uint64_t expert_offset(uint32_t expert) const {
+        return uint64_t{expert} * expert_stride;
+    }
+};
+
 struct Gemma4LayerConfig {
     uint32_t attention_kind = 0;
     uint32_t sliding_window = 0;
@@ -374,6 +447,10 @@ struct Gemma4LayerConfig {
     float partial_rotary_factor = 1.0f;
     int32_t kv_share_group = -1;
     uint32_t num_kv_heads = 0;   // 0 = usar el valor global del modelo
+    // Solo con GM4X v2.
+    Gemma4MoeMatrix moe_gate_up;
+    Gemma4MoeMatrix moe_down;
+    Gemma4MoeMatrix moe_shared_down;
 
     bool is_global_attention() const { return attention_kind == 1; }
     bool k_eq_v() const { return (flags & GEMMA4_LAYER_FLAG_K_EQ_V) != 0; }

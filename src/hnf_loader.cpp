@@ -1198,6 +1198,42 @@ bool HnfLoader::parse_execution_hints_binary(const uint8_t* data, size_t size) {
     return true;
 }
 
+static bool parse_gemma4_moe_matrix(const Gemma4MoeMatrixBin& bin, uint32_t role,
+                                    uint64_t rows, uint64_t cols, uint32_t experts,
+                                    Gemma4MoeMatrix& matrix) {
+    constexpr uint64_t limit = std::numeric_limits<uint64_t>::max();
+    const bool hq44 = bin.storage == GEMMA4_MOE_STORAGE_HQ44;
+    if (bin.role != role || bin.storage > GEMMA4_MOE_STORAGE_HQ44 ||
+        bin.layout != (hq44 ? 1u : 0u) || bin.rows != rows || bin.logical_cols != cols ||
+        bin.physical_rows != rows || bin.physical_cols != (cols + 255) / 256 * 256 ||
+        bin.experts != experts) {
+        return false;
+    }
+    if (role == GEMMA4_MOE_ROLE_GATE_UP && rows % 2 != 0) {
+        return false;
+    }
+
+    uint64_t row_bytes = 0;
+    switch (bin.storage) {
+        case GEMMA4_MOE_STORAGE_FP32: row_bytes = uint64_t{bin.physical_cols} * 4; break;
+        case GEMMA4_MOE_STORAGE_HQ44: row_bytes = uint64_t{bin.physical_cols} / 256 * 152; break;
+        default:                      row_bytes = uint64_t{bin.physical_cols} * 2; break;
+    }
+    if (bin.row_bytes != row_bytes || rows > limit / row_bytes ||
+        bin.expert_stride != row_bytes * rows || bin.expert_stride > limit / experts) {
+        return false;
+    }
+
+    matrix.storage = bin.storage;
+    matrix.rows = bin.rows;
+    matrix.logical_cols = bin.logical_cols;
+    matrix.physical_cols = bin.physical_cols;
+    matrix.experts = bin.experts;
+    matrix.row_bytes = bin.row_bytes;
+    matrix.expert_stride = bin.expert_stride;
+    return true;
+}
+
 bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
                                        const ExecutionHintsBin& hints,
                                        const TextModelConfigBin& text_config) {
@@ -1224,28 +1260,52 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
         last_error_ = "GM4X extension has invalid magic";
         return false;
     }
-    if (header.version != 1) {
+    if (header.version != 1 && header.version != 2) {
         last_error_ = "unsupported GM4X version";
         return false;
     }
-    if (header.layer_record_size != sizeof(Gemma4LayerConfigBin)) {
+    const bool has_moe = header.version == 2;
+    const size_t header_size =
+        has_moe ? sizeof(Gemma4ExtensionV2HeaderBin) : sizeof(header);
+    const size_t record_size =
+        has_moe ? sizeof(Gemma4LayerConfigV2Bin) : sizeof(Gemma4LayerConfigBin);
+    if (header.layer_record_size != record_size) {
         last_error_ = "unsupported GM4X layer record size";
+        return false;
+    }
+    if (((header.flags & GEMMA4_EXT_FLAG_MOE) != 0) != has_moe) {
+        last_error_ = "GM4X MoE flag does not match its version";
         return false;
     }
     if (header.layer_count == 0 || header.layer_count != text_config.num_hidden_layers) {
         last_error_ = "GM4X layer count does not match the text config";
         return false;
     }
+    if (bytes < header_size) {
+        last_error_ = "GM4X extension header is truncated";
+        return false;
+    }
 
     const size_t record_count = static_cast<size_t>(header.layer_count);
-    if (record_count > (bytes - sizeof(header)) / sizeof(Gemma4LayerConfigBin)) {
+    if (record_count > (bytes - header_size) / record_size) {
         last_error_ = "GM4X layer records are truncated";
         return false;
     }
-    const size_t required_size = sizeof(header) + record_count * sizeof(Gemma4LayerConfigBin);
+    const size_t required_size = header_size + record_count * record_size;
     if (required_size != bytes) {
         last_error_ = "GM4X extension size does not match its layer records";
         return false;
+    }
+    if (has_moe) {
+        Gemma4ExtensionV2HeaderBin v2{};
+        std::memcpy(&v2, data + start, sizeof(v2));
+        if (v2.base.reserved != sizeof(v2) ||
+            v2.descriptor_size != sizeof(Gemma4MoeMatrixBin) ||
+            v2.descriptors_per_layer != 3 || v2.extension_size != bytes ||
+            v2.expert_order != 1 || v2.gate_up_order != 1 || v2.reserved != 0) {
+            last_error_ = "GM4X v2 header has invalid fields";
+            return false;
+        }
     }
 
     Gemma4Config parsed{};
@@ -1258,7 +1318,7 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
 
     for (size_t i = 0; i < record_count; ++i) {
         Gemma4LayerConfigBin record{};
-        const size_t record_offset = start + sizeof(header) + i * sizeof(record);
+        const size_t record_offset = start + header_size + i * record_size;
         std::memcpy(&record, data + record_offset, sizeof(record));
 
         if (record.attention_kind > 1 || record.rope_type > ROPE_PROPORTIONAL ||
@@ -1281,6 +1341,39 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
         layer.partial_rotary_factor = record.partial_rotary_factor;
         layer.kv_share_group = record.kv_share_group;
         layer.num_kv_heads = record.num_kv_heads;
+
+        if (has_moe) {
+            Gemma4LayerConfigV2Bin moe{};
+            std::memcpy(&moe, data + record_offset, sizeof(moe));
+            if (i == 0) {
+                parsed.moe_experts = moe.experts;
+                parsed.moe_top_k = moe.top_k;
+                parsed.moe_intermediate_size = moe.intermediate_size;
+            }
+            const bool valid =
+                moe.experts != 0 && moe.top_k != 0 && moe.top_k <= moe.experts &&
+                moe.intermediate_size != 0 && moe.descriptor_mask == 7 &&
+                moe.descriptor_count == 3 && moe.reserved == 0 &&
+                moe.experts == parsed.moe_experts &&
+                moe.top_k == parsed.moe_top_k &&
+                moe.intermediate_size == parsed.moe_intermediate_size &&
+                parse_gemma4_moe_matrix(moe.gate_up, GEMMA4_MOE_ROLE_GATE_UP,
+                                        moe.intermediate_size * uint64_t{2},
+                                        text_config.hidden_size, moe.experts,
+                                        layer.moe_gate_up) &&
+                parse_gemma4_moe_matrix(moe.down, GEMMA4_MOE_ROLE_DOWN,
+                                        text_config.hidden_size,
+                                        moe.intermediate_size, moe.experts,
+                                        layer.moe_down) &&
+                parse_gemma4_moe_matrix(moe.shared_down, GEMMA4_MOE_ROLE_SHARED_DOWN,
+                                        text_config.hidden_size,
+                                        record.intermediate_size, 1,
+                                        layer.moe_shared_down);
+            if (!valid) {
+                last_error_ = "GM4X layer " + std::to_string(i) + " has invalid MoE fields";
+                return false;
+            }
+        }
         parsed.layers.push_back(layer);
     }
 
