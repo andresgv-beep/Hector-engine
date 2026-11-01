@@ -228,6 +228,9 @@ target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 add_executable(gemma4_moe_generate tools/gemma4_moe_generate.cu)
 target_link_libraries(gemma4_moe_generate PRIVATE helios-engine)
 
+add_executable(gemma4_moe_control_replay tools/gemma4_moe_control_replay.cu)
+target_link_libraries(gemma4_moe_control_replay PRIVATE helios-engine)
+
 add_executable(test_gemma4_split tests/test_gemma4_split.cu)
 target_link_libraries(test_gemma4_split PRIVATE helios-engine)
 
