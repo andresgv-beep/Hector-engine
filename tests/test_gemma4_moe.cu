@@ -35,6 +35,13 @@ T* upload(const std::vector<T>& host) {
 }
 
 template <typename T>
+T* device_array(size_t count) {
+    T* device = nullptr;
+    cuda_require(cudaMalloc(&device, count * sizeof(T)), "cudaMalloc");
+    return device;
+}
+
+template <typename T>
 std::vector<T> download(const T* device, size_t count) {
     cuda_require(cudaDeviceSynchronize(), "synchronize");
     std::vector<T> host(count);
@@ -157,12 +164,80 @@ void test_reference(const std::string& path) {
     cudaStreamDestroy(stream);
 }
 
+// El grafo se graba una vez y solo cambian los datos: si el kernel siguiera a los
+// argumentos capturados, las repeticiones no coincidirían con la referencia.
+void test_graph_replay_follows_the_router(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    require(bool(file), "no abro " + path);
+    const auto head = read<int32_t>(file, 6);
+    const int L = head[1], E = head[2], K = head[3], H = head[4], I = head[5];
+    read<int32_t>(file, size_t(L) * K);
+    read<float>(file, size_t(L) * H);
+    read<float>(file, H);
+    read<float>(file, size_t(E) * H);
+    const auto expert_scale = read<float>(file, E);
+    const auto input = read<float>(file, size_t(L) * H);
+    const auto gate_up = read<float>(file, size_t(E) * 2 * I * H);
+    const auto down = read<float>(file, size_t(E) * H * I);
+
+    half* dscale = upload(halves(expert_scale));
+    half* dgate_up = upload(halves(gate_up));
+    half* ddown = upload(halves(down));
+    half* dlogits = device_array<half>(E);
+    half* dinput = device_array<half>(H);
+    int32_t* dindices = device_array<int32_t>(K);
+    float* dweights = device_array<float>(K);
+    half* s1 = device_array<half>(size_t(K) * 2 * I);
+    half* s2 = device_array<half>(size_t(K) * I);
+    half* s3 = device_array<half>(size_t(K) * H);
+    half* doutput = device_array<half>(H);
+    half* dreference = device_array<half>(H);
+
+    cudaStream_t stream, capture;
+    cuda_require(cudaStreamCreate(&stream), "stream");
+    cuda_require(cudaStreamCreate(&capture), "capture stream");
+    cuda_require(cudaStreamBeginCapture(capture, cudaStreamCaptureModeThreadLocal), "begin capture");
+    launch_moe_route(dlogits, dscale, dindices, dweights, 1, E, K, capture);
+    launch_moe_experts_decode(dinput, dindices, dweights, dgate_up, ddown, s1, s2, s3, doutput, K, H, I, capture);
+    cudaGraph_t graph = nullptr;
+    cudaGraphExec_t exec = nullptr;
+    cuda_require(cudaStreamEndCapture(capture, &graph), "end capture");
+    cuda_require(cudaGraphInstantiate(&exec, graph, 0), "instantiate");
+
+    std::vector<std::vector<int32_t>> seen;
+    for (int token = 0; token < L; ++token) {
+        std::vector<float> logits(E);
+        for (int e = 0; e < E; ++e) logits[e] = std::sin(float(e * (token + 3)) * 0.7f) * 4.0f;
+        const auto host_logits = halves(logits);
+        const std::vector<half> row = halves(std::vector<float>(input.begin() + size_t(token) * H,
+                                                                input.begin() + size_t(token + 1) * H));
+        cuda_require(cudaMemcpy(dlogits, host_logits.data(), E * sizeof(half), cudaMemcpyHostToDevice), "logits");
+        cuda_require(cudaMemcpy(dinput, row.data(), H * sizeof(half), cudaMemcpyHostToDevice), "input");
+        cuda_require(cudaGraphLaunch(exec, stream), "graph launch");
+        cuda_require(cudaStreamSynchronize(stream), "graph sync");
+        seen.push_back(download(dindices, K));
+        const auto got = floats(download(doutput, H));
+        run_moe_experts_reference(dinput, dindices, dweights, dgate_up, ddown, dreference, 1, E, K, H, I, stream);
+        const double error = relative_error(got, floats(download(dreference, H)));
+        require(error < 1e-3, "replay frente a la referencia, token " + std::to_string(token));
+    }
+    bool changed = false;
+    for (size_t i = 1; i < seen.size(); ++i) changed = changed || seen[i] != seen[0];
+    require(changed, "la prueba debe cambiar de expertos entre repeticiones");
+    std::cout << "  replay: " << seen.size() << " tokens con expertos distintos en un grafo grabado" << std::endl;
+    cudaGraphExecDestroy(exec);
+    cudaGraphDestroy(graph);
+    cudaStreamDestroy(capture);
+    cudaStreamDestroy(stream);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     require(argc == 2, "uso: test_gemma4_moe fixture.bin");
     test_ties_use_the_lowest_id();
     test_reference(argv[1]);
+    test_graph_replay_follows_the_router(argv[1]);
     std::cout << "Gemma 4 MoE OK" << std::endl;
     return 0;
 }

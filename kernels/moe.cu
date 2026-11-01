@@ -113,6 +113,41 @@ __global__ void moe_scatter_add_kernel(
     sums[size_t(tokens[row]) * H + column] += __half2float(rows[i]) * row_weights[row];
 }
 
+// Un GEMV por experto elegido, con la dirección calculada aquí dentro: en un CUDA
+// Graph los argumentos quedan fijos, pero `indices` se lee en cada ejecución.
+// input_stride 0 da la misma entrada a todos; si no, cada k trae su fila.
+__global__ void moe_indexed_gemv_fp16_kernel(
+    const half* __restrict__ input, const int32_t* __restrict__ indices,
+    const half* __restrict__ weights, half* __restrict__ output,
+    size_t expert_stride, int input_stride, int K, int rows, int columns
+) {
+    extern __shared__ float partial[];
+    const int position = blockIdx.x;
+    const int k = position / rows, row = position % rows;
+    const half* x = input + size_t(k) * input_stride;
+    const half* w = weights + size_t(indices[k]) * expert_stride + size_t(row) * columns;
+    float sum = 0.0f;
+    for (int c = threadIdx.x; c < columns; c += blockDim.x) sum += __half2float(x[c]) * __half2float(w[c]);
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) partial[threadIdx.x] += partial[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) output[size_t(k) * rows + row] = __float2half(partial[0]);
+}
+
+__global__ void moe_weighted_sum_kernel(
+    const half* __restrict__ rows, const float* __restrict__ weights,
+    half* __restrict__ output, int K, int H
+) {
+    const size_t column = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (column >= size_t(H)) return;
+    float sum = 0.0f;
+    for (int k = 0; k < K; ++k) sum += __half2float(rows[size_t(k) * H + column]) * weights[k];
+    output[column] = __float2half(sum);
+}
+
 __global__ void moe_narrow_kernel(const float* __restrict__ input, half* __restrict__ output, size_t count) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < count) output[i] = __float2half(input[i]);
@@ -149,6 +184,21 @@ void launch_moe_route(const half* logits, const half* expert_scale, int32_t* ind
         throw std::invalid_argument("MoE route: dimensiones inválidas");
     }
     moe_route_kernel<<<L, 1, 0, stream>>>(logits, expert_scale, indices, weights, L, E, K);
+}
+
+void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
+                               const half* gate_up, const half* down, half* gate_up_scratch,
+                               half* hidden_scratch, half* rows_scratch, half* output,
+                               int K, int H, int I, cudaStream_t stream) {
+    if (K <= 0 || H <= 0 || I <= 0) throw std::invalid_argument("MoE decode: dimensiones inválidas");
+    const int threads = 128;
+    const size_t shared = threads * sizeof(float);
+    moe_indexed_gemv_fp16_kernel<<<K * 2 * I, threads, shared, stream>>>(
+        input, indices, gate_up, gate_up_scratch, size_t(2) * I * H, 0, K, 2 * I, H);
+    moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * I), MOE_BLOCK, 0, stream>>>(gate_up_scratch, hidden_scratch, K, I);
+    moe_indexed_gemv_fp16_kernel<<<K * H, threads, shared, stream>>>(
+        hidden_scratch, indices, down, rows_scratch, size_t(H) * I, I, K, H, I);
+    moe_weighted_sum_kernel<<<blocks_for(H), MOE_BLOCK, 0, stream>>>(rows_scratch, weights, output, K, H);
 }
 
 void launch_moe_probabilities(const half* logits, float* probabilities, int L, int E, cudaStream_t stream) {
