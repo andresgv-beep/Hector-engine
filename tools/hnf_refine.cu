@@ -30,7 +30,10 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <deque>
 #include <fstream>
+#include <future>
+#include <thread>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -475,26 +478,64 @@ int main(int argc, char** argv) try {
         const KVCacheParams cache{"_kv", CACHE_BUILD_POSITION, MAX_SEQ};
         const CommandBuffer commands = device.builder.build_gemma4_layer_cached(engine, config, gemma, arch, layer, 1, 1, cache);
         half* d_hidden = static_cast<half*>(engine.tensors().at(HIDDEN).ptr);
+        const half* d_normed = static_cast<const half*>(engine.tensors().at("_s.normed").ptr);
+        const int32_t* d_indices = static_cast<const int32_t*>(engine.tensors().at("_s.g4.moe_indices").ptr);
+        const cudaStream_t stream = engine.config().stream;
+        const size_t T = calibration.tokens;
+        half *d_states_in = nullptr, *d_states_out = nullptr, *d_moe_input = nullptr;
+        int32_t* d_routes = nullptr;
+        check(cudaMalloc(&d_states_in, T * H * 2), "estados de entrada");
+        check(cudaMalloc(&d_states_out, T * H * 2), "estados de salida");
+        check(cudaMalloc(&d_moe_input, T * H * 2), "entradas MoE");
+        check(cudaMalloc(&d_routes, T * K * 4), "enrutados");
+        // Posición y longitud de cada token, ya en la GPU: copiarlas de dispositivo a
+        // dispositivo no sincroniza el stream, a diferencia de update_device_cache_pos.
+        int32_t* d_positions = nullptr;
+        {
+            std::vector<int32_t> positions(2 * T);
+            size_t row = 0;
+            for (const auto& document : calibration.ids)
+                for (uint32_t position = 0; position < document.size(); ++position, ++row) {
+                    positions[2 * row] = int32_t(position);
+                    positions[2 * row + 1] = int32_t(position) + 1;
+                }
+            check(cudaMalloc(&d_positions, positions.size() * 4), "posiciones");
+            check(cudaMemcpy(d_positions, positions.data(), positions.size() * 4, cudaMemcpyHostToDevice), "subir posiciones");
+        }
+        engine.alloc_device_cache_pos();
+        int32_t* d_cache_pos = engine.device_cache_pos();
+        int32_t* d_total_seq = engine.device_total_seq();
 
-        // Pasa todos los tokens por la capa; con `capture`, guarda la entrada de los expertos.
+        // Pasa todos los tokens por la capa, uno a uno y con KV como en decode, con la
+        // capa capturada en un CUDA Graph. Las entradas y salidas se quedan en la GPU
+        // hasta el final de la pasada; con `capture`, también la entrada de los expertos.
         std::vector<half> moe_input;
         std::vector<int32_t> routes;
         auto run_layer = [&](bool capture, std::vector<half>* out) {
-            if (capture) { moe_input.resize(calibration.tokens * H); routes.resize(calibration.tokens * K); }
-            if (out) out->resize(calibration.tokens * H);
+            check(cudaMemcpy(d_states_in, hidden.data(), T * H * 2, cudaMemcpyHostToDevice), "subir estados");
             size_t row = 0;
             for (const auto& document : calibration.ids) {
                 for (uint32_t position = 0; position < document.size(); ++position, ++row) {
-                    check(cudaMemcpy(d_hidden, hidden.data() + row * H, H * 2, cudaMemcpyHostToDevice), "subir estado");
-                    engine.update_device_cache_pos(int32_t(position), 1);
-                    engine.execute(commands);
-                    engine.sync();
+                    check(cudaMemcpyAsync(d_hidden, d_states_in + row * H, H * 2, cudaMemcpyDeviceToDevice, stream), "estado");
+                    check(cudaMemcpyAsync(d_cache_pos, d_positions + 2 * row, 4, cudaMemcpyDeviceToDevice, stream), "posición");
+                    check(cudaMemcpyAsync(d_total_seq, d_positions + 2 * row + 1, 4, cudaMemcpyDeviceToDevice, stream), "longitud");
+                    engine.execute_graph_replay(commands);
                     if (capture) {
-                        check(cudaMemcpy(moe_input.data() + row * H, engine.tensors().at("_s.normed").ptr, H * 2, cudaMemcpyDeviceToHost), "entrada MoE");
-                        check(cudaMemcpy(routes.data() + row * K, engine.tensors().at("_s.g4.moe_indices").ptr, K * 4, cudaMemcpyDeviceToHost), "enrutado");
+                        check(cudaMemcpyAsync(d_moe_input + row * H, d_normed, H * 2, cudaMemcpyDeviceToDevice, stream), "entrada MoE");
+                        check(cudaMemcpyAsync(d_routes + row * K, d_indices, K * 4, cudaMemcpyDeviceToDevice, stream), "enrutado");
                     }
-                    if (out) check(cudaMemcpy(out->data() + row * H, d_hidden, H * 2, cudaMemcpyDeviceToHost), "bajar estado");
+                    if (out) check(cudaMemcpyAsync(d_states_out + row * H, d_hidden, H * 2, cudaMemcpyDeviceToDevice, stream), "salida");
                 }
+            }
+            check(cudaStreamSynchronize(stream), "pasada");
+            if (capture) {
+                moe_input.resize(T * H); routes.resize(T * K);
+                check(cudaMemcpy(moe_input.data(), d_moe_input, T * H * 2, cudaMemcpyDeviceToHost), "bajar entradas MoE");
+                check(cudaMemcpy(routes.data(), d_routes, T * K * 4, cudaMemcpyDeviceToHost), "bajar enrutados");
+            }
+            if (out) {
+                out->resize(T * H);
+                check(cudaMemcpy(out->data(), d_states_out, T * H * 2, cudaMemcpyDeviceToHost), "bajar estados");
             }
         };
         run_layer(true, nullptr);
@@ -538,20 +579,63 @@ int main(int argc, char** argv) try {
         check(cudaMalloc(&d_m, matrix * sizeof(float)), "m");
         check(cudaMalloc(&d_codes, matrix), "códigos");
 
-        uint64_t refined = 0, untouched = 0;
-        for (uint32_t e = 0; e < E; ++e) {
+        // Lo que cada experto necesita del host: sus tokens en FP64, los pesos originales y
+        // las dos rejillas. Se prepara en hilos varios expertos por delante de la GPU. Solo
+        // lee cabeceras de bloques, que GPTQ no toca, mientras la GPU escribe códigos de otro.
+        const size_t down_matrix = size_t(down.rows) * down.logical;
+        struct Prepared {
+            std::vector<double> x, w, wd;
+            std::vector<float> a, m, da, dm;
+        };
+        auto prepare = [&](uint32_t e) {
+            Prepared p;
             const auto& rows = rows_of[e];
-            if (rows.empty()) { ++untouched; continue; }
-            const size_t n = rows.size();
-            std::vector<double> x(n * H);
-            for (size_t r = 0; r < n; ++r)
-                for (uint32_t c = 0; c < H; ++c) x[r * H + c] = __half2float(moe_input[size_t(rows[r]) * H + c]);
+            p.x.resize(rows.size() * H);
+            for (size_t r = 0; r < rows.size(); ++r)
+                for (uint32_t c = 0; c < H; ++c) p.x[r * H + c] = __half2float(moe_input[size_t(rows[r]) * H + c]);
+            p.a.resize(matrix); p.m.resize(matrix);
+            gptq::hq44_grid(gate_up_bytes.data() + e * gate_up.stride(), int(gate_up.rows), int(gate_up.physical), p.a.data(), p.m.data());
+            p.w = read_original(gate_up, e);
+            std::vector<float> pa(size_t(down.rows) * down.physical), pm(pa.size());
+            gptq::hq44_grid(down_bytes.data() + e * down.stride(), int(down.rows), int(down.physical), pa.data(), pm.data());
+            p.da.resize(down_matrix); p.dm.resize(down_matrix);
+            for (uint32_t r = 0; r < down.rows; ++r)
+                for (uint32_t c = 0; c < down.logical; ++c) {
+                    p.da[size_t(r) * down.logical + c] = pa[size_t(r) * down.physical + c];
+                    p.dm[size_t(r) * down.logical + c] = pm[size_t(r) * down.physical + c];
+                }
+            p.wd = read_original(down, e);
+            return p;
+        };
+        std::vector<uint32_t> busy;
+        for (uint32_t e = 0; e < E; ++e) if (!rows_of[e].empty()) busy.push_back(e);
+        constexpr size_t AHEAD = 4;
+        std::deque<std::future<Prepared>> ready;
+        size_t launched = 0;
+        auto launch = [&]() { if (launched < busy.size()) { const uint32_t e = busy[launched++]; ready.push_back(std::async(std::launch::async, prepare, e)); } };
+        for (size_t i = 0; i < AHEAD; ++i) launch();
+        const unsigned workers = std::max(1u, std::min(8u, std::thread::hardware_concurrency()));
+        auto parallel_rows = [&](size_t count, auto body) {
+            std::vector<std::thread> pool;
+            for (unsigned t = 0; t < workers; ++t)
+                pool.emplace_back([&, t] { for (size_t r = t; r < count; r += workers) body(r); });
+            for (auto& thread : pool) thread.join();
+        };
+
+        uint64_t refined = 0;
+        const uint64_t untouched = E - busy.size();
+        for (const uint32_t e : busy) {
+            Prepared p = ready.front().get();
+            ready.pop_front();
+            launch();
+            const size_t n = rows_of[e].size();
+            std::vector<double>& x = p.x;
+            std::vector<float>& a = p.a;
+            std::vector<float>& m = p.m;
 
             // gate/up.
             uint8_t* blocks = gate_up_bytes.data() + e * gate_up.stride();
-            std::vector<float> a(matrix), m(matrix);
-            gptq::hq44_grid(blocks, int(gate_up.rows), int(gate_up.physical), a.data(), m.data());
-            std::vector<double> w = read_original(gate_up, e);
+            const std::vector<double>& w = p.w;
             hessian(quantizer.cublas(), x, n, int(H), d_x, d_h);
             check(cudaMemcpy(d_w, w.data(), matrix * 8, cudaMemcpyHostToDevice), "subir W");
             check(cudaMemcpy(d_a, a.data(), matrix * 4, cudaMemcpyHostToDevice), "subir a");
@@ -563,7 +647,9 @@ int main(int argc, char** argv) try {
 
             // Activaciones de down con el gate/up refinado, como la referencia: valores FP32.
             std::vector<double> wq(matrix);
-            for (size_t i = 0; i < matrix; ++i) wq[i] = double(a[i] * float(codes[i]) - m[i]);
+            parallel_rows(gate_up.rows, [&](size_t r) {
+                for (size_t i = r * H; i < (r + 1) * H; ++i) wq[i] = double(a[i] * float(codes[i]) - m[i]);
+            });
             check(cudaMemcpy(d_wq, wq.data(), matrix * 8, cudaMemcpyHostToDevice), "subir Wq");
             {
                 // G[n, rows] = X · Wqᵀ; en orden de columnas, Gᵀ[rows, n] = Wq'·X' con Wq' = Wq en columnas.
@@ -573,21 +659,16 @@ int main(int argc, char** argv) try {
             }
             std::vector<double> g(n * gate_up.rows), act(n * I);
             check(cudaMemcpy(g.data(), d_g, g.size() * 8, cudaMemcpyDeviceToHost), "bajar G");
-            for (size_t r = 0; r < n; ++r)
+            parallel_rows(n, [&](size_t r) {
                 for (uint32_t j = 0; j < I; ++j)
                     act[r * I + j] = gelu(g[r * gate_up.rows + j]) * g[r * gate_up.rows + I + j];
+            });
 
             // down.
-            const size_t down_matrix = size_t(down.rows) * down.logical;
             uint8_t* down_blocks = down_bytes.data() + e * down.stride();
-            std::vector<float> pa(size_t(down.rows) * down.physical), pm(pa.size()), da(down_matrix), dm(down_matrix);
-            gptq::hq44_grid(down_blocks, int(down.rows), int(down.physical), pa.data(), pm.data());
-            for (uint32_t r = 0; r < down.rows; ++r)
-                for (uint32_t c = 0; c < down.logical; ++c) {
-                    da[size_t(r) * down.logical + c] = pa[size_t(r) * down.physical + c];
-                    dm[size_t(r) * down.logical + c] = pm[size_t(r) * down.physical + c];
-                }
-            std::vector<double> wd = read_original(down, e);
+            const std::vector<float>& da = p.da;
+            const std::vector<float>& dm = p.dm;
+            const std::vector<double>& wd = p.wd;
             hessian(quantizer.cublas(), act, n, int(I), d_x, d_h);
             check(cudaMemcpy(d_w, wd.data(), down_matrix * 8, cudaMemcpyHostToDevice), "subir W down");
             check(cudaMemcpy(d_a, da.data(), down_matrix * 4, cudaMemcpyHostToDevice), "subir a down");
@@ -600,6 +681,7 @@ int main(int argc, char** argv) try {
         }
         cudaFree(d_x); cudaFree(d_h); cudaFree(d_w); cudaFree(d_wq); cudaFree(d_g);
         cudaFree(d_a); cudaFree(d_m); cudaFree(d_codes);
+        cudaFree(d_moe_input); cudaFree(d_routes);
         const double gptq_seconds = seconds_since(layer_start) - capture_seconds;
 
         // Al fichero y al motor, y la capa vuelve a pasar con los expertos nuevos.
@@ -611,6 +693,7 @@ int main(int argc, char** argv) try {
         check(cudaMemcpy(engine.tensors().at(prefix + "down.weight").ptr, down_bytes.data(), down.size, cudaMemcpyHostToDevice), "expertos down");
         std::vector<half> next;
         run_layer(false, &next);
+        cudaFree(d_states_in); cudaFree(d_states_out); cudaFree(d_positions);
         hidden.swap(next);
         write_file(work_dir / ("hidden-after-" + std::to_string(layer) + ".f16"), hidden);
         if (layer > 0) fs::remove(work_dir / ("hidden-after-" + std::to_string(layer - 1) + ".f16"));
