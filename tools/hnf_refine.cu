@@ -2,6 +2,13 @@
 //
 // uso: hnf_refine entrada.hnf salida.hnf --model checkpoint/ --calibration casos/
 //                 [--damp 1] [--work carpeta/] [--layers N]
+//      hnf_refine entrada.hnf carpeta/ --importance --calibration casos/ [--layers N]
+//
+// --importance no refina: pasa la calibración por el HNF tal cual, que no se copia ni se
+// modifica, y escribe en carpeta/ la importancia HQ44 de cada experto, la suma de x² por
+// columna de la entrada de gate/up y de down, que lee `gemma4-moe-experimental
+// --importance`. Los expertos con pocos tokens se mezclan con la media de su capa como
+// si esta aportara 64 tokens, igual que la referencia de CPU (Hq44Importance).
 //
 // Capa a capa, en la GPU 0: carga solo esa capa, pasa por ella todos los tokens de
 // calibración (los estados de entrada salen de la capa anterior ya refinada), toma la
@@ -329,6 +336,17 @@ Calibration read_calibration(const fs::path& dir) {
     return c;
 }
 
+// FNV-1a de 64 bits de los IDs de calibración, en orden: identifica el corpus en el registro.
+uint64_t fingerprint(const Calibration& c) {
+    uint64_t h = 1469598103934665603ull;
+    for (const auto& document : c.ids)
+        for (int32_t id : document)
+            for (int b = 0; b < 4; ++b) { h ^= uint8_t(uint32_t(id) >> (8 * b)); h *= 1099511628211ull; }
+    return h;
+}
+
+std::string hex64(uint64_t v) { char b[17]; std::snprintf(b, sizeof(b), "%016llx", static_cast<unsigned long long>(v)); return b; }
+
 template <typename T>
 void write_file(const fs::path& path, const std::vector<T>& values) {
     const fs::path part = path.string() + ".part";
@@ -370,36 +388,43 @@ int main(int argc, char** argv) try {
     fs::path model_dir, calibration_dir, work_dir;
     double damp = 1.0;
     uint32_t layer_limit = 0;
-    for (int i = 3; i + 1 < argc; i += 2) {
+    bool importance_only = false;
+    for (int i = 3; i < argc; ++i) {
         const std::string flag = argv[i];
-        if (flag == "--model") model_dir = argv[i + 1];
-        else if (flag == "--calibration") calibration_dir = argv[i + 1];
-        else if (flag == "--damp") damp = std::atof(argv[i + 1]);
-        else if (flag == "--work") work_dir = argv[i + 1];
-        else if (flag == "--layers") layer_limit = uint32_t(std::atoi(argv[i + 1]));
+        if (flag == "--importance") { importance_only = true; continue; }
+        if (i + 1 >= argc) throw std::runtime_error("falta el valor de " + flag);
+        ++i;
+        if (flag == "--model") model_dir = argv[i];
+        else if (flag == "--calibration") calibration_dir = argv[i];
+        else if (flag == "--damp") damp = std::atof(argv[i]);
+        else if (flag == "--work") work_dir = argv[i];
+        else if (flag == "--layers") layer_limit = uint32_t(std::atoi(argv[i]));
         else throw std::runtime_error("opción desconocida " + flag);
     }
-    if (model_dir.empty() || calibration_dir.empty()) throw std::runtime_error("faltan --model o --calibration");
-    if (work_dir.empty()) work_dir = output_path.string() + ".refine";
+    if (calibration_dir.empty() || (!importance_only && model_dir.empty())) throw std::runtime_error("faltan --model o --calibration");
+    if (work_dir.empty()) work_dir = importance_only ? output_path / "estado" : fs::path(output_path.string() + ".refine");
     fs::create_directories(work_dir);
     const auto start = std::chrono::steady_clock::now();
+    // El HNF que se carga: la copia que se refina, o la entrada tal cual al medir importancia.
+    const fs::path model_path = importance_only ? input_path : output_path;
 
     // Salida: copia de la entrada, que nunca se modifica.
-    if (!fs::exists(output_path)) {
+    if (!importance_only && !fs::exists(output_path)) {
         std::cerr << "copiando " << input_path << " -> " << output_path << std::endl;
         const fs::path part = output_path.string() + ".part";
         fs::copy_file(input_path, part, fs::copy_options::overwrite_existing);
         fs::rename(part, output_path);
     }
-    if (fs::file_size(output_path) != fs::file_size(input_path)) throw std::runtime_error("la salida no tiene el tamaño de la entrada");
+    if (!importance_only && fs::file_size(output_path) != fs::file_size(input_path))
+        throw std::runtime_error("la salida no tiene el tamaño de la entrada");
 
-    const Json manifest = read_manifest(output_path);
+    const Json manifest = read_manifest(model_path);
     std::map<std::string, const Json*> tensors, sources;
     for (const Json& t : manifest.at("tensors").array) tensors[t.at("name").string] = &t;
     for (const Json& s : manifest.at("source_tensors").array) sources[s.at("canonical").string] = &s;
 
     HnfLoader meta;
-    if (!meta.open(output_path.string())) throw std::runtime_error(meta.last_error());
+    if (!meta.open(model_path.string())) throw std::runtime_error(meta.last_error());
     const ModelConfig& config = meta.config();
     const Gemma4Config& gemma = meta.gemma4_config();
     const uint32_t layers = config.num_hidden_layers(), H = config.hidden_size();
@@ -407,7 +432,8 @@ int main(int argc, char** argv) try {
     const uint32_t end_layer = layer_limit ? std::min(layer_limit, layers) : layers;
     const ArchDescriptor arch = gemma4_split_arch(layers);
 
-    Checkpoint checkpoint(model_dir);
+    std::unique_ptr<Checkpoint> checkpoint;
+    if (!importance_only) checkpoint = std::make_unique<Checkpoint>(model_dir);
     auto expert_tensor = [&](uint32_t layer, const char* kind) {
         const std::string name = "text.layer" + std::to_string(layer) + ".moe.experts." + kind + ".weight";
         const Json& t = *tensors.at(name);
@@ -423,7 +449,7 @@ int main(int argc, char** argv) try {
         out.logical = uint32_t(logical[2].u64());
         out.physical = uint32_t(physical[2].u64());
         if (out.stride() * out.experts != out.size) throw std::runtime_error(name + ": tamaño inesperado");
-        checkpoint.locate(s.at("source").string, out);
+        if (checkpoint) checkpoint->locate(s.at("source").string, out);
         return out;
     };
 
@@ -441,7 +467,7 @@ int main(int argc, char** argv) try {
         }
     }
     if (first_layer == 0) {
-        LayerDevice device(output_path.string(), 0, true, arch);
+        LayerDevice device(model_path.string(), 0, true, arch);
         Engine& engine = device.engine;
         int32_t* tokens = static_cast<int32_t*>(engine.tensors().allocate_and_register("ids", {1, PREFILL_CHUNK}, dtype::INT32(), true));
         engine.tensors().at("ids").shape = {1, 1};
@@ -461,9 +487,9 @@ int main(int argc, char** argv) try {
     }
     if (hidden.size() != calibration.tokens * H) throw std::runtime_error("estado de calibración incompleto");
 
-    const int fd = ::open(output_path.c_str(), O_RDWR);
-    if (fd < 0) throw std::runtime_error("no abro la salida para escribir");
-    std::ofstream log(work_dir / "refine.log", std::ios::app);
+    const int fd = ::open(model_path.c_str(), importance_only ? O_RDONLY : O_RDWR);
+    if (fd < 0) throw std::runtime_error("no abro " + model_path.string());
+    std::ofstream log(work_dir / (importance_only ? "importance.log" : "refine.log"), std::ios::app);
     log << "inicio capa " << first_layer << " damp " << damp << " casos " << calibration.names.size()
         << " tokens " << calibration.tokens << '\n';
 
@@ -473,13 +499,16 @@ int main(int argc, char** argv) try {
         if (gate_up.logical != H || gate_up.rows != 2 * I || down.rows != H || down.logical != I || gate_up.experts != E)
             throw std::runtime_error("geometría de expertos inesperada");
 
-        LayerDevice device(output_path.string(), layer, false, arch);
+        LayerDevice device(model_path.string(), layer, false, arch);
         Engine& engine = device.engine;
         const KVCacheParams cache{"_kv", CACHE_BUILD_POSITION, MAX_SEQ};
         const CommandBuffer commands = device.builder.build_gemma4_layer_cached(engine, config, gemma, arch, layer, 1, 1, cache);
         half* d_hidden = static_cast<half*>(engine.tensors().at(HIDDEN).ptr);
         const half* d_normed = static_cast<const half*>(engine.tensors().at("_s.normed").ptr);
         const int32_t* d_indices = static_cast<const int32_t*>(engine.tensors().at("_s.g4.moe_indices").ptr);
+        // Entrada de down de cada ranura, [K, columnas físicas], tal como la lee el kernel.
+        const half* d_slot_hidden = static_cast<const half*>(engine.tensors().at("_s.g4.moe_hidden").ptr);
+        const uint32_t P = down.physical;
         const cudaStream_t stream = engine.config().stream;
         const size_t T = calibration.tokens;
         half *d_states_in = nullptr, *d_states_out = nullptr, *d_moe_input = nullptr;
@@ -488,6 +517,8 @@ int main(int argc, char** argv) try {
         check(cudaMalloc(&d_states_out, T * H * 2), "estados de salida");
         check(cudaMalloc(&d_moe_input, T * H * 2), "entradas MoE");
         check(cudaMalloc(&d_routes, T * K * 4), "enrutados");
+        half* d_down_input = nullptr;
+        if (importance_only) check(cudaMalloc(&d_down_input, T * K * P * 2), "entradas de down");
         // Posición y longitud de cada token, ya en la GPU: copiarlas de dispositivo a
         // dispositivo no sincroniza el stream, a diferencia de update_device_cache_pos.
         int32_t* d_positions = nullptr;
@@ -523,6 +554,8 @@ int main(int argc, char** argv) try {
                     if (capture) {
                         check(cudaMemcpyAsync(d_moe_input + row * H, d_normed, H * 2, cudaMemcpyDeviceToDevice, stream), "entrada MoE");
                         check(cudaMemcpyAsync(d_routes + row * K, d_indices, K * 4, cudaMemcpyDeviceToDevice, stream), "enrutado");
+                        if (d_down_input)
+                            check(cudaMemcpyAsync(d_down_input + row * K * P, d_slot_hidden, K * P * 2, cudaMemcpyDeviceToDevice, stream), "entrada de down");
                     }
                     if (out) check(cudaMemcpyAsync(d_states_out + row * H, d_hidden, H * 2, cudaMemcpyDeviceToDevice, stream), "salida");
                 }
@@ -538,6 +571,57 @@ int main(int argc, char** argv) try {
                 check(cudaMemcpy(out->data(), d_states_out, T * H * 2, cudaMemcpyDeviceToHost), "bajar estados");
             }
         };
+        if (importance_only) {
+            std::vector<half> next, down_input(T * K * P);
+            run_layer(true, &next);
+            check(cudaMemcpy(down_input.data(), d_down_input, down_input.size() * 2, cudaMemcpyDeviceToHost), "bajar entradas de down");
+            cudaFree(d_down_input); cudaFree(d_moe_input); cudaFree(d_routes);
+            cudaFree(d_states_in); cudaFree(d_states_out); cudaFree(d_positions);
+            // Sumas de x² por experto y columna, en FP64, y tokens de cada experto.
+            std::vector<double> sum_gu(size_t(E) * H, 0.0), sum_dn(size_t(E) * I, 0.0);
+            std::vector<uint64_t> count(E, 0);
+            for (size_t t = 0; t < T; ++t)
+                for (uint32_t k = 0; k < K; ++k) {
+                    const int32_t e = routes[t * K + k];
+                    if (e < 0 || uint32_t(e) >= E) throw std::runtime_error("enrutado fuera de rango");
+                    ++count[size_t(e)];
+                    double* g = sum_gu.data() + size_t(e) * H;
+                    const half* x = moe_input.data() + t * H;
+                    for (uint32_t c = 0; c < H; ++c) { const double v = __half2float(x[c]); g[c] += v * v; }
+                    double* d = sum_dn.data() + size_t(e) * I;
+                    const half* a = down_input.data() + (t * K + k) * P;
+                    for (uint32_t c = 0; c < I; ++c) { const double v = __half2float(a[c]); d[c] += v * v; }
+                }
+            // (S + 64·media de la capa) / (n + 64), rellenado a las columnas físicas.
+            constexpr double SMOOTHING = 64.0;
+            uint64_t tokens = 0;
+            for (uint64_t c : count) tokens += c;
+            auto export_kind = [&](const std::vector<double>& sum, uint32_t cols, uint32_t physical, const char* kind) {
+                std::vector<double> mean(cols, 0.0);
+                for (uint32_t e = 0; e < E; ++e)
+                    for (uint32_t c = 0; c < cols; ++c) mean[c] += sum[size_t(e) * cols + c];
+                for (double& v : mean) v /= double(std::max<uint64_t>(tokens, 1));
+                std::vector<float> out(size_t(E) * physical, 0.0f);
+                for (uint32_t e = 0; e < E; ++e)
+                    for (uint32_t c = 0; c < cols; ++c)
+                        out[size_t(e) * physical + c] = float((sum[size_t(e) * cols + c] + SMOOTHING * mean[c]) / (double(count[e]) + SMOOTHING));
+                write_file(output_path / ("layer" + std::to_string(layer) + "." + kind + ".f32"), out);
+            };
+            export_kind(sum_gu, H, gate_up.physical, "gate_up");
+            export_kind(sum_dn, I, down.physical, "down");
+            hidden.swap(next);
+            write_file(work_dir / ("hidden-after-" + std::to_string(layer) + ".f16"), hidden);
+            if (layer > 0) fs::remove(work_dir / ("hidden-after-" + std::to_string(layer - 1) + ".f16"));
+            uint32_t sparse = 0;
+            for (uint64_t c : count) sparse += c < 64;
+            std::ostringstream line;
+            line << "capa " << layer << ": importancia de " << E << " expertos, " << sparse << " con menos de 64 tokens, "
+                 << seconds_since(layer_start) << " s";
+            std::cerr << line.str() << std::endl;
+            log << line.str() << '\n';
+            log.flush();
+            continue;
+        }
         run_layer(true, nullptr);
         const double capture_seconds = seconds_since(layer_start);
 
@@ -706,6 +790,20 @@ int main(int argc, char** argv) try {
         log.flush();
     }
     ::close(fd);
+    // Registro para `hnf-seal` del conversor (refinado) o para quien lea la importancia.
+    {
+        std::ostringstream record;
+        record << "{\n \"tool\": \"hnf_refine\",\n \"mode\": \"" << (importance_only ? "importance" : "gptq") << "\",\n"
+               << " \"input\": {\"path\": \"" << input_path.string() << "\", \"bytes\": " << fs::file_size(input_path) << "},\n"
+               << " \"layers\": [0, " << end_layer << "],\n";
+        if (importance_only) record << " \"smoothing_tokens\": 64,\n \"statistic\": \"sum x^2 per column of gate_up and down input, fp16 activations from the engine\",\n";
+        else record << " \"damp\": " << damp << ",\n \"grid\": \"hnf_existing_headers\",\n \"arithmetic\": \"fp64 cuSOLVER/cuBLAS, block 128\",\n";
+        record << " \"calibration\": {\"cases\": " << calibration.names.size() << ", \"tokens\": " << calibration.tokens
+               << ", \"max_tokens_per_case\": " << MAX_FORCING << ", \"ids_fnv1a64\": \"" << hex64(fingerprint(calibration)) << "\"},\n"
+               << " \"complete\": " << (end_layer == layers ? "true" : "false") << "\n}\n";
+        const fs::path where = importance_only ? output_path / "record.json" : work_dir / "record.json";
+        std::ofstream(where) << record.str();
+    }
     log << "fin capa " << end_layer << " en " << seconds_since(start) << " s\n";
     std::cerr << "listo en " << seconds_since(start) << " s" << std::endl;
     return 0;
