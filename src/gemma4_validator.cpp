@@ -96,11 +96,13 @@ std::vector<std::string> validate_gemma4_moe_tensors(
     };
     const auto expect_matrix = [&](const std::string& name, const Gemma4MoeMatrix& matrix,
                                    const Shape& shape) {
-        if (matrix.storage != GEMMA4_MOE_STORAGE_FP16 && matrix.storage != GEMMA4_MOE_STORAGE_HQ44) {
+        if (matrix.storage != GEMMA4_MOE_STORAGE_FP16 && matrix.storage != GEMMA4_MOE_STORAGE_HQ44 &&
+            matrix.storage != GEMMA4_MOE_STORAGE_HQ8) {
             errors.push_back("unsupported MoE storage for " + name);
             return;
         }
-        const char* dtype = matrix.storage == GEMMA4_MOE_STORAGE_HQ44 ? "hq44k_g16" : "fp16";
+        const char* dtype = matrix.storage == GEMMA4_MOE_STORAGE_HQ44 ? "hq44k_g16" :
+                            matrix.storage == GEMMA4_MOE_STORAGE_HQ8 ? "hq8k" : "fp16";
         expect(name, shape, dtype, matrix.expert_stride * matrix.experts);
     };
 

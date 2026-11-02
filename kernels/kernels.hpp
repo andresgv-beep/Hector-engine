@@ -81,6 +81,11 @@ void launch_dequant_hqs_v3(const uint8_t*, half*, int K, int N,
 // HQS v4 (hq44k_g16): affine 4-bit with 5-bit group scales and mins, 152 B per 256 weights.
 void launch_matmul_hq44k(const half*, const uint8_t*, half*, int M, int K, int N, cudaStream_t stream = nullptr);
 void launch_dequant_hq44k(const uint8_t*, half*, int K, int N, cudaStream_t stream = nullptr);
+// HQ8K: symmetric 8-bit HQS (kernels/hq8_gemv.cuh).
+void launch_matmul_hq8k(const half*, const uint8_t*, half*, int M, int K, int N, cudaStream_t stream = nullptr);
+void launch_dequant_hq8k(const uint8_t*, half*, int K, int N, cudaStream_t stream = nullptr);
+void launch_embedding_hq8k(const int32_t* indices, const uint8_t* table, half* output,
+                           int batch_size, int seq_len, int vocab_size, int dim, cudaStream_t stream = nullptr);
 
 // FP16 x FP16 matmul (for activations, non-quantized weights)
 void launch_matmul_fp16(

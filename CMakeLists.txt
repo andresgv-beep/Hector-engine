@@ -98,6 +98,7 @@ set(KERNEL_SOURCES
     kernels/matmul_cublas.cu
     kernels/hqs_v3.cu
     kernels/hqs_v4.cu
+    kernels/hq8.cu
     kernels/attention.cu
     kernels/attention_flash_decode.cu
     kernels/attention_global_grouped.cu
@@ -445,6 +446,11 @@ add_executable(test_hqs_v4 tests/test_hqs_v4.cu)
 target_include_directories(test_hqs_v4 PRIVATE kernels)
 target_link_libraries(test_hqs_v4 PRIVATE helios-engine)
 add_test(NAME HqsV4Kernels COMMAND test_hqs_v4)
+
+add_executable(test_hq8 tests/test_hq8.cu)
+target_include_directories(test_hq8 PRIVATE kernels)
+target_link_libraries(test_hq8 PRIVATE helios-engine)
+add_test(NAME Hq8Kernels COMMAND test_hq8)
 
 add_executable(test_global_grouped tests/test_global_grouped.cu)
 target_link_libraries(test_global_grouped PRIVATE helios-engine)

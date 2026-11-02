@@ -160,6 +160,16 @@ void DTypeRegistry::register_builtins() {
     info.is_signed = false;
     info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 152; };
     register_dtype(info);
+    // HQ8K: symmetric 8-bit, FP16 step, u8 step per 32 weights, int8 codes.
+    info = DTypeInfo{};
+    info.name = "hq8k";
+    info.element_bits = 8;
+    info.block_elements = 256;
+    info.block_bytes = 272;
+    info.is_quantized = true;
+    info.is_signed = true;
+    info.calc_size = [](size_t n) -> size_t { return ((n + 255) / 256) * 272; };
+    register_dtype(info);
 }
 
 DTypeID DTypeRegistry::register_dtype(const DTypeInfo& info) {

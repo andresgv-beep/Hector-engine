@@ -391,6 +391,7 @@ enum Gemma4MoeStorage : uint32_t {
     GEMMA4_MOE_STORAGE_BF16 = 1,
     GEMMA4_MOE_STORAGE_FP32 = 2,
     GEMMA4_MOE_STORAGE_HQ44 = 3,
+    GEMMA4_MOE_STORAGE_HQ8 = 4,     // solo down compartido: los kernels MoE leen FP16 o HQ44
 };
 
 constexpr uint32_t GEMMA4_EXT_FLAG_PLE              = (1u << 0);

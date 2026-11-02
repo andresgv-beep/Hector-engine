@@ -11,6 +11,7 @@
 #include "per_device.hpp"
 #include "hqs_v3_gemv.cuh"
 #include "hqs_v4_gemv.cuh"
+#include "hq8_gemv.cuh"
 #include <stdexcept>
 #include <cuda_fp16.h>
 #include <unordered_map>
@@ -522,6 +523,9 @@ static std::unordered_map<uint64_t, int> s_tune_cache_hq44k;
 // decisions recorded for another variant set are ignored and re-timed.
 static constexpr const char* HQ44K_TUNE_TAG = "hq44k_g16.v2";
 static constexpr int HQ44K_TUNE_VARIANTS = 4;
+static std::unordered_map<uint64_t, int> s_tune_cache_hq8k;
+static constexpr const char* HQ8K_TUNE_TAG = "hq8k.v1";
+static constexpr int HQ8K_TUNE_VARIANTS = 4;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -586,7 +590,8 @@ static void tune_sidecar_load_once() {
         if (sscanf(line, "%15s %d %d %c", fmt, &K, &N, &choice) != 4) continue;
         int best = choice - 'A';
         // hq44k has four candidates; the older formats keep A-C.
-        const int variants = strcmp(fmt, HQ44K_TUNE_TAG) == 0 ? HQ44K_TUNE_VARIANTS : 3;
+        const int variants = strcmp(fmt, HQ44K_TUNE_TAG) == 0 ? HQ44K_TUNE_VARIANTS :
+                             strcmp(fmt, HQ8K_TUNE_TAG) == 0 ? HQ8K_TUNE_VARIANTS : 3;
         if (best < 0 || best >= variants) continue;
         uint64_t key = tune_key(K, N);
         if      (strcmp(fmt, "hq41k") == 0) s_tune_cache_hq41k[key] = best;
@@ -598,6 +603,7 @@ static void tune_sidecar_load_once() {
                  strcmp(fmt,"hq53k_g16")==0 || strcmp(fmt,"hq53k_g32")==0)
             s_tune_cache_v3[fmt][key] = best;
         else if (strcmp(fmt, HQ44K_TUNE_TAG) == 0) s_tune_cache_hq44k[key] = best;
+        else if (strcmp(fmt, HQ8K_TUNE_TAG) == 0) s_tune_cache_hq8k[key] = best;
         loaded++;
     }
     fclose(f);
@@ -875,6 +881,36 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
         s_tune_cache_hq44k[key]=best; tune_sidecar_append(HQ44K_TUNE_TAG,K,N,best);
         if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",HQ44K_TUNE_TAG,K,N,'A'+best);
         it=s_tune_cache_hq44k.find(key);
+    }
+    for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
+}
+
+void launch_matmul_hq8k_cublas(const half*,const uint8_t*,half*,int,int,int,cudaStream_t);
+
+// HQ8K: same tuner and layouts as hq44k. The cuBLAS path accumulates in FP32.
+void launch_matmul_hq8k(const half* input,const uint8_t* weights,half* output,
+                        int M,int K,int N,cudaStream_t stream) {
+    if (M<=0 || K<=0 || N<=0) return;
+    if (K%256) throw std::runtime_error("hq8k GEMV requires K divisible by 256");
+    if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hq8k_cublas(input,weights,output,M,K,N,stream);
+        return;
+    }
+    using Fn = void(*)(const half*,const uint8_t*,half*,int,int,cudaStream_t);
+    static const Fn functions[] = {hq8::launch_gemv<1,8,4>, hq8::launch_gemv<2,8,2>,
+        hq8::launch_gemv<2,4,2>, hq8::launch_gemv<4,2,2>};
+    constexpr int count = sizeof(functions)/sizeof(functions[0]);
+    static_assert(count == HQ8K_TUNE_VARIANTS, "update HQ8K_TUNE_TAG and HQ8K_TUNE_VARIANTS with the candidate list");
+    const uint64_t key = tune_key(K, N);
+    tune_sidecar_load_once();
+    auto it = s_tune_cache_hq8k.find(key);
+    if (it == s_tune_cache_hq8k.end() || it->second >= count) {
+        int best = 0; float times[count];
+        for (int i=0;i<count;++i) times[i]=benchmark_cold_l2(functions[i],input,weights,output,K,N,stream);
+        for (int i=1;i<count;++i) if (times[i]<times[best]) best=i;
+        s_tune_cache_hq8k[key]=best; tune_sidecar_append(HQ8K_TUNE_TAG,K,N,best);
+        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",HQ8K_TUNE_TAG,K,N,'A'+best);
+        it=s_tune_cache_hq8k.find(key);
     }
     for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
 }

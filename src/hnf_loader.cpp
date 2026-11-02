@@ -1204,8 +1204,10 @@ static bool parse_gemma4_moe_matrix(const Gemma4MoeMatrixBin& bin, uint32_t role
                                     Gemma4MoeMatrix& matrix) {
     constexpr uint64_t limit = std::numeric_limits<uint64_t>::max();
     const bool hq44 = bin.storage == GEMMA4_MOE_STORAGE_HQ44;
-    if (bin.role != role || bin.storage > GEMMA4_MOE_STORAGE_HQ44 ||
-        bin.layout != (hq44 ? 1u : 0u) || bin.rows != rows || bin.logical_cols != cols ||
+    const bool hq8 = bin.storage == GEMMA4_MOE_STORAGE_HQ8;
+    if (bin.role != role || bin.storage > GEMMA4_MOE_STORAGE_HQ8 ||
+        (hq8 && role != GEMMA4_MOE_ROLE_SHARED_DOWN) ||
+        bin.layout != (hq44 ? 1u : hq8 ? 2u : 0u) || bin.rows != rows || bin.logical_cols != cols ||
         bin.physical_rows != rows || bin.physical_cols != (cols + 255) / 256 * 256 ||
         bin.experts != experts) {
         return false;
@@ -1218,6 +1220,7 @@ static bool parse_gemma4_moe_matrix(const Gemma4MoeMatrixBin& bin, uint32_t role
     switch (bin.storage) {
         case GEMMA4_MOE_STORAGE_FP32: row_bytes = uint64_t{bin.physical_cols} * 4; break;
         case GEMMA4_MOE_STORAGE_HQ44: row_bytes = uint64_t{bin.physical_cols} / 256 * 152; break;
+        case GEMMA4_MOE_STORAGE_HQ8:  row_bytes = uint64_t{bin.physical_cols} / 256 * 272; break;
         default:                      row_bytes = uint64_t{bin.physical_cols} * 2; break;
     }
     if (bin.row_bytes != row_bytes || rows > limit / row_bytes ||
@@ -1675,6 +1678,7 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     const auto candidate = DTypeRegistry::instance().get_id(s);
     if (dtype::hqs_v3(candidate)) return candidate;
     if (s == "hq44k_g16") return dtype::HQ44K();
+    if (s == "hq8k") return dtype::HQ8K();
     if (s == "int8") return dtype::INT8();
     if (s == "int32") return dtype::INT32();
     return DTYPE_INVALID;
@@ -1712,7 +1716,7 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     }
     // Rango 3 solo para los expertos MoE HQ44 empaquetados: [E, filas, columnas].
     const bool packed_experts = dtype == helios::dtype::HQ44K() && entry.shape.size() == 3;
-    if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K()) &&
+    if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K() || dtype == helios::dtype::HQ8K()) &&
         ((entry.shape.size() != 2 && !packed_experts) || entry.shape.back() % 256 != 0)) {
         std::cerr << "HnfLoader: x.3 requires a matrix with complete row blocks: " << entry.name << std::endl;
         return false;
