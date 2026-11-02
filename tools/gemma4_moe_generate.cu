@@ -5,8 +5,13 @@
 //      gemma4_moe_generate modelo.hnf --prompts fichero --out dir/ [--max N]
 //      gemma4_moe_generate modelo.hnf --capture corpus/ --out dir/ [--limit N] [--seed N]
 //                          [--control-only 1] [--control-tokens N]
+//      gemma4_moe_generate modelo.hnf --freeze casos/
+//      gemma4_moe_generate modelo.hnf --eval casos/ --out dir/ [--max N] [--boundary N]
 //
 // --prompts responde una pregunta por línea y guarda cada conversación como .ids.
+// --freeze tokeniza una sola vez cada .txt de casos/ a .ids. --eval lee esos IDs:
+// NN-x.forcing.ids da logits completos con teacher forcing y NN-x.prompt.ids una
+// respuesta greedy, con la misma ruta de decode de dos GPUs que el chat.
 // --capture acumula las activaciones de down por experto (ver
 // helios_convert_v9.1/docs/GEMMA4_MOE_CALIBRATION.md): hay dos mitades por documento
 // y uno de cada cinco documentos se reserva para la muestra de control.
@@ -217,7 +222,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     const std::string path = argv[1];
-    std::string prompt, prompts_file, corpus_dir, out_dir;
+    std::string prompt, prompts_file, corpus_dir, out_dir, freeze_dir, eval_dir;
     uint32_t max_tokens = 128, max_seq = 4096, seed = 26, control_tokens = 256;
     bool control_only = false;
     uint64_t limit = 64000;
@@ -234,6 +239,8 @@ int main(int argc, char** argv) {
         else if (flag == "--boundary") forced_boundary = std::atoi(argv[i + 1]);
         else if (flag == "--prompts") prompts_file = argv[i + 1];
         else if (flag == "--capture") corpus_dir = argv[i + 1];
+        else if (flag == "--freeze") freeze_dir = argv[i + 1];
+        else if (flag == "--eval") eval_dir = argv[i + 1];
         else if (flag == "--out") out_dir = argv[i + 1];
         else if (flag == "--limit") limit = std::strtoull(argv[i + 1], nullptr, 10);
         else if (flag == "--seed") seed = uint32_t(std::atoi(argv[i + 1]));
@@ -246,6 +253,27 @@ int main(int argc, char** argv) {
         const Gemma4Config& gemma = meta.gemma4_config();
         const ModelConfig& config = meta.config();
         const uint32_t layers = config.num_hidden_layers();
+
+        if (!freeze_dir.empty()) {
+            HnfLoader loader;
+            if (!loader.open(path)) throw std::runtime_error(loader.last_error());
+            const HTFTokenizer* tokenizer = loader.tokenizer("text");
+            if (!tokenizer) throw std::runtime_error("el HNF no trae tokenizer");
+            const int32_t bos = tokenizer->bos_token_id().value_or(2);
+            for (const auto& entry : std::filesystem::directory_iterator(freeze_dir)) {
+                const auto path = entry.path();
+                if (path.extension() != ".txt") continue;
+                std::ifstream file(path, std::ios::binary);
+                std::stringstream text;
+                text << file.rdbuf();
+                const bool forcing = path.stem().extension() == ".forcing";
+                auto ids = tokenizer->encode(forcing ? text.str() : format_gemma4_chat({{"user", text.str()}}), false, false);
+                if (ids.empty() || ids.front() != bos) ids.insert(ids.begin(), bos);
+                auto out = path;
+                write_raw(out.replace_extension(".ids"), ids);
+            }
+            return 0;
+        }
 
         int devices = 0;
         check(cudaGetDeviceCount(&devices), "contar GPUs");
@@ -299,6 +327,8 @@ int main(int argc, char** argv) {
             primary.engine.activate();
             primary.engine.invalidate_graph();
         };
+        std::string stop_reason;
+        double prefill_ms = 0, decode_ms = 0;
         const auto generate = [&](const std::vector<int32_t>& ids, bool show) {
             reset_graphs();
             const auto prefill_start = std::chrono::steady_clock::now();
@@ -312,13 +342,18 @@ int main(int argc, char** argv) {
                 position += count;
                 next = next_token();
             }
-            if (show) std::cerr << "prefill: " << seconds_since(prefill_start) * 1000 << " ms" << std::endl;
+            prefill_ms = seconds_since(prefill_start) * 1000;
+            if (show) std::cerr << "prefill: " << prefill_ms << " ms" << std::endl;
 
             std::vector<double> token_ms;
             std::vector<int32_t> output;
             build(1, position, [&](const Gemma4SplitForward::Parts& parts) {
+                stop_reason = "max_tokens";
                 for (uint32_t step = 0; step < max_tokens; ++step) {
-                    if (next == eos || (turn_end && next == *turn_end) || position >= max_seq) break;
+                    if (next == eos || (turn_end && next == *turn_end) || position >= max_seq) {
+                        stop_reason = position >= max_seq ? "context" : "eos";
+                        break;
+                    }
                     output.push_back(next);
                     if (show) std::cout << tokenizer->decode({next}) << std::flush;
                     const auto token_start = std::chrono::steady_clock::now();
@@ -332,6 +367,8 @@ int main(int argc, char** argv) {
                     token_ms.push_back(seconds_since(token_start) * 1000);
                 }
             });
+            decode_ms = 0;
+            for (const double ms : token_ms) decode_ms += ms;
             if (show) {
                 std::cout << std::endl;
                 if (token_ms.size() > 4) {
@@ -345,7 +382,58 @@ int main(int argc, char** argv) {
             return output;
         };
 
-        if (!prompts_file.empty()) {
+        if (!eval_dir.empty()) {
+            constexpr uint32_t FIRST_POSITION = 16, MAX_FORCING = 512;
+            std::filesystem::create_directories(out_dir);
+            const std::filesystem::path out(out_dir);
+            std::vector<std::filesystem::path> cases;
+            for (const auto& entry : std::filesystem::directory_iterator(eval_dir)) {
+                if (entry.path().stem().extension() == ".forcing" && entry.path().extension() == ".ids") cases.push_back(entry.path());
+            }
+            std::sort(cases.begin(), cases.end());
+            const auto read_ids = [](const std::filesystem::path& file_path) {
+                std::vector<int32_t> ids(std::filesystem::file_size(file_path) / sizeof(int32_t));
+                std::ifstream file(file_path, std::ios::binary);
+                file.read(reinterpret_cast<char*>(ids.data()), std::streamsize(ids.size() * sizeof(int32_t)));
+                return ids;
+            };
+            std::ofstream summary(out / "runs.tsv");
+            summary << "case\tforcing_ids\tpositions\tprompt_ids\toutput_ids\tstop\tprefill_ms\tdecode_ms\n";
+            for (const auto& forcing : cases) {
+                const std::string file_name = forcing.filename().string();
+                const std::string name = file_name.substr(0, file_name.size() - std::string(".forcing.ids").size());
+                auto ids = read_ids(forcing);
+                if (ids.size() > MAX_FORCING) ids.resize(MAX_FORCING);
+                reset_graphs();
+                std::ofstream dump(out / (name + ".logits.f16"), std::ios::binary);
+                uint32_t positions = 0;
+                // Como en la captura: 1024 elige flash y la posición va en el dispositivo.
+                build(1, 1024, [&](const Gemma4SplitForward::Parts& parts) {
+                    for (uint32_t position = 0; position + 1 < ids.size(); ++position) {
+                        primary.engine.activate();
+                        check(cudaMemcpy(tokens, &ids[position], sizeof(int32_t), cudaMemcpyHostToDevice), "token");
+                        split.update_device_cache_pos(int32_t(position), 1);
+                        if (position == 0) split.run(parts);
+                        else split.replay(parts);
+                        next_token();
+                        if (position >= FIRST_POSITION) {
+                            dump.write(reinterpret_cast<const char*>(logits.data()), std::streamsize(logits.size() * sizeof(half)));
+                            ++positions;
+                        }
+                    }
+                });
+                dump.close();
+                if (!dump) throw std::runtime_error("no escribo logits de " + name);
+                const auto prompt_ids = read_ids(eval_dir + "/" + name + ".prompt.ids");
+                const auto output = generate(prompt_ids, false);
+                write_raw(out / (name + ".output.ids"), output);
+                std::ofstream text(out / (name + ".output.txt"), std::ios::binary);
+                text << tokenizer->decode(output);
+                summary << name << '\t' << ids.size() << '\t' << positions << '\t' << prompt_ids.size() << '\t' << output.size()
+                        << '\t' << stop_reason << '\t' << prefill_ms << '\t' << decode_ms << std::endl;
+                std::cerr << name << ": " << positions << " posiciones, " << output.size() << " tokens, " << stop_reason << std::endl;
+            }
+        } else if (!prompts_file.empty()) {
             std::filesystem::create_directories(out_dir);
             std::ifstream file(prompts_file);
             std::string line;
