@@ -236,6 +236,14 @@ target_link_libraries(gemma4_moe_generate PRIVATE helios-engine)
 add_executable(gemma4_moe_control_replay tools/gemma4_moe_control_replay.cu)
 target_link_libraries(gemma4_moe_control_replay PRIVATE helios-engine)
 
+# GPTQ sobre rejillas HQS para las herramientas de refinado; el runtime no enlaza cuSOLVER.
+add_library(helios-gptq STATIC src/gptq.cu)
+target_link_libraries(helios-gptq PUBLIC helios-engine CUDA::cublas CUDA::cusolver)
+add_executable(test_gptq tests/test_gptq.cu)
+target_link_libraries(test_gptq PRIVATE helios-gptq)
+add_executable(hnf_refine tools/hnf_refine.cu)
+target_link_libraries(hnf_refine PRIVATE helios-gptq)
+
 add_executable(test_gemma4_split tests/test_gemma4_split.cu)
 target_link_libraries(test_gemma4_split PRIVATE helios-engine)
 
@@ -321,6 +329,7 @@ target_link_libraries(test_attention_prefill PRIVATE helios-engine)
 add_test(NAME AttentionPrefillTest COMMAND test_attention_prefill)
 add_executable(test_attention_prefill_model tests/test_attention_prefill_model.cu)
 target_link_libraries(test_attention_prefill_model PRIVATE helios-engine)
+add_test(NAME GptqTest COMMAND test_gptq)
 add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 add_test(NAME CkPolicyTest COMMAND test_ck_policy)
