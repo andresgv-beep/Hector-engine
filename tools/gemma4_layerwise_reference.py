@@ -4,6 +4,13 @@ uso: gemma4_layerwise_reference.py forward tools-del-conversor/ variante pesos c
      gemma4_layerwise_reference.py compare tools-del-conversor/ casos/ modelo-original/ hnf-A hnf-B runs-motor/ prompts.jsonl salida/
      gemma4_layerwise_reference.py pieces tools-del-conversor/ casos/ modelo-original/ hnf salida/ [pieza...]
      gemma4_layerwise_reference.py engine tools-del-conversor/ casos/ modelo-original/ runs-motor/ salida/ run...
+     gemma4_layerwise_reference.py imatrix tools-del-conversor/ casos-calibración/ modelo-original/ captura.npz
+     gemma4_layerwise_reference.py export-imatrix tools-del-conversor/ modelo-original/ captura.npz carpeta/
+
+imatrix suma x² por columna de la entrada de cada experto en el original. Con IMATRIX
+(captura), GPTQ_DIR (bloques HQ44 por capa) y GGUF, pieces mide expertos HQ44 sin
+calibrar, con imatrix, con GPTQ y de Unsloth, con el resto del modelo original, y guarda
+la KL de cada documento.
 
 engine compara los logits reales del motor de cada run con la trayectoria original.
 
@@ -198,9 +205,90 @@ class Gguf(Reader):
         return np.asarray(self.dequantize(raw, t.tensor_type), np.float32)
 
 
+def hq44_roundtrip(weights, importance=None):
+    """HQ44 del conversor por filas rellenadas a 256, con importancia por columna opcional."""
+    values = np.ascontiguousarray(weights, np.float32)
+    columns = values.shape[-1]
+    physical = -(-columns//256)*256
+    padded = np.zeros(values.shape[:-1]+(physical,), np.float32)
+    padded[..., :columns] = values
+    with tempfile.TemporaryDirectory() as folder:
+        source, target, weight = Path(folder)/'in.f32', Path(folder)/'out.f32', Path(folder)/'imp.f32'
+        padded.tofile(source)
+        command = [os.environ['HQ_ROUNDTRIP'], 'hq44', source, target, str(physical)]
+        if importance is not None:
+            np.concatenate([importance, np.zeros(physical-columns)]).astype(np.float32).tofile(weight)
+            command.append(weight)
+        subprocess.run(command, check=True)
+        return np.fromfile(target, np.float32).reshape(padded.shape)[..., :columns]
+
+
+class Hq44Importance(Reader):
+    """Expertos del original cuantizados en HQ44 con la importancia de una captura imatrix.
+
+    Expertos con pocos tokens: se mezclan con la media de su capa como si esta aportara
+    `smoothing` tokens. Sin captura, importancia unitaria, igual que el HNF H."""
+    def __init__(self, model, capture=None, smoothing=64):
+        super().__init__(model)
+        self.importance = None
+        if capture:
+            stats = np.load(capture)
+            n = stats['n'][..., None].astype(np.float64)
+            self.importance = {}
+            for kind in ('gate_up', 'down'):
+                total = stats[kind]
+                layer_mean = total.sum(1, keepdims=True)/np.maximum(n.sum(1, keepdims=True), 1)
+                self.importance[kind] = (total+smoothing*layer_mean)/(n+smoothing)
+
+    def get(self, name, expert=None):
+        value = super().get(name, expert)
+        if 'moe.experts' not in name:
+            return value
+        if self.importance is None:
+            return hq44_roundtrip(value)
+        layer = int(re.search(r'layer(\d+)\.', name).group(1))
+        kind = 'gate_up' if 'gate_up' in name else 'down'
+        return hq44_roundtrip(value, self.importance[kind][layer, expert])
+
+
+class Hq44Blocks(Reader):
+    """Expertos HQ44 de ficheros de bloques por capa (layerN.gate_up.hq44, layerN.down.hq44),
+    con el orden del HNF: experto, fila, superbloque."""
+    def __init__(self, model, folder):
+        super().__init__(model)
+        self.folder = Path(folder)
+
+    def get(self, name, expert=None):
+        if 'moe.experts' not in name:
+            return super().get(name, expert)
+        layer = int(re.search(r'layer(\d+)\.', name).group(1))
+        kind = 'gate_up' if 'gate_up' in name else 'down'
+        rows, logical = (2*I, H) if kind == 'gate_up' else (H, I)
+        physical = -(-logical//256)*256
+        stride = rows*physical//256*152
+        raw = np.memmap(self.folder/f'layer{layer}.{kind}.hq44', mode='r', dtype=np.uint8, offset=expert*stride, shape=(rows, physical//256*152))
+        decoded = decode_hq44(np.asarray(raw)).reshape(rows, physical)
+        assert np.isfinite(decoded).all() and np.all(decoded[:, logical:] == 0), 'bad HQ44 values or padding'
+        return decoded[:, :logical].copy()
+
+
 def recipes(model, dense_hnf):
     """Candidatas al HNF final: todas con atención y MLP compartida en FP16."""
     unit = Reader(model, dense_hnf)
+    if os.environ.get('IMATRIX'):
+        # Expertos calibrados frente a los mismos expertos sin calibrar, el resto original.
+        found = {'receta_hq44_unidad_emb16': lambda: Recipe(model, Hq44Importance(model), 'original'),
+                 'receta_hq44_imatrix_emb16': lambda: Recipe(model, Hq44Importance(model, os.environ['IMATRIX']), 'original')}
+        if os.environ.get('GPTQ_DIR'):
+            found['receta_hq44_gptq_emb16'] = lambda: Recipe(model, Hq44Blocks(model, os.environ['GPTQ_DIR']), 'original')
+        if os.environ.get('GGUF'):
+            def gguf_experts():
+                recipe, source = Recipe(model, None, 'original'), Gguf(model, os.environ['GGUF'])
+                recipe.experts = source
+                return recipe
+            # Solo los expertos de Unsloth; embedding original, como las demás de este grupo.
+            found['gguf_expertos_emb16'] = gguf_experts
+        return found
     if os.environ.get('GGUF'):
         def gguf_experts():
             recipe, source = Recipe(model, None, 'original'), Gguf(model, os.environ['GGUF'])
@@ -321,6 +409,10 @@ def attention(hidden, get, layer):
     return out.reshape(n, HEADS*head_dim)@get(p+'attn.o_proj.weight').T
 
 
+# Con el modo imatrix, suma de x² por columna de la entrada de cada experto (estilo imatrix).
+STATS = None
+
+
 def tail(hidden, get, layer):
     """MLP compartida, router y expertos sobre todos los tokens a la vez."""
     p = f'text.layer{layer}.'
@@ -339,8 +431,13 @@ def tail(hidden, get, layer):
     for expert, (gate_up_weight, down) in zip(used, matrices):
         tokens, slots = np.where(ids == expert)
         gate_up = x[tokens]@gate_up_weight.T
-        rows = (gelu(gate_up[:, :I])*gate_up[:, I:])@down[:, :I].T
+        activation = gelu(gate_up[:, :I])*gate_up[:, I:]
+        rows = activation@down[:, :I].T
         np.add.at(total, tokens, rows*weights[tokens, slots, None])
+        if STATS is not None:
+            STATS['gate_up'][layer, expert] += (x[tokens].astype(np.float64)**2).sum(0)
+            STATS['down'][layer, expert] += (activation.astype(np.float64)**2).sum(0)
+            STATS['n'][layer, expert] += len(tokens)
     mlp = rms(shared+rms(total, get(p+'ln_moe_branch_post.weight')), get(p+'ln_mlp_post.weight'))
     return (hidden+mlp)*get(p+'layer_scalar'), ids.astype(np.uint8)
 
@@ -482,6 +579,8 @@ def pieces(cases, model, hnf, output, *chosen):
     names, ids = load_cases(cases)
     offsets = np.cumsum([0]+[len(a) for a in ids])
     positions = np.concatenate([offsets[i]+FIRST+np.arange(len(ids[i])-1-FIRST) for i in range(len(names))])
+    counts = np.array([max(len(ids[i])-1-FIRST, 0) for i in range(len(names))])
+    document_of = np.repeat(np.arange(len(names)), counts)
     base = Reader(model)
     global reader
     reader = base
@@ -503,13 +602,17 @@ def pieces(cases, model, hnf, output, *chosen):
         embedding_x = np.asarray(one.embedding(), np.float32) if own_head else embedding
         hidden_x = np.load(output/variant/'hidden-29.npy', mmap_mode='r')
         kl, agree = 0., 0.
+        per_document = np.zeros(len(names))
         for start in range(0, len(positions), CHUNK):
             part = positions[start:start+CHUNK]
             logp_o = log_probs(head(hidden_o[part], final, embedding))
             logp = log_probs(head(hidden_x[part], final_x, embedding_x))
-            kl += (np.exp(logp_o)*(logp_o-logp)).sum()
+            value = (np.exp(logp_o)*(logp_o-logp)).sum(1)
+            kl += value.sum()
+            np.add.at(per_document, document_of[start:start+CHUNK], value)
             agree += (logp_o.argmax(1) == logp.argmax(1)).sum()
-        row = {'kl_token': kl/len(positions), 'argmax_agreement': float(agree)/len(positions), 'layers': {}}
+        row = {'kl_token': kl/len(positions), 'argmax_agreement': float(agree)/len(positions),
+               'kl_documents': dict(zip(names, (per_document/counts).tolist())), 'layers': {}}
         for layer in kept:
             o = np.load(output/'original'/f'hidden-{layer:02}.npy', mmap_mode='r').astype(np.float64)
             x = np.load(output/variant/f'hidden-{layer:02}.npy', mmap_mode='r').astype(np.float64)
@@ -562,5 +665,21 @@ if __name__ == '__main__':
         pieces(*sys.argv[3:])
     elif sys.argv[1] == 'engine':
         engine_fidelity(*sys.argv[3:])
+    elif sys.argv[1] == 'imatrix':
+        # imatrix tools/ casos-calibración/ modelo-original/ salida.npz
+        STATS = {'gate_up': np.zeros((LAYERS, E, H)), 'down': np.zeros((LAYERS, E, I)), 'n': np.zeros((LAYERS, E), np.int64)}
+        with tempfile.TemporaryDirectory() as folder:
+            forward('calibracion', '-', sys.argv[3], sys.argv[4], folder, ())
+        np.savez(sys.argv[5], **STATS)
+    elif sys.argv[1] == 'export-imatrix':
+        # export-imatrix tools/ modelo-original/ captura.npz carpeta/: la misma importancia
+        # que mide Hq44Importance, en f32 [expertos, columnas físicas] para --importance.
+        importance, folder = Hq44Importance(sys.argv[3], sys.argv[4]).importance, Path(sys.argv[5])
+        folder.mkdir()
+        for layer in range(LAYERS):
+            for kind, values in importance.items():
+                padded = np.zeros((E, -(-values.shape[-1]//256)*256), np.float32)
+                padded[:, :values.shape[-1]] = values[layer]
+                padded.tofile(folder/f'layer{layer}.{kind}.f32')
     else:
         compare(*sys.argv[3:])
