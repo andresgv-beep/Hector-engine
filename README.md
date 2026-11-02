@@ -72,9 +72,11 @@ KV y cancelación. El lanzador del agente está en `hexos-core/runtime/run-helio
 
 Los tipos compactos registrados incluyen HQ31K, HQ41K, HQ51K, HQ42K, HQ52K y
 HQ62K. Las formas y bytes reales están en [dtype.cpp](src/dtype.cpp); el nombre
-no indica el tamaño completo del HNF ni todos sus metadatos. HQ62K tiene lookup
-de embeddings, **no un matmul general implementado**. HQ42K/HQ52K se usan en el
-12B probado. El conversor produce los pesos; Héctor los consume.
+no indica el tamaño completo del HNF ni todos sus metadatos. HQ62K está
+**descartado** desde el 2026-11-02 y solo se lee en HNF antiguos, como lookup de
+embeddings. Lo sustituye HQ8K, definido en el conversor pero aún sin kernel en el
+motor. HQ42K/HQ52K se usan en el 12B probado. Qué formatos valen:
+`helios_convert_v9.1/docs/HQS_FORMATOS.md`. El conversor produce los pesos; Héctor los consume.
 
 El prefill cuantizado puede descuantizar a FP16 y usar cuBLAS; no todas las
 rutas mantienen cada operación fusionada. El KV y el scratch se reservan según

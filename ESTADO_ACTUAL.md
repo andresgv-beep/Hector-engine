@@ -38,11 +38,15 @@ Fuente: [src/dtype.cpp](src/dtype.cpp).
 | HQ51K | 200 | 6,25 |
 | HQ42K | 152 | 4,75 |
 | HQ52K | 184 | 5,75 |
-| HQ62K | 264 | 8,25 |
+| HQ62K (descartado) | 264 | 8,25 |
+| HQ44 (`hq44k_g16`) | 152 | 4,75 |
+| HQ8K (sin kernel aún) | 272 | 8,50 |
 
 Incluyen metadatos del bloque; no incluyen otros tensores ni el contenedor.
-HQ62K es lookup de embeddings, no matmul general. Un archivo con ese sufijo
-puede mezclar tipos: no comparar su tamaño como si todos los pesos usaran HQ62K.
+HQ62K quedó descartado el 2026-11-02: tiene el doble de error que HQ8K con casi
+los mismos bits. Su lookup de embeddings se conserva para leer HNF antiguos.
+HQ8K está definido en el conversor pero el motor aún no lo carga. Qué formatos
+valen: `helios_convert_v9.1/docs/HQS_FORMATOS.md`.
 
 ## Qué queda después del trabajo reciente
 
