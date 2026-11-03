@@ -145,7 +145,7 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
     const auto [strings, strings_size] = sections[1];
 
     In c{sections[2].first, sections[2].second, 0, strings, strings_size};
-    std::vector<Hash> composites;
+    std::vector<Hash> composites, resource_hashes;
     std::vector<uint32_t> formula_of;   // índice en MEMORY de cada componente, o 0xFFFFFFFF
     for (uint32_t n = c.u32(), i = 0; i < n && c.ok; ++i) {
         Component x;
@@ -153,7 +153,7 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
         x.offset = c.u64(); x.size = c.u64(); const uint32_t alignment = c.u32(); c.u32();
         x.weight_bytes = c.u64(); formula_of.push_back(c.u32());
         x.first_tensor = c.u32(); x.tensor_count = c.u32(); c.u32();   // depende de
-        composites.push_back(c.h()); c.h();
+        composites.push_back(c.h()); resource_hashes.push_back(c.h());
         if (!known(x.kind) && x.required) { error = "componente obligatorio de tipo desconocido: " + x.name; return false; }
         if (alignment == 0 || (alignment & (alignment - 1)) != 0 || (x.size > 0 && (x.offset < PAYLOAD_START || x.offset % alignment != 0)) ||
             x.offset + x.size > best.metadata_offset) {
@@ -162,6 +162,20 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
         out.components.push_back(x);
     }
     if (!c.ok || c.pos != c.size) { error = "sección de componentes mal formada"; return false; }
+    // Los recursos sin tensores (tokenizer, configuración, plantilla) son pocos MB: su hash de
+    // bytes se comprueba siempre. Los pesos, no (§6: bajo demanda, con `hnf10 verify`).
+    for (size_t i = 0; i < out.components.size(); ++i) {
+        const Component& x = out.components[i];
+        if (x.tensor_count != 0 || x.size == 0) continue;
+        std::vector<uint8_t> bytes(x.size);
+        file.clear();
+        file.seekg(std::streamoff(x.offset));
+        file.read(reinterpret_cast<char*>(bytes.data()), std::streamsize(bytes.size()));
+        if (!file.good()) { error = "no leo el recurso " + x.name; return false; }
+        if (xxh3_128(bytes.data(), bytes.size()) != resource_hashes[i]) {
+            error = "el recurso " + x.name + " no cuadra con su hash: fichero dañado"; return false;
+        }
+    }
 
     In t{sections[3].first, sections[3].second, 0, strings, strings_size};
     std::vector<Hash> hashes;

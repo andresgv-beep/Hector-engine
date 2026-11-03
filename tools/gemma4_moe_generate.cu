@@ -277,10 +277,13 @@ int main(int argc, char** argv) {
 
         int devices = 0;
         check(cudaGetDeviceCount(&devices), "contar GPUs");
-        const uint32_t boundary = forced_boundary >= 0 ? uint32_t(forced_boundary)
-                                                       : gemma4_split_boundary(meta, max_seq, PREFILL_CHUNK);
-        if (boundary == 0 || boundary >= layers || devices < 2) {
+        const Gemma4Placement placement = gemma4_placement(meta, max_seq, PREFILL_CHUNK);
+        if (forced_boundary < 0 && placement.fit != Gemma4Fit::Split) {
             throw std::runtime_error("esta herramienta necesita capas en dos GPUs");
+        }
+        const uint32_t boundary = forced_boundary >= 0 ? uint32_t(forced_boundary) : placement.boundary;
+        if (boundary == 0 || boundary >= layers || devices < 2) {
+            throw std::runtime_error("esta herramienta necesita capas en las dos GPUs");
         }
         std::cerr << "reparto: capas 0-" << boundary - 1 << " en GPU 0, " << boundary << "-" << layers - 1
                   << " en GPU 1" << std::endl;

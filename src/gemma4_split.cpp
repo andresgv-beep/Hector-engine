@@ -55,9 +55,61 @@ std::optional<Gemma4SplitPlan> plan_gemma4_split(
     return plan;
 }
 
-uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens) {
+Gemma4Placement plan_gemma4_placement(
+    const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes, uint64_t vision_bytes,
+    uint64_t primary_free, uint64_t secondary_free) {
+    Gemma4Placement out;
+    uint64_t text = common_bytes;
+    for (uint64_t b : layer_bytes) text += b;
+    const size_t layers = layer_bytes.size();
+    const auto split = [&](uint64_t secondary_budget, bool force) -> std::optional<Gemma4SplitPlan> {
+        auto plan = plan_gemma4_split(layer_bytes, common_bytes, primary_free, secondary_budget);
+        if (plan && force && layers > 0 && plan->boundary == layers) {
+            // El texto cabe solo en la principal, pero no con la torre: la última capa cruza.
+            plan->boundary = uint32_t(layers - 1);
+            plan->primary_bytes -= layer_bytes.back();
+            plan->secondary_bytes += layer_bytes.back();
+            if (plan->secondary_bytes > secondary_budget) return std::nullopt;
+        }
+        if (plan && !plan->split(layers)) return std::nullopt;
+        return plan;
+    };
+    const auto take = [&](const Gemma4SplitPlan& plan, Gemma4VisionPlace vision) {
+        out.fit = Gemma4Fit::Split;
+        out.boundary = plan.boundary;
+        out.vision = vision;
+        out.primary_bytes = plan.primary_bytes;
+        out.secondary_bytes = plan.secondary_bytes + (vision == Gemma4VisionPlace::Secondary ? vision_bytes : 0);
+    };
+    if (text <= primary_free && (vision_bytes == 0 || vision_bytes <= primary_free - text)) {
+        out.fit = Gemma4Fit::Single;
+        out.vision = vision_bytes ? Gemma4VisionPlace::Primary : Gemma4VisionPlace::None;
+        out.primary_bytes = text + vision_bytes;
+        return out;
+    }
+    if (vision_bytes && vision_bytes <= secondary_free) {
+        if (const auto plan = split(secondary_free - vision_bytes, true)) {
+            take(*plan, Gemma4VisionPlace::Secondary);
+            return out;
+        }
+    }
+    // Sin sitio para la torre: solo texto, en la principal si cabe y si no repartido.
+    out.vision_dropped = vision_bytes != 0;
+    if (text <= primary_free) {
+        out.fit = Gemma4Fit::Single;
+        out.primary_bytes = text;
+        return out;
+    }
+    if (const auto plan = split(secondary_free, false)) take(*plan, Gemma4VisionPlace::None);
+    return out;
+}
+
+Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens) {
     int devices = 0;
-    if (cudaGetDeviceCount(&devices) != cudaSuccess || devices < 2 || !loader.has_gemma4_config()) return 0;
+    if (cudaGetDeviceCount(&devices) != cudaSuccess) devices = 0;
+    Gemma4Placement single;
+    single.fit = Gemma4Fit::Single;
+    if (devices < 1 || !loader.has_gemma4_config()) return single;   // fuera de Gemma 4, como siempre
     const ModelConfig& config = loader.config();
     const Gemma4Config& gemma = loader.gemma4_config();
     std::vector<uint64_t> layer_bytes(gemma.layers.size(), 0);
@@ -65,7 +117,7 @@ uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32
     for (const TensorEntry& tensor : loader.tensors()) {
         if (tensor.block != "text_model") continue;   // vision.layerN no es la capa N
         const int layer = layer_index(tensor.name);
-        if (layer >= int(layer_bytes.size())) return 0;
+        if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
         (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
     }
     for (size_t i = 0; i < layer_bytes.size(); ++i) {
@@ -74,14 +126,10 @@ uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32
         layer_bytes[i] += 2 * sizeof(uint16_t) * slots * layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
     }
     const uint64_t primary_free = usable_vram(0);
-    // La torre visual corre en la secundaria cuando hay reparto: se le guarda su sitio
-    // (pesos y memoria de trabajo que declara el HNF) antes de colocar capas.
-    const uint64_t vision = loader.block_vram_bytes(BLOCK_VISION);
-    const uint64_t secondary_raw = usable_vram(1);
-    const uint64_t secondary_free = secondary_raw > vision ? secondary_raw - vision : 0;
+    const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
     check(cudaSetDevice(0), "elegir GPU");
-    const auto plan = plan_gemma4_split(layer_bytes, common_bytes, primary_free, secondary_free);
-    return plan && plan->split(layer_bytes.size()) ? plan->boundary : 0;
+    return plan_gemma4_placement(layer_bytes, common_bytes, loader.block_vram_bytes(BLOCK_VISION),
+                                 primary_free, secondary_free);
 }
 
 bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer, bool common) {

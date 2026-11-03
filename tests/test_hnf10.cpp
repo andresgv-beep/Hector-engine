@@ -81,6 +81,17 @@ int main(int argc, char** argv) {
         std::memcpy(&offset, header + 32, 8);
         CHECK(read(damaged(small, "meta-b", offset + 40, 1), c, error) && c.sequence == 1);
     }
+    // Un byte cambiado en el tokenizer, la configuración o la plantilla: su hash no cuadra.
+    {
+        hnf10::Contents ok;
+        CHECK(read(small, ok, error));
+        const char* names[] = {"tokenizer", "configuracion", "plantilla"};
+        for (size_t i = 1; i < ok.components.size() && i < 4; ++i) {
+            const auto& r = ok.components[i];
+            CHECK(!read(damaged(small, names[i - 1], r.offset + r.size / 2, 1), c, error));
+            CHECK(error.find("no cuadra con su hash") != std::string::npos);
+        }
+    }
     // No es HNFv10.
     {
         const fs::path other = fs::temp_directory_path() / "hnf10-otro.hnf";

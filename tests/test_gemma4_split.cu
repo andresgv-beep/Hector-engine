@@ -304,10 +304,44 @@ void test_plan() {
     std::cout << "PASS: plan de reparto" << std::endl;
 }
 
+// Los tres estados y la visión (auditoría del 2026-11-03). Capas de 100, común 50.
+void test_placement() {
+    using namespace helios;
+    const std::vector<uint64_t> layers(10, 100);
+    // Texto (1050) y torre (200) caben en la principal: todo allí, sin reparto.
+    auto p = plan_gemma4_placement(layers, 50, 200, 1300, 0);
+    require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::Primary, "todo en la principal");
+    // Una sola GPU donde cabe el texto pero no la torre: solo texto, sin error.
+    p = plan_gemma4_placement(layers, 50, 200, 1100, 0);
+    require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::None && p.vision_dropped,
+            "una GPU sin sitio para la torre abre solo el texto");
+    // Dos GPUs, el texto cabría solo en la principal pero no con la torre: la torre va a la
+    // secundaria y la última capa cruza para que el reparto no quede vacío.
+    p = plan_gemma4_placement(layers, 50, 200, 1100, 1000);
+    require(p.fit == Gemma4Fit::Split && p.boundary == 9 && p.vision == Gemma4VisionPlace::Secondary,
+            "la torre a la secundaria con la última capa");
+    // Reparto normal con la torre en la secundaria.
+    p = plan_gemma4_placement(layers, 50, 200, 450, 1000);
+    require(p.fit == Gemma4Fit::Split && p.boundary == 4 && p.vision == Gemma4VisionPlace::Secondary,
+            "reparto con torre en la secundaria");
+    // Todas las capas en la secundaria (boundary 0) es un reparto válido, no «no repartir».
+    p = plan_gemma4_placement(layers, 50, 0, 120, 1200);
+    require(p.fit == Gemma4Fit::Split && p.boundary == 0, "boundary 0 es válido");
+    // La torre no cabe en la secundaria: reparto solo de texto.
+    p = plan_gemma4_placement(layers, 50, 900, 450, 700);
+    require(p.fit == Gemma4Fit::Split && p.vision == Gemma4VisionPlace::None && p.vision_dropped,
+            "sin sitio para la torre se reparte solo el texto");
+    // Ni el texto cabe entre las dos: NoFit, no un 0 que se confunda con «cabe».
+    require(plan_gemma4_placement(layers, 50, 0, 450, 500).fit == Gemma4Fit::NoFit, "no cabe");
+    require(plan_gemma4_placement(layers, 50, 0, 900, 0).fit == Gemma4Fit::NoFit, "no cabe en una GPU");
+    std::cout << "PASS: colocación de texto y visión" << std::endl;
+}
+
 }  // namespace
 
 int main() {
     test_plan();
+    test_placement();
     int devices = 0;
     cuda_require(cudaGetDeviceCount(&devices), "device count");
     for (bool flash : {false, true}) {

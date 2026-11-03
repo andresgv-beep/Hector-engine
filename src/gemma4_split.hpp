@@ -35,10 +35,33 @@ std::optional<Gemma4SplitPlan> plan_gemma4_split(
     const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes,
     uint64_t primary_free, uint64_t secondary_free);
 
-// Capa en la que empieza la GPU 1, o 0 si no hace falta partir: un solo dispositivo,
-// un modelo que cabe en la GPU 0 o uno que no cabe ni entre las dos, que fallará
-// al cargar con su error de siempre. Cuenta pesos más KV hasta `max_seq`.
-uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens);
+// Dónde va cada cosa al abrir un Gemma 4. Tres estados distintos, no un 0 que valga para
+// «cabe en la principal» y para «no cabe» (auditoría del 2026-11-03).
+enum class Gemma4Fit { Single, Split, NoFit };
+enum class Gemma4VisionPlace { None, Primary, Secondary };
+
+struct Gemma4Placement {
+    Gemma4Fit fit = Gemma4Fit::NoFit;
+    uint32_t boundary = 0;          // Split: capas [0, boundary) en la principal; 0 es válido
+    Gemma4VisionPlace vision = Gemma4VisionPlace::None;
+    bool vision_dropped = false;    // el HNF trae visión, pero no cabe junto al texto
+    uint64_t primary_bytes = 0, secondary_bytes = 0;
+};
+
+// El plan, sin CUDA. `vision_bytes` son los pesos más la memoria de trabajo que declara el
+// HNF (0 si no trae visión); `secondary_free` es 0 con una sola GPU.
+//  - Texto y torre caben en la principal: todo allí.
+//  - Si no, con dos GPUs se reparte y la torre va a la secundaria. Si el texto cabría solo en
+//    la principal, la última capa pasa a la secundaria para no tener un reparto vacío.
+//  - Si la torre no cabe en ningún sitio, se abre solo el texto (vision_dropped).
+//  - Si ni el texto cabe: NoFit, antes de cargar nada.
+Gemma4Placement plan_gemma4_placement(
+    const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes, uint64_t vision_bytes,
+    uint64_t primary_free, uint64_t secondary_free);
+
+// El plan con la VRAM libre de verdad (GPU 0 principal, GPU 1 secundaria si existe), con
+// pesos más KV hasta `max_seq`.
+Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint32_t prefill_tokens);
 
 // Registra solo los tensores de ese tramo: los comunes viven en la principal.
 bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer,
