@@ -10,7 +10,8 @@ Una petición JSON por línea en stdin, un evento JSON por línea en stdout;
 stderr contiene diagnóstico. Cada petición del cliente lleva un `request_id`
 único. El proceso no ofrece HTTP. Un `attachment` añade bytes RGB8 después de
 su cabecera y un salto de línea; el escritor debe enviar el frame sin intercalar
-otras peticiones.
+otras peticiones. Un salto de línea tras el payload es opcional: el runtime ya
+no lo espera (antes se quedaba esperándolo y el adjunto no se confirmaba).
 
 `ready` anuncia arquitectura, `max_seq_len`, `multimodal` y `vision_adapter`.
 La sesión predeterminada es `"0"`. Se pueden abrir otras sesiones sobre los
