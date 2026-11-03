@@ -441,7 +441,9 @@ int main(int argc, char** argv) try {
         fs::copy_file(input_path, part, fs::copy_options::overwrite_existing);
         fs::rename(part, output_path);
     }
-    if (!importance_only && fs::file_size(output_path) != fs::file_size(input_path))
+    // Con v10 la salida crece con los metadatos de la edición; su correspondencia con la
+    // entrada se comprueba por el índice, arriba.
+    if (!v10 && !importance_only && fs::file_size(output_path) != fs::file_size(input_path))
         throw std::runtime_error("la salida no tiene el tamaño de la entrada");
 
     Json manifest;

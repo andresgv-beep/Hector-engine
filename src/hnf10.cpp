@@ -70,6 +70,19 @@ struct In {
     }
 };
 
+// Bytes de `elements` pesos en `dtype`; 0 si el dtype no se conoce o la forma no es divisible.
+uint64_t bytes_for(const std::string& dtype, uint64_t elements) {
+    const auto block = [&](uint64_t bytes) { return elements % 256 == 0 ? elements / 256 * bytes : 0; };
+    if (dtype == "fp32" || dtype == "int32") return elements * 4;
+    if (dtype == "fp16" || dtype == "bf16") return elements * 2;
+    if (dtype == "int8") return elements;
+    if (dtype == "hq44k_g16") return block(152);
+    if (dtype == "hq52k") return block(184);
+    if (dtype == "hq62k") return block(264);
+    if (dtype == "hq8k") return block(272);
+    return 0;
+}
+
 bool known(uint32_t kind) { return kind == TEXT || kind == VISION || kind == AUDIO || kind == VIDEO || kind == TOKENIZER || kind == CONFIG || kind == TEMPLATE; }
 
 }  // namespace
@@ -181,6 +194,18 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
             buf.insert(buf.end(), hashes[k].begin(), hashes[k].end());
         }
         if (xxh3_128(buf.data(), buf.size()) != composites[i]) { error = "el compuesto no cuadra con sus tensores: " + x.name; return false; }
+    }
+    // Nombres únicos y tamaño coherente con dtype y forma física.
+    {
+        std::map<std::string, int> seen;
+        for (const auto& y : out.tensors) {
+            if (seen[y.name]++) { error = "tensor repetido: " + y.name; return false; }
+            uint64_t elements = 1;
+            for (uint32_t d : y.shape) elements *= d;
+            const uint64_t expected = bytes_for(y.dtype, elements);
+            if (expected == 0 || expected != y.size) { error = "tamaño incoherente con dtype y forma: " + y.name; return false; }
+            if (y.logical_last > y.shape.back()) { error = "más columnas lógicas que físicas: " + y.name; return false; }
+        }
     }
     // Cada tensor en exactamente un rango de componente y dentro de la zona de payloads.
     std::vector<uint32_t> owners(out.tensors.size(), 0);
