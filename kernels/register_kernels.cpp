@@ -541,6 +541,9 @@ void register_memory_kernels(Engine& engine) {
         } else if (table->dtype == dtype::HQ8K()) {
             launch_embedding_hq8k(as_i32(indices), as_u8_const(table), as_fp16(output),
                                   batch, seq, vocab, dim, ctx.stream);
+        } else if (table->dtype == dtype::HQ44K()) {
+            launch_embedding_hq44k(as_i32(indices), as_u8_const(table), as_fp16(output),
+                                   batch, seq, vocab, dim, ctx.stream);
         } else if (table->dtype == dtype::HQ62K()) {
             launch_embedding_hq62k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),
