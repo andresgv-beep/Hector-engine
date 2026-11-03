@@ -5,6 +5,7 @@
 
 #include "hnf_loader.hpp"
 #include "model_capabilities.hpp"
+#include "hnf10_test_writer.hpp"
 #include <iostream>
 #include <fstream>
 #include <cassert>
@@ -13,209 +14,56 @@
 using namespace helios;
 
 // ============================================================================
-// CREATE MOCK HNF FILE
+// CREATE MOCK HNFv10 FILE
 // ============================================================================
 
+// Configuración binaria TNIH de un modelo de texto de juguete: 2 capas, ancho 8, vocabulario 100.
+std::vector<uint8_t> mock_config() {
+    ExecutionHintsBin hints{};
+    hints.magic = HINTS_MAGIC;
+    hints.version_major = 1;
+    hints.text_offset = sizeof(ExecutionHintsBin);
+    hints.num_text_models = 1;
+    hints.flags = 1;                              // text_enabled
+    TextModelConfigBin text{};
+    text.rope_theta = 10000.0f;
+    text.rope_scaling_factor = 1.0f;
+    text.partial_rotary_factor = 1.0f;
+    text.rms_norm_eps = 1e-6f;
+    text.num_hidden_layers = 2;
+    text.hidden_size = 8;
+    text.intermediate_size = 32;
+    text.vocab_size = 100;
+    text.max_position_embeddings = 1024;
+    text.rope_dim = 4;
+    text.num_attention_heads = 2;
+    text.num_key_value_heads = 2;
+    text.head_dim = 4;
+    text.attention_type = ATTN_MHA;
+    text.arch = ARCH_PHI4;                         // conocida en metadatos, sin ejecución
+    text.mlp_type = MLP_SWIGLU;
+    text.norm_type = NORM_RMSNORM;
+    std::vector<uint8_t> bytes(sizeof(hints) + sizeof(text));
+    std::memcpy(bytes.data(), &hints, sizeof(hints));
+    std::memcpy(bytes.data() + sizeof(hints), &text, sizeof(text));
+    return bytes;
+}
+
+std::vector<uint8_t> fp16_bytes(size_t count, uint16_t value) {
+    std::vector<uint8_t> bytes(count * 2);
+    for (size_t i = 0; i < count; ++i) std::memcpy(bytes.data() + 2 * i, &value, 2);
+    return bytes;
+}
+
+// Dos tensores FP16: [4, 8] a 1,0 y [8] a 2,0. Con `malformed_tensor_size`, el primero trae el
+// doble de bytes de los que dice su forma y el índice lo rechaza.
 std::string create_mock_hnf(const std::string& path, bool malformed_tensor_size = false) {
-    std::ofstream f(path, std::ios::binary);
-    if (!f.is_open()) {
-        return "Cannot create file";
-    }
-    
-    // ========================================
-    // HEADER (64 bytes)
-    // ========================================
-    
-    HnfHeader header;
-    memset(&header, 0, sizeof(header));
-    
-    memcpy(header.magic, "HNFv9\x00\x00\x00", 8);
-    header.version_major = 9;
-    header.version_minor = 0;
-    header.flags = 0;
-    header.block_count = 16;
-    header.header_size = 64;
-    header.block_table_offset = 64;
-    
-    // We'll calculate these after
-    uint64_t block_table_end = 64 + 512;  // Header + block table
-    
-    // ========================================
-    // PREPARE TENSOR DATA
-    // ========================================
-    
-    // Create a small mock tensor: [4, 8] fp16 = 32 elements = 64 bytes
-    std::vector<uint16_t> tensor1_data(
-        malformed_tensor_size ? 64 : 32, 0x3C00);  // 1.0 in fp16
-    
-    // Create another tensor: [8] fp16 = 16 bytes
-    std::vector<uint16_t> tensor2_data(8, 0x4000);   // 2.0 in fp16
-    
-    size_t tensor1_size = tensor1_data.size() * sizeof(uint16_t);
-    size_t tensor2_size = tensor2_data.size() * sizeof(uint16_t);
-    
-    // ========================================
-    // PREPARE EXECUTION HINTS (Block 0xA)
-    // ========================================
-    
-    std::string exec_hints = R"({
-        "text_enabled": true,
-        "text": {
-            "arch": "mock_test",
-            "num_hidden_layers": 2,
-            "hidden_size": 8,
-            "intermediate_size": 32,
-            "vocab_size": 100,
-            "num_attention_heads": 2,
-            "num_key_value_heads": 2,
-            "head_dim": 4,
-            "attention_type": "mha",
-            "mlp_type": "swiglu",
-            "mlp_activation": "silu",
-            "norm_type": "rmsnorm",
-            "rms_norm_eps": 1e-6,
-            "rope_type": "default",
-            "rope_theta": 10000.0,
-            "rope_dim": 4,
-            "tie_word_embeddings": false,
-            "max_position_embeddings": 1024
-        }
-    })";
-    
-    // ========================================
-    // PREPARE MANIFEST
-    // ========================================
-    
-    // Block 0x0 (text_model) will contain our tensors
-    // Tensor 1 at offset 0, tensor 2 at offset tensor1_size
-    
-    std::string manifest = R"({
-        "version": "9.0",
-        "tensors": [
-            {
-                "name": "text.token_embedding.weight",
-                "dtype": "fp16",
-                "block": "text_model",
-                "shape": [4, 8],
-                "offset": 0,
-                "size": )" + std::to_string(tensor1_size) + R"(
-            },
-            {
-                "name": "text.norm.weight",
-                "dtype": "fp16",
-                "block": "text_model",
-                "shape": [8],
-                "offset": )" + std::to_string(tensor1_size) + R"(,
-                "size": )" + std::to_string(tensor2_size) + R"(
-            }
-        ]
-    })";
-    
-    // ========================================
-    // CALCULATE OFFSETS
-    // ========================================
-    
-    // Align to 32 bytes
-    auto align32 = [](uint64_t x) { return (x + 31) & ~31ULL; };
-    
-    uint64_t text_block_offset = align32(block_table_end);
-    uint64_t text_block_size = tensor1_size + tensor2_size;
-    
-    uint64_t hints_offset = align32(text_block_offset + text_block_size);
-    uint64_t hints_size = exec_hints.size();
-    
-    uint64_t manifest_offset = align32(hints_offset + hints_size);
-    uint64_t manifest_size = manifest.size();
-    
-    uint64_t file_size = manifest_offset + manifest_size;
-    
-    // Update header
-    header.manifest_offset = manifest_offset;
-    header.manifest_size = manifest_size;
-    header.file_size = file_size;
-    
-    // ========================================
-    // WRITE HEADER
-    // ========================================
-    
-    f.write(reinterpret_cast<const char*>(&header), sizeof(header));
-    
-    // ========================================
-    // WRITE BLOCK TABLE
-    // ========================================
-    
-    BlockEntry blocks[16];
-    memset(blocks, 0, sizeof(blocks));
-    
-    // Block 0x0: text_model
-    blocks[0].block_id = 0;
-    blocks[0].block_type = 0;
-    blocks[0].offset = text_block_offset;
-    blocks[0].size = text_block_size;
-    blocks[0].checksum = 0;
-    
-    // Block 0xA: execution_hints
-    blocks[0xA].block_id = 0xA;
-    blocks[0xA].block_type = 0xA;
-    blocks[0xA].offset = hints_offset;
-    blocks[0xA].size = hints_size;
-    blocks[0xA].checksum = 0;
-    
-    f.write(reinterpret_cast<const char*>(blocks), sizeof(blocks));
-    
-    // ========================================
-    // WRITE PADDING TO TEXT BLOCK
-    // ========================================
-    
-    uint64_t current_pos = 64 + 512;
-    while (current_pos < text_block_offset) {
-        char zero = 0;
-        f.write(&zero, 1);
-        current_pos++;
-    }
-    
-    // ========================================
-    // WRITE TENSOR DATA
-    // ========================================
-    
-    f.write(reinterpret_cast<const char*>(tensor1_data.data()), tensor1_size);
-    f.write(reinterpret_cast<const char*>(tensor2_data.data()), tensor2_size);
-    
-    // ========================================
-    // WRITE PADDING TO HINTS
-    // ========================================
-    
-    current_pos = text_block_offset + text_block_size;
-    while (current_pos < hints_offset) {
-        char zero = 0;
-        f.write(&zero, 1);
-        current_pos++;
-    }
-    
-    // ========================================
-    // WRITE EXECUTION HINTS
-    // ========================================
-    
-    f.write(exec_hints.data(), exec_hints.size());
-    
-    // ========================================
-    // WRITE PADDING TO MANIFEST
-    // ========================================
-    
-    current_pos = hints_offset + hints_size;
-    while (current_pos < manifest_offset) {
-        char zero = 0;
-        f.write(&zero, 1);
-        current_pos++;
-    }
-    
-    // ========================================
-    // WRITE MANIFEST
-    // ========================================
-    
-    f.write(manifest.data(), manifest.size());
-    
-    f.close();
+    hnf10_test::Component text{1, hnf10_test::TEXT, true, "texto", {
+        {"text.token_embedding.weight", "fp16", {4, 8}, fp16_bytes(malformed_tensor_size ? 64 : 32, 0x3C00)},
+        {"text.norm.weight", "fp16", {8}, fp16_bytes(8, 0x4000)},
+    }, {}};
+    hnf10_test::Component config{2, hnf10_test::CONFIG, true, "configuración", {}, mock_config()};
+    try { hnf10_test::write(path, hnf10_test::build({text, config})); } catch (const std::exception& e) { return e.what(); }
     return "";
 }
 
@@ -236,11 +84,8 @@ void test_header_parsing() {
     bool ok = loader.load_metadata(path);
     assert(ok);
     
-    // Check header
-    const auto& header = loader.header();
-    assert(header.version_major == 9);
-    assert(header.version_minor == 0);
-    assert(header.block_count == 16);
+    // HNFv10: el cargador lo identifica.
+    assert(loader.format_major() == 10);
     
     std::cout << "PASSED" << std::endl;
 }
@@ -258,9 +103,9 @@ void test_block_table() {
     assert(loader.has_block(BLOCK_TEXT_MODEL));
     assert(loader.block(BLOCK_TEXT_MODEL).size > 0);
     
-    // Check execution_hints block exists
-    assert(loader.has_block(BLOCK_EXEC_HINTS));
-    assert(loader.block(BLOCK_EXEC_HINTS).size > 0);
+    // La configuración binaria es un componente; no hay hints JSON.
+    assert(loader.has_block(BLOCK_EXEC_HINTS_BIN));
+    assert(!loader.has_block(BLOCK_EXEC_HINTS));
     
     // Vision block should be empty
     assert(!loader.has_block(BLOCK_VISION));
@@ -269,7 +114,7 @@ void test_block_table() {
 }
 
 void test_manifest_parsing() {
-    std::cout << "Test: Manifest parsing... ";
+    std::cout << "Test: Tensor index... ";
     
     std::string path = "/tmp/test_model.hnf";
     
@@ -333,7 +178,7 @@ void test_execution_hints() {
     const auto& config = loader.config();
     
     assert(config.text_enabled == true);
-    assert(config.arch == "mock_test");
+    assert(config.arch == "phi4");
     assert(config.num_hidden_layers == 2);
     assert(config.hidden_size == 8);
     assert(config.vocab_size == 100);
@@ -435,7 +280,7 @@ void test_model_capabilities() {
     assert(loader.load_metadata("/tmp/test_model.hnf"));
     const ModelCapabilities model = inspect_model_capabilities(loader);
     assert(model.schema_version == 1);
-    assert(model.text_architecture == "mock_test");
+    assert(model.text_architecture == "phi4");
     assert(!model.multimodal);
     const auto* text = model.find(ModelModality::Text);
     const auto* vision = model.find(ModelModality::Vision);

@@ -15,157 +15,13 @@
 #include <iomanip>
 #include <cstring>
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <limits>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-// ============================================================================
-// MINIMAL JSON PARSER
-// ============================================================================
-
-namespace {
-
-const char* skip_ws(const char* p) {
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    return p;
-}
-
-std::string parse_string(const char*& p) {
-    if (*p != '"') return "";
-    p++;
-    std::string result;
-    while (*p && *p != '"') {
-        if (*p == '\\' && *(p+1)) {
-            p++;
-            switch (*p) {
-                case 'n': result += '\n'; break;
-                case 't': result += '\t'; break;
-                case '"': result += '"'; break;
-                case '\\': result += '\\'; break;
-                default: result += *p;
-            }
-        } else {
-            result += *p;
-        }
-        p++;
-    }
-    if (*p == '"') p++;
-    return result;
-}
-
-int64_t parse_int(const char*& p) {
-    char* end;
-    int64_t val = strtoll(p, &end, 10);
-    p = end;
-    return val;
-}
-
-double parse_number(const char*& p) {
-    char* end;
-    double val = strtod(p, &end);
-    p = end;
-    return val;
-}
-
-const char* find_key(const char* json, const std::string& key) {
-    std::string search = "\"" + key + "\"";
-    const char* p = strstr(json, search.c_str());
-    if (!p) return nullptr;
-    p += search.length();
-    p = skip_ws(p);
-    if (*p == ':') p++;
-    return skip_ws(p);
-}
-
-std::string get_string(const char* json, const std::string& key, const std::string& def = "") {
-    const char* p = find_key(json, key);
-    if (!p || *p != '"') return def;
-    return parse_string(p);
-}
-
-int64_t get_int(const char* json, const std::string& key, int64_t def = 0) {
-    const char* p = find_key(json, key);
-    if (!p) return def;
-    if (*p == '"') { p++; return parse_int(p); }
-    return parse_int(p);
-}
-
-bool get_bool(const char* json, const std::string& key, bool def = false) {
-    const char* p = find_key(json, key);
-    if (!p) return def;
-    if (strncmp(p, "true", 4) == 0) return true;
-    if (strncmp(p, "false", 5) == 0) return false;
-    return def;
-}
-
-std::vector<uint32_t> get_int_array(const char* json, const std::string& key) {
-    std::vector<uint32_t> result;
-    const char* p = find_key(json, key);
-    if (!p || *p != '[') return result;
-    p++;
-    while (*p && *p != ']') {
-        p = skip_ws(p);
-        if (*p == ']') break;
-        result.push_back(static_cast<uint32_t>(parse_int(p)));
-        p = skip_ws(p);
-        if (*p == ',') p++;
-    }
-    return result;
-}
-
-// Single-pass JSON object → map
-void parse_json_object_to_map(const char* json, 
-                               std::unordered_map<std::string, helios::ConfigValue>& out) {
-    const char* p = skip_ws(json);
-    if (*p != '{') return;
-    p++;
-    
-    while (*p && *p != '}') {
-        p = skip_ws(p);
-        if (*p == '}') break;
-        if (*p == ',') { p++; continue; }
-        if (*p != '"') { p++; continue; }
-        
-        std::string key = parse_string(p);
-        p = skip_ws(p);
-        if (*p != ':') continue;
-        p++;
-        p = skip_ws(p);
-        
-        if (*p == '"') {
-            out[key] = parse_string(p);
-        } else if (*p == 't') {
-            out[key] = true; p += 4;
-        } else if (*p == 'f') {
-            out[key] = false; p += 5;
-        } else if (*p == '-' || (*p >= '0' && *p <= '9')) {
-            const char* start = p;
-            bool is_float = false;
-            while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n') {
-                if (*p == '.' || *p == 'e' || *p == 'E') is_float = true;
-                p++;
-            }
-            std::string num_str(start, p - start);
-            if (is_float) out[key] = std::stod(num_str);
-            else out[key] = (int64_t)std::stoll(num_str);
-        } else if (*p == '{' || *p == '[') {
-            int depth = 1;
-            char open = *p, close = (open == '{') ? '}' : ']';
-            p++;
-            while (*p && depth > 0) {
-                if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } if (*p == '"') p++; continue; }
-                if (*p == open) depth++;
-                else if (*p == close) depth--;
-                p++;
-            }
-        } else { p++; }
-    }
-}
-
-} // anonymous namespace
 
 namespace helios {
 
@@ -208,7 +64,6 @@ bool embedding_is_lookup_only(
 // ============================================================================
 
 HnfLoader::HnfLoader() {
-    memset(&header_, 0, sizeof(header_));
     memset(blocks_, 0, sizeof(blocks_));
 }
 
@@ -242,31 +97,24 @@ bool HnfLoader::open(const std::string& path) {
         load_tokenizer();
         return true;
     }
-    format_major_ = 9;
-    if (!read_header(file_) || !read_block_table(file_) || !read_manifest(file_) || !parse_manifest()) {
-        close(); return false;
-    }
-    if (!read_execution_hints(file_)) {
-        close();
-        return false;
-    }
-    load_tokenizer();
-    return true;
+    last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
+    std::cerr << "HnfLoader: " << last_error_ << std::endl;
+    close();
+    return false;
 }
 
 bool HnfLoader::open_hnf10(std::ifstream& f) {
     hnf10::Contents contents;
     if (!hnf10::read(f, contents, last_error_)) return false;
-    std::memset(&header_, 0, sizeof(header_));
-    std::memcpy(header_.magic, hnf10::MAGIC, 8);
-    header_.version_major = 10;
-    header_.file_size = contents.file_size;
+    file_size_ = contents.file_size;
     for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) blocks_[i] = BlockEntry{i, i, 0, 0, 0};
     const hnf10::Component* text = nullptr;
+    std::map<uint32_t, std::string> block_of;   // id de componente -> nombre de bloque de sus tensores
     for (const auto& c : contents.components) {
         uint32_t block = HNF_BLOCK_COUNT;
         switch (c.kind) {
-            case hnf10::TEXT: block = BLOCK_TEXT_MODEL; text = &c; break;
+            case hnf10::TEXT: block = BLOCK_TEXT_MODEL; text = &c; block_of[c.id] = "text_model"; break;
+            case hnf10::VISION: block = BLOCK_VISION; block_of[c.id] = "vision"; break;
             case hnf10::TOKENIZER: block = BLOCK_TOKENIZER; break;
             case hnf10::CONFIG: block = BLOCK_EXEC_HINTS_BIN; break;
             case hnf10::TEMPLATE: {
@@ -284,14 +132,16 @@ bool HnfLoader::open_hnf10(std::ifstream& f) {
         if (blocks_[block].size != 0) { last_error_ = "HNFv10: dos componentes del mismo tipo: " + c.name; return false; }
         blocks_[block] = BlockEntry{block, block, c.offset, c.size, 0};
     }
-    if (!text) { last_error_ = "HNFv10 sin componente de texto"; return false; }
+    // Puede no haber texto: un HNF solo de visión acompaña a otro de texto (--multimodal).
+    (void)text;
     tensors_.clear();
     for (const auto& t : contents.tensors) {
-        if (t.component != text->id) { last_error_ = "HNFv10: tensor fuera del texto: " + t.name; return false; }
+        const auto owner = block_of.find(t.component);
+        if (owner == block_of.end()) { last_error_ = "HNFv10: tensor de un componente sin pesos: " + t.name; return false; }
         TensorEntry entry;
         entry.name = t.name;
         entry.dtype = t.dtype;
-        entry.block = "text_model";
+        entry.block = owner->second;
         entry.shape = t.shape;
         entry.offset = t.offset;
         entry.size = t.size;
@@ -958,13 +808,12 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    const bool v10 = hnf10::is_hnf10(f);
-    format_major_ = v10 ? 10 : 9;
-    if (v10 ? !open_hnf10(f) : (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest())) {
+    if (!hnf10::is_hnf10(f)) {
+        last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
         file_path_.clear();
         return false;
     }
-    if (!v10 && !read_execution_hints(f)) { file_path_.clear(); return false; }
+    if (!open_hnf10(f)) { file_path_.clear(); return false; }
     if (has_gemma4_vision_config_) {
         const Gemma4VisionValidationReport report =
             validate_gemma4_vision_tensors(*this);
@@ -1035,13 +884,12 @@ bool HnfLoader::load_metadata(const std::string& path) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    const bool v10 = hnf10::is_hnf10(f);
-    format_major_ = v10 ? 10 : 9;
-    if (v10 ? !open_hnf10(f) : (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest())) {
+    if (!hnf10::is_hnf10(f)) {
+        last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
         file_path_.clear();
         return false;
     }
-    if (!v10 && !read_execution_hints(f)) {
+    if (!open_hnf10(f)) {
         file_path_.clear();
         return false;
     }
@@ -1052,94 +900,21 @@ bool HnfLoader::load_metadata(const std::string& path) {
 // HEADER / BLOCK TABLE / MANIFEST
 // ============================================================================
 
-bool HnfLoader::read_header(std::ifstream& f) {
-    f.seekg(0);
-    f.read(reinterpret_cast<char*>(&header_), sizeof(HnfHeader));
-    if (!f) return false;
-    if (memcmp(header_.magic, HNF_MAGIC, 8) != 0) return false;
-    if (header_.version_major != 9) return false;
-    if (header_.block_count != HNF_BLOCK_COUNT) return false;
-    if (header_.header_size != HNF_HEADER_SIZE) return false;
-    return true;
-}
-
-bool HnfLoader::read_block_table(std::ifstream& f) {
-    f.seekg(header_.block_table_offset);
-    f.read(reinterpret_cast<char*>(blocks_), sizeof(BlockEntry) * HNF_BLOCK_COUNT);
-    return f.good();
-}
-
-bool HnfLoader::read_manifest(std::ifstream& f) {
-    if (header_.manifest_size == 0) return false;
-    f.seekg(header_.manifest_offset);
-    manifest_json_.resize(header_.manifest_size);
-    f.read(&manifest_json_[0], header_.manifest_size);
-    return f.good();
-}
-
-bool HnfLoader::parse_manifest() {
-    tensors_.clear();
-    const char* p = find_key(manifest_json_.c_str(), "tensors");
-    if (!p || *p != '[') return false;
-    
-    p++;
-    while (*p) {
-        p = skip_ws(p);
-        if (*p == ']') break;
-        if (*p != '{') { if (*p == ',') { p++; continue; } break; }
-        
-        const char* obj_start = p;
-        int depth = 1; p++;
-        while (*p && depth > 0) { if (*p == '{') depth++; else if (*p == '}') depth--; p++; }
-        
-        std::string obj(obj_start, p - obj_start);
-        TensorEntry entry;
-        entry.name = get_string(obj.c_str(), "name");
-        entry.dtype = get_string(obj.c_str(), "dtype");
-        entry.block = get_string(obj.c_str(), "block");
-        const char* shape = find_key(obj.c_str(), "shape");
-        if (!shape || *shape != '[') {
-            last_error_ = "manifest tensor is missing its shape array";
-            return false;
-        }
-        entry.shape = get_int_array(obj.c_str(), "shape");
-        entry.offset = static_cast<uint64_t>(get_int(obj.c_str(), "offset"));
-        entry.size = static_cast<uint64_t>(get_int(obj.c_str(), "size"));
-        if (!entry.name.empty()) tensors_.push_back(entry);
-    }
-    return !tensors_.empty();
-}
-
 // ============================================================================
 // EXECUTION HINTS - PRIORIDAD: BINARIO [0xB] > JSON [0xA]
 // ============================================================================
 
 bool HnfLoader::read_execution_hints(std::ifstream& f) {
-    const bool binary_present = blocks_[BLOCK_EXEC_HINTS_BIN].size > 0;
-    const bool has_binary = read_execution_hints_binary(f);
-    if (binary_present && !has_binary) {
+    // La configuración binaria es obligatoria y la única fuente de configuración.
+    if (blocks_[BLOCK_EXEC_HINTS_BIN].size == 0) {
+        last_error_ = "HNFv10 sin componente de configuración";
+        return false;
+    }
+    if (!read_execution_hints_binary(f)) {
         if (last_error_.empty()) last_error_ = "invalid binary execution hints";
         std::cerr << "HnfLoader: " << last_error_ << std::endl;
         return false;
     }
-//    if (has_binary) std::cout << "HnfLoader: Binary hints loaded (O(1))" << std::endl;
-    
-    const BlockEntry& json_block = blocks_[BLOCK_EXEC_HINTS];
-    if (json_block.size > 0) {
-        f.clear(); f.seekg(json_block.offset);
-        std::string json; json.resize(json_block.size);
-        f.read(&json[0], json_block.size);
-        if (f.good()) {
-            if (!parse_execution_hints(json)) {
-                last_error_ = "invalid JSON execution hints";
-                return false;
-            }
-//            if (!has_binary) std::cout << "HnfLoader: JSON hints loaded (fallback)" << std::endl;
-        }
-    }
-    // Legacy HNF files may have no hint blocks at all. Preserve the historical
-    // fallback where graph detection derives the architecture from tensors.
-    // A present-but-invalid binary block is still rejected above.
     return true;
 }
 
@@ -1693,49 +1468,6 @@ void HnfLoader::apply_vision_config_bin(const VisionModelConfigBin& cfg) {
 // JSON EXECUTION HINTS — NOW PROCESSES ALL BLOCKS
 // ============================================================================
 
-bool HnfLoader::parse_execution_hints(const std::string& json) {
-    const char* j = json.c_str();
-    
-    // Global flags
-    if (get_bool(j, "text_enabled", false)) config_.set("text_enabled", true);
-    if (get_bool(j, "code_enabled", false)) config_.set("code_enabled", true);
-    if (get_bool(j, "vision_enabled", false)) config_.set("vision_enabled", true);
-    if (get_bool(j, "cortex_enabled", false)) config_.set("cortex_enabled", true);
-    if (get_bool(j, "audio_enabled", false)) config_.set("audio_enabled", true);
-    
-    // Structure: { "text": {...}, "vision": {...}, "cortex": {...}, "code": {...} }
-    // Parse each block into its respective config
-    
-    struct BlockMapping {
-        const char* json_key;
-        BlockID block_id;
-        bool is_default;  // Also write to config_ (text is default)
-    };
-    
-    static const BlockMapping mappings[] = {
-        {"text",   BLOCK_TEXT_MODEL, true},
-        {"vision", BLOCK_VISION,    false},
-        {"audio",  BLOCK_AUDIO,     false},
-        {"cortex", BLOCK_CORTEX,    false},
-        {"code",   BLOCK_CODE_EXEC, false},
-    };
-    
-    for (const auto& m : mappings) {
-        const char* obj = find_key(j, m.json_key);
-        if (!obj || *obj != '{') continue;
-        
-        // Parse into block-specific config
-        parse_json_object_to_map(obj, block_configs_[m.block_id].params);
-        
-        // Text is also the default config
-        if (m.is_default) {
-            parse_json_object_to_map(obj, config_.params);
-        }
-    }
-    
-    return true;
-}
-
 // ============================================================================
 // DTYPE CONVERSION
 // ============================================================================
@@ -1984,9 +1716,8 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
 // ============================================================================
 
 void HnfLoader::print_info() const {
-    std::cout << "=== HNF v" << header_.version_major << "." << header_.version_minor << " ===" << std::endl;
-    std::cout << "File size: " << (header_.file_size / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Flags: 0x" << std::hex << header_.flags << std::dec << std::endl;
+    std::cout << "=== HNFv" << format_major_ << " ===" << std::endl;
+    std::cout << "File size: " << (file_size_ / 1024 / 1024) << " MB" << std::endl;
     std::cout << std::endl;
     
     std::cout << "=== Blocks ===" << std::endl;

@@ -12,8 +12,8 @@
 // --freeze tokeniza una sola vez cada .txt de casos/ a .ids. --eval lee esos IDs:
 // NN-x.forcing.ids da logits completos con teacher forcing y NN-x.prompt.ids una
 // respuesta greedy, con la misma ruta de decode de dos GPUs que el chat.
-// --capture acumula las activaciones de down por experto (ver
-// helios_convert_v9.1/docs/GEMMA4_MOE_CALIBRATION.md): hay dos mitades por documento
+// --capture acumula las activaciones de down por experto (la entrada de down,
+// GELU(gate)·up, del experto que recibió el token): hay dos mitades por documento
 // y uno de cada cinco documentos se reserva para la muestra de control.
 //
 // Con CUDA_DEVICE_ORDER=PCI_BUS_ID y CUDA_VISIBLE_DEVICES=1,0 la principal es la 4070 Ti.

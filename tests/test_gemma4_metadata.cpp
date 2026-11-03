@@ -2,6 +2,7 @@
 // and CUDA allocations: it validates HNF/GM4X parsing only.
 
 #include "hnf_loader.hpp"
+#include "hnf10_test_writer.hpp"
 #include "gemma4_validator.hpp"
 
 #include <algorithm>
@@ -169,66 +170,10 @@ std::vector<uint8_t> make_moe_hints(const std::vector<uint8_t>& extension) {
 
 std::string write_mock_hnf(const std::string& path,
                            const std::vector<uint8_t>& binary_hints) {
-    const std::string json_hints = R"({
-        "text_enabled": true,
-        "text": {
-            "arch": "gemma4",
-            "num_hidden_layers": 2,
-            "hidden_size": 1536,
-            "intermediate_size": 6144,
-            "vocab_size": 262144,
-            "num_attention_heads": 8,
-            "num_key_value_heads": 1,
-            "head_dim": 256
-        }
-    })";
-
-    const uint64_t text_offset = align32(HNF_HEADER_SIZE + HNF_BLOCK_TABLE_SIZE);
-    const uint64_t text_size = 2;
-    const uint64_t json_offset = align32(text_offset + text_size);
-    const uint64_t binary_offset = align32(json_offset + json_hints.size());
-    const uint64_t manifest_offset = align32(binary_offset + binary_hints.size());
-
-    const std::string manifest = std::string{R"({"version":"9.0","tensors":[{
-        "name":"text.test.weight","dtype":"fp16","block":"text_model",
-        "shape":[1],"offset":)"} + std::to_string(text_offset) +
-        R"(,"size":2}]})";
-
-    HnfHeader header{};
-    std::memcpy(header.magic, HNF_MAGIC, sizeof(HNF_MAGIC));
-    header.version_major = 9;
-    header.version_minor = 1;
-    header.flags = HNF_HAS_EXEC_HINTS_BIN;
-    header.block_count = HNF_BLOCK_COUNT;
-    header.header_size = HNF_HEADER_SIZE;
-    header.block_table_offset = HNF_HEADER_SIZE;
-    header.manifest_offset = manifest_offset;
-    header.manifest_size = manifest.size();
-    header.file_size = manifest_offset + manifest.size();
-
-    std::array<BlockEntry, HNF_BLOCK_COUNT> blocks{};
-    blocks[BLOCK_TEXT_MODEL] = {BLOCK_TEXT_MODEL, BLOCK_TEXT_MODEL,
-                                text_offset, text_size, 0};
-    blocks[BLOCK_EXEC_HINTS] = {BLOCK_EXEC_HINTS, BLOCK_EXEC_HINTS,
-                               json_offset, json_hints.size(), 0};
-    blocks[BLOCK_EXEC_HINTS_BIN] = {BLOCK_EXEC_HINTS_BIN, BLOCK_EXEC_HINTS_BIN,
-                                   binary_offset, binary_hints.size(), 0};
-
-    std::vector<uint8_t> file(header.file_size, 0);
-    write_at(file, 0, header);
-    std::memcpy(file.data() + header.block_table_offset, blocks.data(),
-                sizeof(BlockEntry) * blocks.size());
-    file[text_offset] = 0;
-    file[text_offset + 1] = 0;
-    std::memcpy(file.data() + json_offset, json_hints.data(), json_hints.size());
-    std::memcpy(file.data() + binary_offset, binary_hints.data(), binary_hints.size());
-    std::memcpy(file.data() + manifest_offset, manifest.data(), manifest.size());
-
-    std::ofstream output(path, std::ios::binary);
-    require(output.is_open(), "cannot create mock HNF");
-    output.write(reinterpret_cast<const char*>(file.data()), file.size());
-    require(output.good(), "cannot write mock HNF");
-    return path;
+    // HNFv10: un tensor de texto y la configuración binaria de la prueba; sin JSON.
+    hnf10_test::Component text{1, hnf10_test::TEXT, true, "texto", {{"text.test.weight", "fp16", {1}, {0, 0}}}, {}};
+    hnf10_test::Component config{2, hnf10_test::CONFIG, true, "configuración", {}, binary_hints};
+    return hnf10_test::write(path, hnf10_test::build({text, config}));
 }
 
 std::string write_mock_hnf(const std::string& path, bool corrupt_record_size) {

@@ -26,15 +26,13 @@ class MappedWeightPipeline;
 // HNF CONSTANTS
 // ============================================================================
 
-constexpr uint8_t HNF_MAGIC[8] = {'H', 'N', 'F', 'v', '9', 0, 0, 0};
-constexpr uint32_t HNF_HEADER_SIZE = 64;
-constexpr uint32_t HNF_BLOCK_TABLE_SIZE = 512;
-constexpr uint32_t HNF_BLOCK_ENTRY_SIZE = 32;
+// El contenedor es HNFv10 (src/hnf10.hpp). Sus componentes se colocan en estas ranuras
+// internas de bloque, que ya no corresponden a ninguna tabla del fichero.
 constexpr uint32_t HNF_BLOCK_COUNT = 16;
 constexpr uint32_t HNF_ALIGNMENT = 32;
 
 // ============================================================================
-// BLOCK IDs - HNFv9.1
+// RANURAS INTERNAS DE BLOQUE
 // ============================================================================
 
 enum BlockID : uint32_t {
@@ -48,7 +46,7 @@ enum BlockID : uint32_t {
     BLOCK_CORTEX          = 0x7,
     BLOCK_CODE_EXEC       = 0x8,
     BLOCK_TOKENIZER       = 0x9,   // HTF multi-domain
-    BLOCK_EXEC_HINTS      = 0xA,   // JSON (obligatorio)
+    BLOCK_EXEC_HINTS      = 0xA,   // hints JSON de HNFv9: ya no existe
     BLOCK_EXEC_HINTS_BIN  = 0xB,   // Binario (preferido) ← NUEVO
     BLOCK_TOOLS           = 0xC,
     BLOCK_EXPERT_ROUTER   = 0xD,
@@ -67,48 +65,12 @@ inline const char* block_name(uint32_t id) {
 }
 
 // ============================================================================
-// FLAGS - HNFv9.1
-// ============================================================================
-
-enum HnfFlags : uint32_t {
-    HNF_HAS_VISION         = (1 << 0),
-    HNF_HAS_AUDIO          = (1 << 1),
-    HNF_HAS_VIDEO          = (1 << 2),
-    HNF_HAS_SPATIAL        = (1 << 3),
-    HNF_HAS_PERSONALITY    = (1 << 4),
-    HNF_HAS_MEMORY         = (1 << 5),
-    HNF_HAS_CORTEX         = (1 << 6),
-    HNF_HAS_CODE_EXEC      = (1 << 7),
-    HNF_HAS_TOKENIZER      = (1 << 8),   // ← NUEVO
-    HNF_HAS_EXEC_HINTS_BIN = (1 << 9),   // ← NUEVO
-    HNF_HAS_TOOLS          = (1 << 10),
-    HNF_HAS_EXPERT_ROUTER  = (1 << 11),
-    HNF_IS_MOE             = (1 << 12),
-    HNF_IS_MULTIMODAL      = (1 << 13),
-};
-
-// ============================================================================
 // BINARY STRUCTURES (packed, little-endian)
 // ============================================================================
 
 #pragma pack(push, 1)
 
-struct HnfHeader {
-    uint8_t  magic[8];              // "HNFv9\x00\x00\x00"
-    uint16_t version_major;         // 9
-    uint16_t version_minor;         // 0
-    uint32_t flags;                 // Capability flags
-    uint32_t block_count;           // 16
-    uint32_t header_size;           // 64
-    uint64_t block_table_offset;    // 64
-    uint64_t manifest_offset;       // Offset del manifest JSON
-    uint64_t manifest_size;         // Tamaño del manifest
-    uint64_t file_size;             // Tamaño total
-    uint32_t checksum;              // CRC32
-    uint32_t reserved;              // 0
-};
-static_assert(sizeof(HnfHeader) == 64, "HnfHeader must be 64 bytes");
-
+// Dónde está un componente en el fichero; `checksum` ya no se usa (los hashes son de HNFv10).
 struct BlockEntry {
     uint32_t block_id;
     uint32_t block_type;
@@ -121,7 +83,7 @@ static_assert(sizeof(BlockEntry) == 32, "BlockEntry must be 32 bytes");
 // ============================================================================
 // EXECUTION HINTS BINARY STRUCTURES (block 0xB)
 // ============================================================================
-// Prioridad: Si [0xB] existe, usar binario. Fallback a JSON [0xA].
+// La configuración binaria es la única fuente de configuración.
 
 constexpr uint32_t HINTS_MAGIC = 0x48494E54;  // "HINT"
 
@@ -702,9 +664,9 @@ public:
     // ACCESS (after open or load_metadata)
     // ========================================
     
-    const HnfHeader& header() const { return header_; }
-    // Versión mayor del contenedor abierto: 9 o 10.
+    // Versión mayor del contenedor abierto (10) y tamaño que declara su cabecera.
     uint32_t format_major() const { return format_major_; }
+    uint64_t file_size() const { return file_size_; }
     // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
     const std::string& chat_template() const { return chat_template_; }
     
@@ -780,9 +742,9 @@ private:
     mutable std::ifstream file_;
     
     // Metadata
-    HnfHeader header_;
     BlockEntry blocks_[HNF_BLOCK_COUNT];
     uint32_t format_major_ = 0;
+    uint64_t file_size_ = 0;
     std::string chat_template_;
     ModelConfig config_;                                    // Default/text config
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs
@@ -792,7 +754,6 @@ private:
     bool has_gemma4_vision_config_ = false;
     std::string last_error_;
     std::vector<TensorEntry> tensors_;
-    std::string manifest_json_;
     
     // Tokenizer (multi-domain support)
     mutable std::unordered_map<std::string, HTFTokenizer> tokenizers_;
@@ -804,16 +765,11 @@ private:
     BlockState block_states_[HNF_BLOCK_COUNT];
     
     // Internal methods
-    bool read_header(std::ifstream& f);
     // HNFv10 (src/hnf10.hpp): rellena bloques, tensores y configuración desde sus componentes.
     bool open_hnf10(std::ifstream& f);
-    bool read_block_table(std::ifstream& f);
-    bool read_manifest(std::ifstream& f);
     bool read_execution_hints(std::ifstream& f);
-    bool parse_manifest();
-    bool parse_execution_hints(const std::string& json);
-    
-    // Binary hints parsing (priority over JSON)
+
+    // Configuración binaria (TNIH, GM4X, GM4V)
     bool read_execution_hints_binary(std::ifstream& f);
     bool parse_execution_hints_binary(const uint8_t* data, size_t size);
     bool parse_gemma4_extension(const uint8_t* data, size_t size,

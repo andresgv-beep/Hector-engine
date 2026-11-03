@@ -5,19 +5,6 @@
 namespace helios {
 namespace {
 
-constexpr uint32_t header_flag(ModelModality modality) {
-    switch (modality) {
-        case ModelModality::Vision:    return HNF_HAS_VISION;
-        case ModelModality::Audio:     return HNF_HAS_AUDIO;
-        case ModelModality::Video:     return HNF_HAS_VIDEO;
-        case ModelModality::Spatial3D: return HNF_HAS_SPATIAL;
-        case ModelModality::Code:      return HNF_HAS_CODE_EXEC;
-        case ModelModality::Text:
-        case ModelModality::Cortex:    return 0;
-    }
-    return 0;
-}
-
 const char* enabled_key(ModelModality modality) {
     switch (modality) {
         case ModelModality::Text:   return "text_enabled";
@@ -126,10 +113,9 @@ ModelCapabilities inspect_model_capabilities(const HnfLoader& loader) {
         capability.block = spec.block;
         capability.present = loader.has_block(spec.block);
 
-        const uint32_t hflag = header_flag(spec.modality);
+        // HNFv10: un componente presente o la configuración binaria lo declaran.
         const char* key = enabled_key(spec.modality);
         capability.declared = capability.present ||
-            (hflag != 0 && (loader.header().flags & hflag) != 0) ||
             (key && loader.config().get<bool>(key, false));
 
         if (spec.modality == ModelModality::Text) {

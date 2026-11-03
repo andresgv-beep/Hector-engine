@@ -1,11 +1,11 @@
 """Trayectoria completa de Gemma 4 26B en CPU, una capa cada vez, en FP32.
 
-uso: gemma4_layerwise_reference.py forward tools-del-conversor/ variante pesos casos/ modelo-original/ salida/
-     gemma4_layerwise_reference.py compare tools-del-conversor/ casos/ modelo-original/ hnf-A hnf-B runs-motor/ prompts.jsonl salida/
-     gemma4_layerwise_reference.py pieces tools-del-conversor/ casos/ modelo-original/ hnf salida/ [pieza...]
-     gemma4_layerwise_reference.py engine tools-del-conversor/ casos/ modelo-original/ runs-motor/ salida/ run...
-     gemma4_layerwise_reference.py imatrix tools-del-conversor/ casos-calibración/ modelo-original/ captura.npz
-     gemma4_layerwise_reference.py export-imatrix tools-del-conversor/ modelo-original/ captura.npz carpeta/
+uso: gemma4_layerwise_reference.py forward variante pesos casos/ modelo-original/ salida/
+     gemma4_layerwise_reference.py compare casos/ modelo-original/ hnf-A hnf-B runs-motor/ prompts.jsonl salida/
+     gemma4_layerwise_reference.py pieces casos/ modelo-original/ hnf salida/ [pieza...]
+     gemma4_layerwise_reference.py engine casos/ modelo-original/ runs-motor/ salida/ run...
+     gemma4_layerwise_reference.py imatrix casos-calibración/ modelo-original/ captura.npz
+     gemma4_layerwise_reference.py export-imatrix modelo-original/ captura.npz carpeta/
 
 imatrix suma x² por columna de la entrada de cada experto en el original. Con IMATRIX
 (captura), GPTQ_DIR (bloques HQ44 por capa) y GGUF, pieces mide expertos HQ44 sin
@@ -33,54 +33,37 @@ import time
 from pathlib import Path
 import numpy as np
 
-tools = sys.argv[2]
-sys.path.insert(0, tools)
-from moe_capture_common import Weights, decode_hq44, gelu, rms, route
-from verify_moe_sn import decode_hq52
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gemma4_reference_common import Weights, gelu, rms, route
+from hnf10 import decode, decode_hq44
 
 LAYERS, E, H, I, K, SHARED, HEADS = 30, 128, 2816, 704, 8, 2112, 16
 GLOBAL_LAYERS = {5, 11, 17, 23, 29}
+NAMES_HNF = os.environ.get('NAMES_HNF', str(Path(__file__).resolve().parents[2]/'helios_convert_v10/output/gemma4-26b-moe-dense-hq8-gptq.v10.hnf'))
 FIRST, MAX_FORCING, CHUNK = 16, 512, 64
 
 
 class Reader(Weights):
-    """Los dos HNF y el checkpoint original, por el mismo nombre canónico."""
+    """Un HNFv10 y el checkpoint original, por el mismo nombre canónico."""
     def __init__(self, model, hnf=None):
-        self.hnf, self.model = (Path(hnf) if hnf else None), Path(model)
-        # Sin HNF, el manifiesto solo da nombres y procedencia; todos los HNF del 26B los comparten.
-        self.manifest_path = hnf or sorted(Path(tools).parent.glob('output/gemma4-26b-*/*.experimental.hnf'))[0]
-        with open(self.manifest_path, 'rb') as f:
-            f.seek(32)
-            offset, size = struct.unpack('<QQ', f.read(16))
-            f.seek(offset)
-            self.manifest = json.loads(f.read(size))
-        self.tensors = {t['name']: t for t in self.manifest['tensors']}
-        self.sources = {t['canonical']: t for t in self.manifest['source_tensors']}
-        self.index = json.loads((self.model/'model.safetensors.index.json').read_text())['weight_map']
-        self.headers, self.verified = {}, {'skip'}
-        self.xxh = lambda *a: None
+        # Sin HNF, el de NAMES_HNF solo da nombres y procedencia: todos los HNF del 26B los comparten.
+        super().__init__(hnf or NAMES_HNF, model, verify=False)
+        self.quantized = hnf is not None
 
     def get(self, name, expert=None):
-        if self.hnf is None:
-            self.verified.add(name)
-            return self.original(name, expert)
-        return self.packed(name, expert)
+        return self.packed(name, expert) if self.quantized else self.original(name, expert)
 
     def embedding(self, rows=None):
         name = 'text.token_embedding.weight'
-        if self.hnf is None:
-            self.verified.add(name)
+        if not self.quantized:
             full = self.original(name)
             return full if rows is None else full[rows]
-        t = self.tensors[name]
-        block = t['size']//(np.prod(t['shape'])//256)
-        row_bytes = H//256*block
-        raw = np.memmap(self.hnf, mode='r', dtype=np.uint8, offset=t['offset'], shape=(t['shape'][0], row_bytes))
-        wanted = np.arange(t['shape'][0]) if rows is None else rows
+        t, raw = self.tensors[name], self.hnf10.raw(name)
+        wanted = np.arange(t.shape[0]) if rows is None else rows
         out = np.empty((len(wanted), H), np.float32)
         for start in range(0, len(wanted), 4096):
             part = wanted[start:start+4096]
-            out[start:start+len(part)] = decode_hq52(np.asarray(raw[part])).reshape(len(part), H)
+            out[start:start+len(part)] = decode(t.dtype, np.asarray(raw[part])).reshape(len(part), H)
         return out
 
 
@@ -389,7 +372,7 @@ def attention(hidden, get, layer):
     n = len(hidden)
     x = rms(hidden, get(p+'ln_attn_in.weight'))
     k_proj = get(p+'attn.k_proj.weight')
-    v_proj = get(p+'attn.v_proj.weight') if p+'attn.v_proj.weight' in reader.sources else k_proj
+    v_proj = get(p+'attn.v_proj.weight') if p+'attn.v_proj.weight' in reader.tensors else k_proj
     q = (x@get(p+'attn.q_proj.weight').T).reshape(n, HEADS, head_dim)
     k = (x@k_proj.T).reshape(n, kv_heads, head_dim)
     v = (x@v_proj.T).reshape(n, kv_heads, head_dim)
@@ -660,21 +643,21 @@ def engine_fidelity(cases, model, engine, output, *runs):
 
 if __name__ == '__main__':
     if sys.argv[1] == 'forward':
-        forward(*sys.argv[3:8])
+        forward(*sys.argv[2:7])
     elif sys.argv[1] == 'pieces':
-        pieces(*sys.argv[3:])
+        pieces(*sys.argv[2:])
     elif sys.argv[1] == 'engine':
-        engine_fidelity(*sys.argv[3:])
+        engine_fidelity(*sys.argv[2:])
     elif sys.argv[1] == 'imatrix':
-        # imatrix tools/ casos-calibración/ modelo-original/ salida.npz
+        # imatrix casos-calibración/ modelo-original/ salida.npz
         STATS = {'gate_up': np.zeros((LAYERS, E, H)), 'down': np.zeros((LAYERS, E, I)), 'n': np.zeros((LAYERS, E), np.int64)}
         with tempfile.TemporaryDirectory() as folder:
-            forward('calibracion', '-', sys.argv[3], sys.argv[4], folder, ())
-        np.savez(sys.argv[5], **STATS)
+            forward('calibracion', '-', sys.argv[2], sys.argv[3], folder, ())
+        np.savez(sys.argv[4], **STATS)
     elif sys.argv[1] == 'export-imatrix':
-        # export-imatrix tools/ modelo-original/ captura.npz carpeta/: la misma importancia
+        # export-imatrix modelo-original/ captura.npz carpeta/: la misma importancia
         # que mide Hq44Importance, en f32 [expertos, columnas físicas] para --importance.
-        importance, folder = Hq44Importance(sys.argv[3], sys.argv[4]).importance, Path(sys.argv[5])
+        importance, folder = Hq44Importance(sys.argv[2], sys.argv[3]).importance, Path(sys.argv[4])
         folder.mkdir()
         for layer in range(LAYERS):
             for kind, values in importance.items():
@@ -682,4 +665,4 @@ if __name__ == '__main__':
                 padded[:, :values.shape[-1]] = values[layer]
                 padded.tofile(folder/f'layer{layer}.{kind}.f32')
     else:
-        compare(*sys.argv[3:])
+        compare(*sys.argv[2:])

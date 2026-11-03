@@ -4,6 +4,14 @@ Actualizado: **2026-09-19**, con descompresión vectorizada validada sobre `93af
 estado operativo. Los planes e informes fechados conservan sus resultados de
 entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 
+## Contenedor HNFv10 (2026-11-03)
+
+El motor solo carga HNFv10 (`src/hnf10.cpp`, especificación en
+`helios_convert_v10/docs/HNFV10.md`). Hoy solo el 26B MoE está en HNFv10. Las
+capacidades de la tabla siguiente se probaron con HNFv9; esos ficheros ya no cargan y
+cada modelo tiene que pasar antes por `hnf10 migrate`, que todavía no migra bloques de
+visión.
+
 ## Capacidades contrastadas
 
 | Área | Estado y evidencia |
@@ -40,13 +48,13 @@ Fuente: [src/dtype.cpp](src/dtype.cpp).
 | HQ52K | 184 | 5,75 |
 | HQ62K (descartado) | 264 | 8,25 |
 | HQ44 (`hq44k_g16`) | 152 | 4,75 |
-| HQ8K (sin kernel aún) | 272 | 8,50 |
+| HQ8K | 272 | 8,50 |
 
 Incluyen metadatos del bloque; no incluyen otros tensores ni el contenedor.
 HQ62K quedó descartado el 2026-11-02: tiene el doble de error que HQ8K con casi
 los mismos bits. Su lookup de embeddings se conserva para leer HNF antiguos.
-HQ8K está definido en el conversor pero el motor aún no lo carga. Qué formatos
-valen: `helios_convert_v9.1/docs/HQS_FORMATOS.md`.
+HQ8K es la parte densa del 26B MoE. Qué formatos valen:
+`helios_convert_v10/docs/HQS_FORMATOS.md`.
 
 ## Qué queda después del trabajo reciente
 

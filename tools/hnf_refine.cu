@@ -18,9 +18,9 @@
 // tokens con los expertos nuevos para obtener la entrada de la capa siguiente.
 //
 // Solo cambian los bytes de los códigos de los expertos, en las mismas posiciones: el
-// tamaño y el layout del HNF no cambian. El manifiesto no se toca; lo sella el conversor.
+// tamaño y el layout del HNF no cambian. Los metadatos no se tocan; los cierra `hnf10 seal`.
 //
-// Con un HNFv10 la salida no se crea aquí: `hnf10 begin-edit --from entrada --to salida` la
+// La salida no se crea aquí: `hnf10 begin-edit --from entrada --to salida` la
 // copia y la deja «en curso», las capas se cargan de la entrada (completa) y los códigos se
 // escriben en la salida; al terminar, `hnf10 seal salida --record trabajo/record.json`.
 // Reanudable: en --work quedan el estado tras cada capa terminada y un registro.
@@ -76,7 +76,7 @@ double seconds_since(std::chrono::steady_clock::time_point start) {
 }
 
 // ---------------------------------------------------------------------------
-// JSON mínimo: lo justo para el manifiesto del HNF y las cabeceras de safetensors.
+// JSON mínimo: lo justo para las cabeceras de safetensors y su índice.
 struct Json {
     enum Type { Null, Bool, Number, String, Array, Object } type = Null;
     double number = 0;
@@ -194,19 +194,6 @@ void pwrite_all(int fd, const void* data, size_t bytes, uint64_t offset) {
     }
 }
 
-Json read_manifest(const fs::path& hnf) {
-    std::ifstream f(hnf, std::ios::binary);
-    if (!f) throw std::runtime_error("no abro " + hnf.string());
-    uint64_t where[2];
-    f.seekg(32);
-    f.read(reinterpret_cast<char*>(where), sizeof(where));
-    std::string text(where[1], '\0');
-    f.seekg(std::streamoff(where[0]));
-    f.read(text.data(), std::streamsize(text.size()));
-    if (!f) throw std::runtime_error("manifiesto ilegible");
-    return JsonParser(text).parse();
-}
-
 // Un tensor de expertos: dónde están sus bytes en el HNF y de dónde sale en el checkpoint.
 struct ExpertTensor {
     uint64_t offset = 0, size = 0;
@@ -242,7 +229,7 @@ public:
         if (entry.at("dtype").string != "BF16") throw std::runtime_error(source + " no es BF16");
         const auto& shape = entry.at("shape").array;
         if (shape.size() != 3 || shape[0].u64() != t.experts || shape[1].u64() != t.rows || shape[2].u64() != t.logical)
-            throw std::runtime_error(source + ": forma distinta de la del manifiesto");
+            throw std::runtime_error(source + ": forma distinta de la del índice HNFv10");
         t.source_offset = bases_[file->second] + entry.at("data_offsets").array[0].u64();
     }
 private:
@@ -410,18 +397,16 @@ int main(int argc, char** argv) try {
     if (work_dir.empty()) work_dir = importance_only ? output_path / "estado" : fs::path(output_path.string() + ".refine");
     fs::create_directories(work_dir);
     const auto start = std::chrono::steady_clock::now();
-    bool v10 = false;
-    { std::ifstream probe(input_path, std::ios::binary); v10 = hnf10::is_hnf10(probe); }
-    // El HNF que se carga: con v9, la copia que se refina; con v10 y al medir importancia, la
-    // entrada tal cual (la salida v10 está «en curso» y el cargador no la acepta, con razón).
-    const fs::path model_path = (importance_only || v10) ? input_path : output_path;
+    // Las capas se cargan siempre de la entrada, completa; la salida, «en curso», no la acepta
+    // el cargador, con razón.
+    const fs::path model_path = input_path;
     hnf10::Contents index10;
-    if (v10) {
+    {
         std::ifstream in(input_path, std::ios::binary);
         std::string error;
         if (!hnf10::read(in, index10, error)) throw std::runtime_error(error);
         if (!importance_only) {
-            if (!fs::exists(output_path)) throw std::runtime_error("con HNFv10, crea antes la salida con: hnf10 begin-edit --from entrada --to salida");
+            if (!fs::exists(output_path)) throw std::runtime_error("crea antes la salida con: hnf10 begin-edit --from entrada --to salida");
             std::ifstream out(output_path, std::ios::binary);
             hnf10::Contents edited;
             if (!hnf10::is_hnf10(out) || !hnf10::read(out, edited, error, true)) throw std::runtime_error("salida: " + error);
@@ -432,26 +417,6 @@ int main(int argc, char** argv) try {
                     edited.tensors[i].size != index10.tensors[i].size)
                     throw std::runtime_error("la salida no tiene el índice de la entrada: " + edited.tensors[i].name);
         }
-    }
-
-    // Salida v9: copia de la entrada, que nunca se modifica.
-    if (!v10 && !importance_only && !fs::exists(output_path)) {
-        std::cerr << "copiando " << input_path << " -> " << output_path << std::endl;
-        const fs::path part = output_path.string() + ".part";
-        fs::copy_file(input_path, part, fs::copy_options::overwrite_existing);
-        fs::rename(part, output_path);
-    }
-    // Con v10 la salida crece con los metadatos de la edición; su correspondencia con la
-    // entrada se comprueba por el índice, arriba.
-    if (!v10 && !importance_only && fs::file_size(output_path) != fs::file_size(input_path))
-        throw std::runtime_error("la salida no tiene el tamaño de la entrada");
-
-    Json manifest;
-    std::map<std::string, const Json*> tensors, sources;
-    if (!v10) {
-        manifest = read_manifest(model_path);
-        for (const Json& t : manifest.at("tensors").array) tensors[t.at("name").string] = &t;
-        for (const Json& s : manifest.at("source_tensors").array) sources[s.at("canonical").string] = &s;
     }
 
     HnfLoader meta;
@@ -467,38 +432,21 @@ int main(int argc, char** argv) try {
     if (!importance_only) checkpoint = std::make_unique<Checkpoint>(model_dir);
     auto expert_tensor = [&](uint32_t layer, const char* kind) {
         const std::string name = "text.layer" + std::to_string(layer) + ".moe.experts." + kind + ".weight";
-        if (v10) {
-            for (const auto& t : index10.tensors) {
-                if (t.name != name) continue;
-                if (t.dtype != "hq44k_g16" || t.shape.size() != 3 || t.experts != t.shape[0]) throw std::runtime_error(name + " no es un HQ44 de expertos");
-                ExpertTensor out;
-                out.offset = t.offset;
-                out.size = t.size;
-                out.experts = t.shape[0];
-                out.rows = t.shape[1];
-                out.physical = t.shape[2];
-                out.logical = uint32_t(t.logical_last);
-                if (out.stride() * out.experts != out.size) throw std::runtime_error(name + ": tamaño inesperado");
-                if (checkpoint) checkpoint->locate(t.source, out);
-                return out;
-            }
-            throw std::runtime_error("HNFv10 sin " + name);
+        for (const auto& t : index10.tensors) {
+            if (t.name != name) continue;
+            if (t.dtype != "hq44k_g16" || t.shape.size() != 3 || t.experts != t.shape[0]) throw std::runtime_error(name + " no es un HQ44 de expertos");
+            ExpertTensor out;
+            out.offset = t.offset;
+            out.size = t.size;
+            out.experts = t.shape[0];
+            out.rows = t.shape[1];
+            out.physical = t.shape[2];
+            out.logical = uint32_t(t.logical_last);
+            if (out.stride() * out.experts != out.size) throw std::runtime_error(name + ": tamaño inesperado");
+            if (checkpoint) checkpoint->locate(t.source, out);
+            return out;
         }
-        const Json& t = *tensors.at(name);
-        const Json& s = *sources.at(name);
-        if (t.at("dtype").string != "hq44k_g16") throw std::runtime_error(name + " no es HQ44");
-        ExpertTensor out;
-        out.offset = t.at("offset").u64();
-        out.size = t.at("size").u64();
-        const auto& logical = s.at("logical_shape").array;
-        const auto& physical = s.at("physical_shape").array;
-        out.experts = uint32_t(logical[0].u64());
-        out.rows = uint32_t(logical[1].u64());
-        out.logical = uint32_t(logical[2].u64());
-        out.physical = uint32_t(physical[2].u64());
-        if (out.stride() * out.experts != out.size) throw std::runtime_error(name + ": tamaño inesperado");
-        if (checkpoint) checkpoint->locate(s.at("source").string, out);
-        return out;
+        throw std::runtime_error("HNFv10 sin " + name);
     };
 
     const Calibration calibration = read_calibration(calibration_dir);
@@ -535,8 +483,8 @@ int main(int argc, char** argv) try {
     }
     if (hidden.size() != calibration.tokens * H) throw std::runtime_error("estado de calibración incompleto");
 
-    // Se leen y escriben los códigos en la salida (v9: también es lo que se carga; v10: la copia
-    // en edición). Al medir importancia, solo se lee la entrada.
+    // Los códigos se leen y escriben en la salida, la copia en edición; al medir importancia,
+    // solo se lee la entrada.
     const fs::path written = importance_only ? input_path : output_path;
     const int fd = ::open(written.c_str(), importance_only ? O_RDONLY : O_RDWR);
     if (fd < 0) throw std::runtime_error("no abro " + written.string());
@@ -841,7 +789,7 @@ int main(int argc, char** argv) try {
         log.flush();
     }
     ::close(fd);
-    // Registro para `hnf-seal` del conversor (refinado) o para quien lea la importancia.
+    // Registro para `hnf10 seal` (refinado) o para quien lea la importancia.
     {
         std::ostringstream record;
         record << "{\n \"tool\": \"hnf_refine\",\n \"mode\": \"" << (importance_only ? "importance" : "gptq") << "\",\n"

@@ -2,6 +2,7 @@
 // passing a real HNF optionally exercises the 659-tensor load/unload cycle.
 
 #include "gemma4_vision_validator.hpp"
+#include "hnf10_test_writer.hpp"
 #include "model_capabilities.hpp"
 
 #include <array>
@@ -102,50 +103,12 @@ std::vector<uint8_t> make_gm4v_hints(bool corrupt_record_size) {
 }
 
 std::string write_mock_hnf(const std::string& path, bool corrupt_record_size) {
-    const std::vector<uint8_t> binary_hints =
-        make_gm4v_hints(corrupt_record_size);
-    const uint64_t vision_offset = align32(HNF_HEADER_SIZE + HNF_BLOCK_TABLE_SIZE);
-    const uint64_t vision_size = 2;
-    const uint64_t hints_offset = align32(vision_offset + vision_size);
-    const uint64_t manifest_offset = align32(hints_offset + binary_hints.size());
-    const std::string manifest = std::string{R"({"version":"9.1","tensors":[{
-        "name":"vision.scalar","dtype":"fp16","block":"vision",
-        "shape":[],"offset":)"} + std::to_string(vision_offset) +
-        R"(,"size":2}]})";
-
-    HnfHeader header{};
-    std::memcpy(header.magic, HNF_MAGIC, sizeof(HNF_MAGIC));
-    header.version_major = 9;
-    header.version_minor = 1;
-    header.flags = HNF_HAS_VISION | HNF_HAS_EXEC_HINTS_BIN | HNF_IS_MULTIMODAL;
-    header.block_count = HNF_BLOCK_COUNT;
-    header.header_size = HNF_HEADER_SIZE;
-    header.block_table_offset = HNF_HEADER_SIZE;
-    header.manifest_offset = manifest_offset;
-    header.manifest_size = manifest.size();
-    header.file_size = manifest_offset + manifest.size();
-
-    std::array<BlockEntry, HNF_BLOCK_COUNT> blocks{};
-    blocks[BLOCK_VISION] = {BLOCK_VISION, BLOCK_VISION,
-                            vision_offset, vision_size, 0};
-    blocks[BLOCK_EXEC_HINTS_BIN] = {BLOCK_EXEC_HINTS_BIN, BLOCK_EXEC_HINTS_BIN,
-                                   hints_offset, binary_hints.size(), 0};
-
-    std::vector<uint8_t> file(header.file_size, 0);
-    write_at(file, 0, header);
-    std::memcpy(file.data() + header.block_table_offset, blocks.data(),
-                sizeof(BlockEntry) * blocks.size());
+    // HNFv10 solo de visión: un escalar (forma [1]; HNFv10 no tiene rango 0) y la configuración GM4V.
     const uint16_t one = 0x3c00;
-    std::memcpy(file.data() + vision_offset, &one, sizeof(one));
-    std::memcpy(file.data() + hints_offset, binary_hints.data(),
-                binary_hints.size());
-    std::memcpy(file.data() + manifest_offset, manifest.data(), manifest.size());
-
-    std::ofstream output(path, std::ios::binary);
-    require(output.is_open(), "cannot create GM4V mock HNF");
-    output.write(reinterpret_cast<const char*>(file.data()), file.size());
-    require(output.good(), "cannot write GM4V mock HNF");
-    return path;
+    hnf10_test::Component vision{1, hnf10_test::VISION, true, "visión",
+                                 {{"vision.scalar", "fp16", {1}, {uint8_t(one & 0xff), uint8_t(one >> 8)}}}, {}};
+    hnf10_test::Component config{2, hnf10_test::CONFIG, true, "configuración", {}, make_gm4v_hints(corrupt_record_size)};
+    return hnf10_test::write(path, hnf10_test::build({vision, config}));
 }
 
 void test_synthetic_contract() {

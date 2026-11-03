@@ -1,5 +1,5 @@
 // Configuración efectiva que deja el cargador, clave a clave y ordenada: sirve para
-// comparar dos HNF del mismo modelo (por ejemplo HNFv9 frente a su migración a HNFv10).
+// comparar dos HNF del mismo modelo (por ejemplo antes y después de una edición de pesos).
 // uso: hnf_config_dump modelo.hnf
 #include "hnf_loader.hpp"
 

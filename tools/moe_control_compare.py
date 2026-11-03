@@ -1,6 +1,6 @@
 """Compara los volcados de gemma4_moe_control_replay con referencias en CPU.
 
-uso: moe_control_compare.py tools-del-conversor/ modelo.hnf modelo-original/ captura/ pilot-down/ replay-gpu/ informe.json [pilot-shared-down/]
+uso: moe_control_compare.py modelo.hnf modelo-original/ captura/ pilot-down/ replay-gpu/ informe.json [pilot-shared-down/]
 
 Kernel: mismos pesos en ambos lados. Calidad: pesos down originales con la misma
 activación capturada, para aislar down; shared_branch_post queda fijo en la GPU.
@@ -12,10 +12,11 @@ import sys
 from pathlib import Path
 import numpy as np
 
-tools, hnf, model, capture, payloads, replay, report_path = sys.argv[1:8]
-shared_payloads = Path(sys.argv[8]) if len(sys.argv) > 8 else None
-sys.path.insert(0, tools)
-from moe_capture_common import Weights, decode_hq44, h16
+hnf, model, capture, payloads, replay, report_path = sys.argv[1:7]
+shared_payloads = Path(sys.argv[7]) if len(sys.argv) > 7 else None
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from gemma4_reference_common import Weights, h16
+from hnf10 import decode_hq44
 capture, payloads, replay = Path(capture), Path(payloads), Path(replay)
 
 LAYERS, VARIANTS = (0, 5, 15, 29), ('unit', 'second_moment', 'routing_weighted')
