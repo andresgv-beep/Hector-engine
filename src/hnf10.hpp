@@ -33,6 +33,8 @@ struct Tensor {
     std::vector<uint32_t> shape;
     uint64_t offset = 0, size = 0;
     uint32_t experts = 0;
+    uint64_t logical_last = 0;     // columnas lógicas de la última dimensión (relleno GM4X)
+    std::string source;            // nombre en el checkpoint
 };
 
 struct Property {
@@ -47,6 +49,7 @@ struct Property {
 
 struct Contents {
     uint64_t sequence = 0, file_size = 0;
+    uint32_t state = 0;            // 1 completo, 2 en curso (solo con allow_in_progress)
     std::vector<Component> components;
     std::vector<Tensor> tensors;
     std::vector<Property> properties;
@@ -59,7 +62,8 @@ struct Contents {
 // ¿Empieza el fichero por el magic de HNFv10?
 bool is_hnf10(std::ifstream& file);
 
-// Lee y valida. Devuelve false con el motivo en `error`.
-bool read(std::ifstream& file, Contents& out, std::string& error);
+// Lee y valida. Devuelve false con el motivo en `error`. Con `allow_in_progress`, acepta que la
+// cabecera vigente diga «en curso»: solo para la herramienta que está modificando los pesos.
+bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_progress = false);
 
 } } // helios::hnf10

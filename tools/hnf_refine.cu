@@ -19,11 +19,16 @@
 //
 // Solo cambian los bytes de los códigos de los expertos, en las mismas posiciones: el
 // tamaño y el layout del HNF no cambian. El manifiesto no se toca; lo sella el conversor.
+//
+// Con un HNFv10 la salida no se crea aquí: `hnf10 begin-edit --from entrada --to salida` la
+// copia y la deja «en curso», las capas se cargan de la entrada (completa) y los códigos se
+// escriben en la salida; al terminar, `hnf10 seal salida --record trabajo/record.json`.
 // Reanudable: en --work quedan el estado tras cada capa terminada y un registro.
 #include "gemma4_kv_cache.hpp"
 #include "gemma4_split.hpp"
 #include "gptq.hpp"
 #include "graph_builder.hpp"
+#include "hnf10.hpp"
 #include "hnf_loader.hpp"
 #include "kernels.hpp"
 
@@ -405,11 +410,32 @@ int main(int argc, char** argv) try {
     if (work_dir.empty()) work_dir = importance_only ? output_path / "estado" : fs::path(output_path.string() + ".refine");
     fs::create_directories(work_dir);
     const auto start = std::chrono::steady_clock::now();
-    // El HNF que se carga: la copia que se refina, o la entrada tal cual al medir importancia.
-    const fs::path model_path = importance_only ? input_path : output_path;
+    bool v10 = false;
+    { std::ifstream probe(input_path, std::ios::binary); v10 = hnf10::is_hnf10(probe); }
+    // El HNF que se carga: con v9, la copia que se refina; con v10 y al medir importancia, la
+    // entrada tal cual (la salida v10 está «en curso» y el cargador no la acepta, con razón).
+    const fs::path model_path = (importance_only || v10) ? input_path : output_path;
+    hnf10::Contents index10;
+    if (v10) {
+        std::ifstream in(input_path, std::ios::binary);
+        std::string error;
+        if (!hnf10::read(in, index10, error)) throw std::runtime_error(error);
+        if (!importance_only) {
+            if (!fs::exists(output_path)) throw std::runtime_error("con HNFv10, crea antes la salida con: hnf10 begin-edit --from entrada --to salida");
+            std::ifstream out(output_path, std::ios::binary);
+            hnf10::Contents edited;
+            if (!hnf10::is_hnf10(out) || !hnf10::read(out, edited, error, true)) throw std::runtime_error("salida: " + error);
+            if (edited.state != 2) throw std::runtime_error("la salida no está en edición: crea una con hnf10 begin-edit");
+            if (edited.tensors.size() != index10.tensors.size()) throw std::runtime_error("la salida no es una copia de la entrada");
+            for (size_t i = 0; i < edited.tensors.size(); ++i)
+                if (edited.tensors[i].name != index10.tensors[i].name || edited.tensors[i].offset != index10.tensors[i].offset ||
+                    edited.tensors[i].size != index10.tensors[i].size)
+                    throw std::runtime_error("la salida no tiene el índice de la entrada: " + edited.tensors[i].name);
+        }
+    }
 
-    // Salida: copia de la entrada, que nunca se modifica.
-    if (!importance_only && !fs::exists(output_path)) {
+    // Salida v9: copia de la entrada, que nunca se modifica.
+    if (!v10 && !importance_only && !fs::exists(output_path)) {
         std::cerr << "copiando " << input_path << " -> " << output_path << std::endl;
         const fs::path part = output_path.string() + ".part";
         fs::copy_file(input_path, part, fs::copy_options::overwrite_existing);
@@ -418,10 +444,13 @@ int main(int argc, char** argv) try {
     if (!importance_only && fs::file_size(output_path) != fs::file_size(input_path))
         throw std::runtime_error("la salida no tiene el tamaño de la entrada");
 
-    const Json manifest = read_manifest(model_path);
+    Json manifest;
     std::map<std::string, const Json*> tensors, sources;
-    for (const Json& t : manifest.at("tensors").array) tensors[t.at("name").string] = &t;
-    for (const Json& s : manifest.at("source_tensors").array) sources[s.at("canonical").string] = &s;
+    if (!v10) {
+        manifest = read_manifest(model_path);
+        for (const Json& t : manifest.at("tensors").array) tensors[t.at("name").string] = &t;
+        for (const Json& s : manifest.at("source_tensors").array) sources[s.at("canonical").string] = &s;
+    }
 
     HnfLoader meta;
     if (!meta.open(model_path.string())) throw std::runtime_error(meta.last_error());
@@ -436,6 +465,23 @@ int main(int argc, char** argv) try {
     if (!importance_only) checkpoint = std::make_unique<Checkpoint>(model_dir);
     auto expert_tensor = [&](uint32_t layer, const char* kind) {
         const std::string name = "text.layer" + std::to_string(layer) + ".moe.experts." + kind + ".weight";
+        if (v10) {
+            for (const auto& t : index10.tensors) {
+                if (t.name != name) continue;
+                if (t.dtype != "hq44k_g16" || t.shape.size() != 3 || t.experts != t.shape[0]) throw std::runtime_error(name + " no es un HQ44 de expertos");
+                ExpertTensor out;
+                out.offset = t.offset;
+                out.size = t.size;
+                out.experts = t.shape[0];
+                out.rows = t.shape[1];
+                out.physical = t.shape[2];
+                out.logical = uint32_t(t.logical_last);
+                if (out.stride() * out.experts != out.size) throw std::runtime_error(name + ": tamaño inesperado");
+                if (checkpoint) checkpoint->locate(t.source, out);
+                return out;
+            }
+            throw std::runtime_error("HNFv10 sin " + name);
+        }
         const Json& t = *tensors.at(name);
         const Json& s = *sources.at(name);
         if (t.at("dtype").string != "hq44k_g16") throw std::runtime_error(name + " no es HQ44");
@@ -487,8 +533,11 @@ int main(int argc, char** argv) try {
     }
     if (hidden.size() != calibration.tokens * H) throw std::runtime_error("estado de calibración incompleto");
 
-    const int fd = ::open(model_path.c_str(), importance_only ? O_RDONLY : O_RDWR);
-    if (fd < 0) throw std::runtime_error("no abro " + model_path.string());
+    // Se leen y escriben los códigos en la salida (v9: también es lo que se carga; v10: la copia
+    // en edición). Al medir importancia, solo se lee la entrada.
+    const fs::path written = importance_only ? input_path : output_path;
+    const int fd = ::open(written.c_str(), importance_only ? O_RDONLY : O_RDWR);
+    if (fd < 0) throw std::runtime_error("no abro " + written.string());
     std::ofstream log(work_dir / (importance_only ? "importance.log" : "refine.log"), std::ios::app);
     log << "inicio capa " << first_layer << " damp " << damp << " casos " << calibration.names.size()
         << " tokens " << calibration.tokens << '\n';

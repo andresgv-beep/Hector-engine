@@ -290,6 +290,10 @@ target_link_libraries(inspect_hnf PRIVATE helios-engine)
 add_executable(helios_model_probe tools/helios_model_probe.cpp)
 target_link_libraries(helios_model_probe PRIVATE helios-engine)
 
+# Lector HNFv10 con ficheros del escritor de Rust (helios_convert_v10, `hnf10 fixtures`).
+add_executable(test_hnf10 tests/test_hnf10.cpp)
+target_link_libraries(test_hnf10 PRIVATE helios-engine)
+
 # Configuración efectiva clave a clave, para comparar formatos del mismo modelo.
 add_executable(hnf_config_dump tools/hnf_config_dump.cpp)
 target_link_libraries(hnf_config_dump PRIVATE helios-engine)
@@ -341,6 +345,7 @@ add_test(NAME AttentionPrefillTest COMMAND test_attention_prefill)
 add_executable(test_attention_prefill_model tests/test_attention_prefill_model.cu)
 target_link_libraries(test_attention_prefill_model PRIVATE helios-engine)
 add_test(NAME GptqTest COMMAND test_gptq)
+add_test(NAME Hnf10ReaderTest COMMAND test_hnf10 ${CMAKE_SOURCE_DIR}/tests/data/hnf10)
 add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 add_test(NAME CkPolicyTest COMMAND test_ck_policy)

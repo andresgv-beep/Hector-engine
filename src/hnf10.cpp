@@ -85,7 +85,7 @@ bool is_hnf10(std::ifstream& file) {
     return yes;
 }
 
-bool read(std::ifstream& file, Contents& out, std::string& error) {
+bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_progress) {
     file.clear();
     file.seekg(0, std::ios::end);
     const uint64_t length = uint64_t(file.tellg());
@@ -109,7 +109,8 @@ bool read(std::ifstream& file, Contents& out, std::string& error) {
         if (!found || h.sequence > best.sequence) { best = h; metadata.swap(bytes); found = true; }
     }
     if (!found) { error = "HNFv10 sin ninguna cabecera válida"; return false; }
-    if (best.state != 1) { error = "HNFv10 con una escritura de pesos en curso: repararlo antes de usarlo"; return false; }
+    if (best.state != 1 && !allow_in_progress) { error = "HNFv10 con una escritura de pesos en curso: repararlo antes de usarlo"; return false; }
+    out.state = best.state;
     out.sequence = best.sequence;
     out.file_size = best.file_size;
 
@@ -155,9 +156,9 @@ bool read(std::ifstream& file, Contents& out, std::string& error) {
         x.name = t.s(); x.component = t.u32(); x.layer = int32_t(t.u32()); x.dtype = t.s();
         const uint32_t rank = t.u32(); t.u32();
         for (uint32_t d = 0; d < 4; ++d) { const uint64_t v = t.u64(); if (d < rank) x.shape.push_back(uint32_t(v)); }
-        t.u64();                                            // columnas lógicas
+        x.logical_last = t.u64();
         x.offset = t.u64(); x.size = t.u64(); x.experts = t.u32(); t.u32();
-        hashes.push_back(t.h()); t.s(); t.u64();            // origen y su hash
+        hashes.push_back(t.h()); x.source = t.s(); t.u64();  // hash del origen
         if (rank < 1 || rank > 4) { error = "rango de tensor no admitido: " + x.name; return false; }
         out.tensors.push_back(std::move(x));
     }

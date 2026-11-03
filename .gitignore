@@ -12,3 +12,6 @@ build-*/
 # Python
 __pycache__/
 *.pyc
+
+# HNFv10 pequeños de prueba, generados por `hnf10 fixtures` (helios_convert_v10).
+!tests/data/hnf10/*.hnf
