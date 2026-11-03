@@ -58,6 +58,7 @@ public:
           loader_(loader), graph_(graph), text_arch_(text_arch),
           max_prefill_tokens_(max_prefill_tokens),
           text_forward_(std::move(placement.text_forward)),
+          resident_(placement.vision_engine != nullptr),
           // 26B: los soft tokens de una imagen se ven entre sí en las capas
           // deslizantes (upstream use_bidirectional_attention="vision"); el
           // texto de alrededor sigue causal y va por el prefill normal.
@@ -250,11 +251,14 @@ private:
         if (!was_loaded && !loader_.load_block(BLOCK_VISION, vision_engine_)) {
             return fail(error, "cannot load vision block: " + loader_.last_error());
         }
-        const bool keep_mapped = [] {
+        // Se queda cargada con HELIOS_VISION_MMAP=1 (pesos mapeados en RAM) o
+        // cuando el reparto entre GPUs ya le guardó su sitio en la secundaria:
+        // así cada imagen no vuelve a subir 1,15 GB. Si no, se carga por turno.
+        const bool keep = resident_ || [] {
             const char* value = std::getenv("HELIOS_VISION_MMAP");
             return value && value[0] == '1';
         }();
-        loaded_vision_here_ = !was_loaded && keep_mapped;
+        if (!was_loaded && keep) loaded_vision_here_ = true;
 
         bool ok = false;
         {
@@ -293,7 +297,7 @@ private:
             }
         }
 
-        if (!was_loaded && !keep_mapped) {
+        if (!was_loaded && !keep) {
             if (!loader_.unload_block(BLOCK_VISION, vision_engine_)) {
                 return fail(error, "cannot unload transient vision block");
             }
@@ -313,6 +317,7 @@ private:
     const ArchDescriptor& text_arch_;
     uint32_t max_prefill_tokens_ = 0;
     MultimodalTextForward text_forward_;
+    bool resident_ = false;
     bool image_block_only_ = false;
     bool loaded_vision_here_ = false;
 };

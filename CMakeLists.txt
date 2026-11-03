@@ -314,6 +314,16 @@ add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4VisionPreprocessTest COMMAND test_gemma4_vision_preprocess)
 add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
+# Torre visual del 26B con pesos reales contra el oráculo FP32
+# (tools/gemma4_vision_oracle.py). Se salta si este equipo no tiene los ficheros.
+set(HELIOS_26B_VISION_HNF
+    "$ENV{HOME}/Documentos/GitHub/helios_convert_v10/output/gemma4-26b-moe-dense-hq8-gptq-vision.v10.hnf"
+    CACHE FILEPATH "HNFv10 del 26B con visión para Gemma4VisionRunner26BTest")
+set(HELIOS_26B_VISION_ORACLE "$ENV{HOME}/.cache/helios/gemma4_vision_oracle/26b-fp32"
+    CACHE PATH "Oráculo FP32 de la torre del 26B")
+add_test(NAME Gemma4VisionRunner26BTest
+         COMMAND test_gemma4_vision_runner ${HELIOS_26B_VISION_HNF} ${HELIOS_26B_VISION_ORACLE})
+set_tests_properties(Gemma4VisionRunner26BTest PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
 add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)

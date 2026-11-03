@@ -366,6 +366,14 @@ void test_real_frontier(const std::string& hnf_path,
 int main(int argc, char** argv) {
     test_patch_kernels();
     if (argc == 3) {
+        // Con pesos reales: sin el HNF o el oráculo en este equipo, ctest lo da
+        // por saltado (77), no por fallado.
+        std::ifstream hnf(argv[1]), oracle(std::string(argv[2]) + "/manifest.json");
+        if (!hnf || !oracle) {
+            std::cout << "SKIP: no están " << argv[1] << " o el oráculo " << argv[2]
+                      << std::endl;
+            return 77;
+        }
         test_real_frontier(argv[1], argv[2]);
     } else if (argc != 1) {
         std::cerr << "usage: " << argv[0] << " [vision.hnf oracle_dir]"
