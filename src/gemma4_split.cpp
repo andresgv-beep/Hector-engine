@@ -57,20 +57,14 @@ std::optional<Gemma4SplitPlan> plan_gemma4_split(
 
 Gemma4Placement plan_gemma4_placement(
     const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes, uint64_t vision_bytes,
-    uint64_t primary_free, uint64_t secondary_free) {
+    uint64_t primary_free, uint64_t secondary_free, bool split_text) {
     Gemma4Placement out;
     uint64_t text = common_bytes;
     for (uint64_t b : layer_bytes) text += b;
     const size_t layers = layer_bytes.size();
-    const auto split = [&](uint64_t secondary_budget, bool force) -> std::optional<Gemma4SplitPlan> {
+    const auto split = [&](uint64_t secondary_budget) -> std::optional<Gemma4SplitPlan> {
+        if (!split_text) return std::nullopt;
         auto plan = plan_gemma4_split(layer_bytes, common_bytes, primary_free, secondary_budget);
-        if (plan && force && layers > 0 && plan->boundary == layers) {
-            // El texto cabe solo en la principal, pero no con la torre: la última capa cruza.
-            plan->boundary = uint32_t(layers - 1);
-            plan->primary_bytes -= layer_bytes.back();
-            plan->secondary_bytes += layer_bytes.back();
-            if (plan->secondary_bytes > secondary_budget) return std::nullopt;
-        }
         if (plan && !plan->split(layers)) return std::nullopt;
         return plan;
     };
@@ -87,8 +81,17 @@ Gemma4Placement plan_gemma4_placement(
         out.primary_bytes = text + vision_bytes;
         return out;
     }
+    // El texto cabe entero en la principal y la torre sola en la secundaria: cada cosa en su
+    // tarjeta, sin mover capas (el decode no cruza de GPU).
+    if (vision_bytes && text <= primary_free && vision_bytes <= secondary_free) {
+        out.fit = Gemma4Fit::Single;
+        out.vision = Gemma4VisionPlace::Secondary;
+        out.primary_bytes = text;
+        out.secondary_bytes = vision_bytes;
+        return out;
+    }
     if (vision_bytes && vision_bytes <= secondary_free) {
-        if (const auto plan = split(secondary_free - vision_bytes, true)) {
+        if (const auto plan = split(secondary_free - vision_bytes)) {
             take(*plan, Gemma4VisionPlace::Secondary);
             return out;
         }
@@ -100,7 +103,7 @@ Gemma4Placement plan_gemma4_placement(
         out.primary_bytes = text;
         return out;
     }
-    if (const auto plan = split(secondary_free, false)) take(*plan, Gemma4VisionPlace::None);
+    if (const auto plan = split(secondary_free)) take(*plan, Gemma4VisionPlace::None);
     return out;
 }
 
@@ -120,7 +123,10 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
         if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
         (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
     }
-    for (size_t i = 0; i < layer_bytes.size(); ++i) {
+    // Las capas con KV compartido no tienen KV propio: leen el de una capa anterior.
+    const size_t first_shared = gemma.num_kv_shared_layers < layer_bytes.size()
+        ? layer_bytes.size() - gemma.num_kv_shared_layers : layer_bytes.size();
+    for (size_t i = 0; i < first_shared; ++i) {
         const Gemma4LayerConfig& layer = gemma.layers[i];
         const uint64_t slots = layer.is_global_attention() ? max_seq : layer.sliding_window + prefill_tokens;
         layer_bytes[i] += 2 * sizeof(uint16_t) * slots * layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
@@ -129,7 +135,7 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
     const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
     check(cudaSetDevice(0), "elegir GPU");
     return plan_gemma4_placement(layer_bytes, common_bytes, loader.block_vram_bytes(BLOCK_VISION),
-                                 primary_free, secondary_free);
+                                 primary_free, secondary_free, gemma.num_kv_shared_layers == 0);
 }
 
 bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer, bool common) {

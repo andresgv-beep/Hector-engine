@@ -530,16 +530,12 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             std::cerr << "[modelo] la visión no cabe junto al texto: se abre solo el texto" << std::endl;
         }
         s.split_boundary = s.placement.boundary;
-        if (s.split_active()) s.engine_config.device = 0;
+        // La segunda GPU hace falta con capas repartidas o con la torre allí sola.
+        const bool second_gpu_used = s.split_active() || s.placement.vision == Gemma4VisionPlace::Secondary;
+        if (second_gpu_used) s.engine_config.device = 0;
         s.engine = std::make_unique<Engine>(s.engine_config);
         kernels::register_all_kernels(*s.engine);
-        if (s.split_active()) {
-            if (s.split_boundary == 0) {
-                std::cerr << "[modelo] todas las capas en GPU 1; embedding y cabeza en GPU 0" << std::endl;
-            } else {
-                std::cerr << "[modelo] capas 0-" << s.split_boundary - 1 << " en GPU 0, "
-                          << s.split_boundary << "-" << layers - 1 << " en GPU 1" << std::endl;
-            }
+        if (second_gpu_used) {
             const cudaError_t second_gpu = cudaSetDevice(1);
             const cudaError_t second_stream = second_gpu == cudaSuccess
                 ? cudaStreamCreate(&s.secondary_stream.handle) : second_gpu;
@@ -551,6 +547,19 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             secondary_config.stream = s.secondary_stream.handle;
             s.secondary_engine = std::make_unique<Engine>(secondary_config);
             kernels::register_all_kernels(*s.secondary_engine);
+            s.engine->activate();
+        }
+        if (!s.split_active() && s.placement.vision == Gemma4VisionPlace::Secondary) {
+            std::cerr << "[modelo] texto entero en GPU 0, visión en GPU 1" << std::endl;
+        }
+        if (s.split_active()) {
+            if (s.split_boundary == 0) {
+                std::cerr << "[modelo] todas las capas en GPU 1; embedding y cabeza en GPU 0" << std::endl;
+            } else {
+                std::cerr << "[modelo] capas 0-" << s.split_boundary - 1 << " en GPU 0, "
+                          << s.split_boundary << "-" << layers - 1 << " en GPU 1" << std::endl;
+            }
+            s.secondary_engine->activate();
             if (!s.secondary_loader.open(config.hnf_path)) {
                 *error = s.secondary_loader.last_error();
                 return nullptr;
@@ -655,11 +664,13 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             std::string adapter_error;
             // The scratch bounds what any adapter may prefill: 6k for the
             // E4B tower path, one text chunk for the unified 12B.
-            // Con el texto repartido, la torre va a la GPU 1 (el reparto le
-            // guardó sitio) y el prefill de la imagen cruza las dos GPUs.
+            // La torre va donde la puso el plan (en la GPU 1 si no cabía con el
+            // texto). Con el texto repartido, el prefill de la imagen cruza las dos.
             MultimodalPlacement placement;
             if (s.placement.vision == Gemma4VisionPlace::Secondary) {
                 placement.vision_engine = s.secondary_engine.get();
+            }
+            if (s.split_active()) {
                 placement.text_forward = [&s](CommandBuffer& input, uint32_t seq,
                                               const KVCacheParams& cache,
                                               Gemma4BidirectionalBlock block) {

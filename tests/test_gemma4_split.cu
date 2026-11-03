@@ -315,11 +315,12 @@ void test_placement() {
     p = plan_gemma4_placement(layers, 50, 200, 1100, 0);
     require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::None && p.vision_dropped,
             "una GPU sin sitio para la torre abre solo el texto");
-    // Dos GPUs, el texto cabría solo en la principal pero no con la torre: la torre va a la
-    // secundaria y la última capa cruza para que el reparto no quede vacío.
-    p = plan_gemma4_placement(layers, 50, 200, 1100, 1000);
-    require(p.fit == Gemma4Fit::Split && p.boundary == 9 && p.vision == Gemma4VisionPlace::Secondary,
-            "la torre a la secundaria con la última capa");
+    // Dos GPUs, el texto cabe solo en la principal pero no con la torre: la torre va sola a la
+    // secundaria y el texto no se reparte. Vale aunque en la secundaria no quepa además una
+    // capa (250 libres: torre 200 sí, torre + capa 300 no).
+    p = plan_gemma4_placement(layers, 50, 200, 1100, 250);
+    require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::Secondary && !p.vision_dropped,
+            "texto entero en la principal y torre sola en la secundaria");
     // Reparto normal con la torre en la secundaria.
     p = plan_gemma4_placement(layers, 50, 200, 450, 1000);
     require(p.fit == Gemma4Fit::Split && p.boundary == 4 && p.vision == Gemma4VisionPlace::Secondary,
@@ -334,6 +335,11 @@ void test_placement() {
     // Ni el texto cabe entre las dos: NoFit, no un 0 que se confunda con «cabe».
     require(plan_gemma4_placement(layers, 50, 0, 450, 500).fit == Gemma4Fit::NoFit, "no cabe");
     require(plan_gemma4_placement(layers, 50, 0, 900, 0).fit == Gemma4Fit::NoFit, "no cabe en una GPU");
+    // KV compartido (E4B): nunca reparte el texto, pero la torre sí puede ir a la secundaria.
+    p = plan_gemma4_placement(layers, 50, 200, 1100, 250, false);
+    require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::Secondary, "E4B: torre sola en la secundaria");
+    require(plan_gemma4_placement(layers, 50, 0, 450, 2000, false).fit == Gemma4Fit::NoFit,
+            "E4B que no cabe en la principal: no se reparte");
     std::cout << "PASS: colocación de texto y visión" << std::endl;
 }
 

@@ -51,13 +51,17 @@ struct Gemma4Placement {
 // El plan, sin CUDA. `vision_bytes` son los pesos más la memoria de trabajo que declara el
 // HNF (0 si no trae visión); `secondary_free` es 0 con una sola GPU.
 //  - Texto y torre caben en la principal: todo allí.
-//  - Si no, con dos GPUs se reparte y la torre va a la secundaria. Si el texto cabría solo en
-//    la principal, la última capa pasa a la secundaria para no tener un reparto vacío.
+//  - Si el texto cabe entero en la principal y la torre sola en la secundaria: cada uno en su
+//    tarjeta, sin repartir capas (Single con la visión en la secundaria).
+//  - Si no, con dos GPUs se reparte el texto y la torre va a la secundaria.
 //  - Si la torre no cabe en ningún sitio, se abre solo el texto (vision_dropped).
 //  - Si ni el texto cabe: NoFit, antes de cargar nada.
+// `split_text` es false en los modelos con KV compartido (E2B/E4B): sus últimas capas leen el
+// KV de capas anteriores y no pueden quedar en otra GPU, así que el texto no se reparte (la
+// torre sí puede ir a la secundaria).
 Gemma4Placement plan_gemma4_placement(
     const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes, uint64_t vision_bytes,
-    uint64_t primary_free, uint64_t secondary_free);
+    uint64_t primary_free, uint64_t secondary_free, bool split_text = true);
 
 // El plan con la VRAM libre de verdad (GPU 0 principal, GPU 1 secundaria si existe), con
 // pesos más KV hasta `max_seq`.
