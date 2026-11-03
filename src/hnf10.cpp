@@ -146,11 +146,12 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
 
     In c{sections[2].first, sections[2].second, 0, strings, strings_size};
     std::vector<Hash> composites;
+    std::vector<uint32_t> formula_of;   // índice en MEMORY de cada componente, o 0xFFFFFFFF
     for (uint32_t n = c.u32(), i = 0; i < n && c.ok; ++i) {
         Component x;
         x.id = c.u32(); x.kind = c.u32(); x.required = (c.u32() & 1) != 0; x.name = c.s();
         x.offset = c.u64(); x.size = c.u64(); const uint32_t alignment = c.u32(); c.u32();
-        c.u64(); c.u32();                                   // bytes de pesos, fórmula de memoria
+        x.weight_bytes = c.u64(); formula_of.push_back(c.u32());
         x.first_tensor = c.u32(); x.tensor_count = c.u32(); c.u32();   // depende de
         composites.push_back(c.h()); c.h();
         if (!known(x.kind) && x.required) { error = "componente obligatorio de tipo desconocido: " + x.name; return false; }
@@ -220,27 +221,41 @@ bool read(std::ifstream& file, Contents& out, std::string& error, bool allow_in_
     }
     // Fórmulas de memoria: variables 1–4, exponentes 1–3, coeficientes finitos y no
     // negativos, y un máximo para cada variable que se use.
+    std::vector<double> at_maximum;   // cada fórmula evaluada en sus máximos
     if (sections.count(4)) {
         In f{sections[4].first, sections[4].second, 0, strings, strings_size};
         for (uint32_t n = f.u32(), i = 0; i < n && f.ok; ++i) {
-            f.u64();
+            double bytes = double(f.u64());
             const uint32_t terms = f.u32(), maxima = f.u32();
             struct Term { uint32_t variable, power; double coefficient; };
             std::vector<Term> list;
             for (uint32_t k = 0; k < terms && f.ok; ++k) { Term t{f.u32(), f.u32(), f.f64()}; list.push_back(t); }
             bool has_max[5] = {};
+            uint64_t max_of[5] = {};
             for (uint32_t k = 0; k < maxima && f.ok; ++k) {
                 const uint32_t v = f.u32(); f.u32(); const uint64_t max = f.u64();
                 if (v < 1 || v > 4 || max == 0 || has_max[v]) { error = "fórmula de memoria con máximos no válidos"; return false; }
                 has_max[v] = true;
+                max_of[v] = max;
             }
-            for (const Term& t : list)
+            for (const Term& t : list) {
                 if (t.variable < 1 || t.variable > 4 || t.power < 1 || t.power > 3 || !(t.coefficient >= 0.0) ||
                     t.coefficient == HUGE_VAL || !has_max[t.variable]) {
                     error = "fórmula de memoria no válida"; return false;
                 }
+                bytes += t.coefficient * std::pow(double(max_of[t.variable]), double(t.power));
+            }
+            at_maximum.push_back(bytes);
         }
         if (!f.ok || f.pos != f.size) { error = "sección de memoria mal formada"; return false; }
+    }
+    for (size_t i = 0; i < out.components.size(); ++i) {
+        const uint32_t formula = formula_of[i];
+        if (formula == 0xFFFFFFFFu) continue;
+        if (formula >= at_maximum.size() || !(at_maximum[formula] < 1.8e19)) {
+            error = "fórmula de memoria inexistente o desbordada: " + out.components[i].name; return false;
+        }
+        out.components[i].working_bytes = uint64_t(std::ceil(at_maximum[formula]));
     }
     std::vector<std::pair<uint64_t, uint64_t>> ranges;
     for (const auto& y : out.tensors) ranges.push_back({y.offset, y.offset + y.size});

@@ -348,7 +348,8 @@ public:
         uint32_t end_layer,
         uint32_t batch_size,
         uint32_t seq_len,
-        const KVCacheParams& cache
+        const KVCacheParams& cache,
+        Gemma4BidirectionalBlock bidirectional = {}
     );
     CommandBuffer build_gemma4_head(
         const ModelConfig& config,

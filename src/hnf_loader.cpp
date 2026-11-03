@@ -107,7 +107,7 @@ bool HnfLoader::open_hnf10(std::ifstream& f) {
     hnf10::Contents contents;
     if (!hnf10::read(f, contents, last_error_)) return false;
     file_size_ = contents.file_size;
-    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) blocks_[i] = BlockEntry{i, i, 0, 0, 0};
+    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) { blocks_[i] = BlockEntry{i, i, 0, 0, 0}; block_vram_[i] = 0; }
     const hnf10::Component* text = nullptr;
     std::map<uint32_t, std::string> block_of;   // id de componente -> nombre de bloque de sus tensores
     for (const auto& c : contents.components) {
@@ -131,6 +131,7 @@ bool HnfLoader::open_hnf10(std::ifstream& f) {
         }
         if (blocks_[block].size != 0) { last_error_ = "HNFv10: dos componentes del mismo tipo: " + c.name; return false; }
         blocks_[block] = BlockEntry{block, block, c.offset, c.size, 0};
+        block_vram_[block] = c.weight_bytes + c.working_bytes;
     }
     // Puede no haber texto: un HNF solo de visión acompaña a otro de texto (--multimodal).
     (void)text;
@@ -1294,8 +1295,9 @@ bool HnfLoader::parse_gemma4_vision_extension(
         return false;
     }
 
+    // Clamps aprendidos (E2B/E4B) y standardize (26B) dependen de la torre; el
+    // resto del contrato es común.
     constexpr uint32_t required_flags =
-        GEMMA4_VISION_FLAG_CLIPPED_LINEARS |
         GEMMA4_VISION_FLAG_DYNAMIC_TOKENS |
         GEMMA4_VISION_FLAG_LEARNED_XY_POS |
         GEMMA4_VISION_FLAG_ROPE_2D |
@@ -1310,11 +1312,9 @@ bool HnfLoader::parse_gemma4_vision_extension(
         GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN |
         GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE;
     constexpr uint32_t supported_flags = required_flags |
-        GEMMA4_VISION_FLAG_STANDARDIZE | GEMMA4_VISION_FLAG_NORMALIZE;
+        GEMMA4_VISION_FLAG_CLIPPED_LINEARS | GEMMA4_VISION_FLAG_STANDARDIZE;
     if ((extension.flags & required_flags) != required_flags ||
-        (extension.flags & ~supported_flags) != 0 ||
-        (extension.flags & GEMMA4_VISION_FLAG_STANDARDIZE) != 0 ||
-        (extension.flags & GEMMA4_VISION_FLAG_NORMALIZE) != 0) {
+        (extension.flags & ~supported_flags) != 0) {
         last_error_ = "GM4V flags request an unsupported vision contract";
         return false;
     }

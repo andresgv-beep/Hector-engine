@@ -190,6 +190,18 @@ void launch_gemma4_vision_pool3x3_fp32(
     cudaStream_t stream = nullptr
 );
 
+// Gemma 4 standardize (26B): output = fp16((input - bias) * scale), in FP32.
+// The pooled features pass the FP16 range before the bias subtraction cancels
+// them, so this replaces the plain FP32→FP16 cast when the tower declares it.
+void launch_gemma4_vision_standardize_fp16(
+    const float* input,
+    const half* bias,
+    const half* scale,
+    half* output,
+    uint32_t rows,
+    uint32_t hidden_size,
+    cudaStream_t stream);
+
 void launch_fp32_to_fp16(
     const float* input,
     half* output,

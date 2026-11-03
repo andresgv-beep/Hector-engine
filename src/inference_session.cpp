@@ -597,9 +597,13 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         // Conservar el techo multimodal para los demás caminos.
         const bool multimodal_file = !config.multimodal_hnf_path.empty();
         // The unified adapter only prefills the attachment itself (<= 752
-        // tokens); the surrounding text goes through the normal chunks.
-        const uint32_t scratch_tokens = s.is_gemma4 && !s.loader.has_gemma4_vision_config()
-                                            ? kPrefillChunk : kScratchTokens;
+        // tokens); the surrounding text goes through the normal chunks. So does
+        // a tower whose image block is bidirectional (26B, ~282 tokens).
+        const bool image_block_only = s.loader.config().get<std::string>(
+            "use_bidirectional_attention", "") == "vision";
+        const uint32_t scratch_tokens =
+            s.is_gemma4 && (!s.loader.has_gemma4_vision_config() || image_block_only)
+                ? kPrefillChunk : kScratchTokens;
         s.engine->tensors().allocate_and_register(
             "input_tokens", {1, scratch_tokens}, dtype::INT32());
         if (s.is_gemma4) {
@@ -633,9 +637,32 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             std::string adapter_error;
             // The scratch bounds what any adapter may prefill: 6k for the
             // E4B tower path, one text chunk for the unified 12B.
+            // Con el texto repartido, la torre va a la GPU 1 (el reparto le
+            // guardó sitio) y el prefill de la imagen cruza las dos GPUs.
+            MultimodalPlacement placement;
+            if (s.split) {
+                placement.vision_engine = s.secondary_engine.get();
+                placement.text_forward = [&s](CommandBuffer& input, uint32_t seq,
+                                              const KVCacheParams& cache,
+                                              Gemma4BidirectionalBlock block) {
+                    const Gemma4Config& gemma = s.loader.gemma4_config();
+                    s.split->update_device_cache_pos(int32_t(cache.cache_position), int32_t(seq));
+                    s.secondary_engine->activate();
+                    CommandBuffer rest = s.secondary_gb.build_gemma4_layers_cached(
+                        *s.secondary_engine, s.model_config, gemma, s.arch, s.split_boundary,
+                        s.arch.num_layers, 1, seq, cache, block);
+                    s.engine->activate();
+                    input.append(s.gb.build_gemma4_layers_cached(
+                        *s.engine, s.model_config, gemma, s.arch, 0, s.split_boundary,
+                        1, seq, cache, block));
+                    const CommandBuffer head = s.gb.build_gemma4_head(s.model_config, gemma, s.arch, seq);
+                    s.split->run({input, rest, head});
+                    s.engine->sync();
+                };
+            }
             s.multimodal = create_multimodal_adapter(
                 vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
-                scratch_tokens, &adapter_error);
+                scratch_tokens, &adapter_error, std::move(placement));
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
                 return nullptr;
@@ -1042,6 +1069,10 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 return false;
             }
             MultimodalPrefillResult pr;
+            // El prefill visual reescribe las vistas de scratch igual que
+            // forward_batch: el próximo decode tiene que reconstruir las suyas.
+            s.invalidate_graphs();
+            s.decode_cb_built = false;
             if (!prefill_cancelled &&
                 !s.multimodal->prefill(turn, {s.kv_prefix, s.position(),
                                               s.kv_config.max_seq_len},

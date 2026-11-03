@@ -63,6 +63,7 @@ uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32
     std::vector<uint64_t> layer_bytes(gemma.layers.size(), 0);
     uint64_t common_bytes = 0;
     for (const TensorEntry& tensor : loader.tensors()) {
+        if (tensor.block != "text_model") continue;   // vision.layerN no es la capa N
         const int layer = layer_index(tensor.name);
         if (layer >= int(layer_bytes.size())) return 0;
         (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
@@ -73,13 +74,19 @@ uint32_t gemma4_split_boundary(const HnfLoader& loader, uint32_t max_seq, uint32
         layer_bytes[i] += 2 * sizeof(uint16_t) * slots * layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
     }
     const uint64_t primary_free = usable_vram(0);
-    const uint64_t secondary_free = usable_vram(1);
+    // La torre visual corre en la secundaria cuando hay reparto: se le guarda su sitio
+    // (pesos y memoria de trabajo que declara el HNF) antes de colocar capas.
+    const uint64_t vision = loader.block_vram_bytes(BLOCK_VISION);
+    const uint64_t secondary_raw = usable_vram(1);
+    const uint64_t secondary_free = secondary_raw > vision ? secondary_raw - vision : 0;
     check(cudaSetDevice(0), "elegir GPU");
     const auto plan = plan_gemma4_split(layer_bytes, common_bytes, primary_free, secondary_free);
     return plan && plan->split(layer_bytes.size()) ? plan->boundary : 0;
 }
 
 bool gemma4_tensor_in_span(const TensorEntry& tensor, uint32_t first_layer, uint32_t end_layer, bool common) {
+    // El reparto es de capas de texto; la visión se carga aparte y entera.
+    if (tensor.block != "text_model") return true;
     const int layer = layer_index(tensor.name);
     return layer < 0 ? common : layer >= int(first_layer) && layer < int(end_layer);
 }

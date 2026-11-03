@@ -162,8 +162,15 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
         }
     }
 
+    // E2B/E4B llevan cuatro clamps aprendidos por lineal; el 26B, ninguno, pero
+    // sí los dos buffers de standardize.
+    const bool clipped = config.has_flag(GEMMA4_VISION_FLAG_CLIPPED_LINEARS);
+    const bool standardize = config.has_flag(GEMMA4_VISION_FLAG_STANDARDIZE);
+    const size_t per_layer = clipped ? 41 : 13;
+    const size_t expected_count = 3 + static_cast<size_t>(layers) * per_layer +
+                                  (standardize ? 2 : 0);
     std::unordered_set<std::string> expected_names;
-    expected_names.reserve(3 + static_cast<size_t>(layers) * 41);
+    expected_names.reserve(expected_count);
     std::unordered_map<std::string, float> clamp_values;
 
     auto expect = [&](const std::string& name, const Shape& shape,
@@ -214,6 +221,10 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
     expect("vision.patch_embed.position_embedding.weight",
            {2, config.position_embedding_size, hidden});
     expect("vision.projector.weight", {config.projection_dim, hidden});
+    if (standardize) {
+        expect("vision.projector.std_bias", {hidden});
+        expect("vision.projector.std_scale", {hidden});
+    }
 
     const char* attention_projections[] = {"q", "k", "v", "o"};
     const char* mlp_projections[] = {"gate", "up", "down"};
@@ -232,7 +243,7 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
             const std::string linear = prefix + "attn." + projection + "_proj.";
             expect(linear + "weight", {hidden, hidden});
             for (const char* field : clamp_fields) {
-                expect(linear + field, {}, true);
+                if (clipped) expect(linear + field, {}, true);
             }
         }
         for (const char* projection : mlp_projections) {
@@ -241,7 +252,7 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
             expect(linear + "weight", down ? Shape{hidden, intermediate}
                                             : Shape{intermediate, hidden});
             for (const char* field : clamp_fields) {
-                expect(linear + field, {}, true);
+                if (clipped) expect(linear + field, {}, true);
             }
         }
     }
@@ -276,18 +287,19 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
             add_error(report, "unexpected vision tensor: " + item.first);
         }
     }
-    const size_t expected_count = 3 + static_cast<size_t>(layers) * 41;
     if (report.tensor_count != expected_count) {
         add_error(report, "vision tensor count mismatch: got " +
                           std::to_string(report.tensor_count) + ", expected " +
                           std::to_string(expected_count));
     }
-    if (report.clamp_count != static_cast<size_t>(layers) * 7 * 4) {
+    if (report.clamp_count != (clipped ? static_cast<size_t>(layers) * 7 * 4 : 0)) {
         add_error(report, "learned clamp count mismatch: got " +
                           std::to_string(report.clamp_count));
     }
-    if (report.weight_bytes != block.size) {
-        add_error(report, "vision tensor bytes do not exactly fill the block");
+    // HNFv10 alinea cada tensor dentro de su componente: el relleno cuenta en
+    // el bloque, no en los pesos. La cobertura y los solapes ya están arriba.
+    if (report.weight_bytes > block.size) {
+        add_error(report, "vision tensor bytes exceed the block");
     }
 
     // Conservative high-water estimate for the future FP16 forward. Attention

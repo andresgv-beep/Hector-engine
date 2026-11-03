@@ -19,6 +19,7 @@ visión.
 | Gemma 4 E2B/E4B texto | Implementado. [Campaña E2B](GEMMA4_PLAN.md); regresión E4B en [prefill](informes/OPTIMIZACION_PREFILL_E4B_2026-09-19.md) y [cancelación](informes/CANCELACION_RECURSOS_2026-09-19.md). |
 | Gemma 4 12B unified texto | Implementado, KV heads por capa, K=V y PLE opcional. [Integración inicial](GEMMA4_12B_UNIFIED.md) y campañas de septiembre. |
 | Visión E2B/E4B con torre | Runner y adaptador implementados; [campaña visual](GEMMA4_VISION_PLAN.md). E4B probado desde el adaptador Python con imagen y seguimiento textual el 19 de septiembre. |
+| Visión 26B MoE | Implementada el 2026-11-03 sobre HNFv10 (`hnf10 add-vision`): torre de 27 capas sin clamps y con `standardize` en FP32, en la GPU 1 cuando el texto se reparte, y bloque de imagen bidireccional en las capas deslizantes. Salida proyectada a 1,06 % de NRMSE del oráculo FP32 (`tools/gemma4_vision_oracle.py`). Probada en `helios_runtime` y en HEXOS con imágenes reales. Ver `helios_convert_v10/docs/HNFV10.md` §15. |
 | Visión 12B unified | Sigue pendiente: no hay runner encoder-free ni configuración/preprocesado completos. Un bloque visual convertido o el kernel `g4u_pos_add` no completan ese recorrido. |
 | Qwen3 | Ruta genérica Qwen/Qwen2 con Q/K norm; evidencia histórica de Qwen3-4B y sesiones Qwen8B. No se repitió esa certificación en la última campaña 12B/E4B. |
 | Phi / DeepSeek | Referencias y pruebas históricas; no se declaran recertificados por la batería reciente Gemma. |

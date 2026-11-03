@@ -24,6 +24,8 @@ struct Component {
     std::string name;
     uint64_t offset = 0, size = 0;
     uint32_t first_tensor = 0, tensor_count = 0;
+    uint64_t weight_bytes = 0;     // pesos que ocupa en la GPU
+    uint64_t working_bytes = 0;    // su fórmula de memoria evaluada en los máximos declarados
 };
 
 struct Tensor {

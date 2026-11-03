@@ -956,7 +956,8 @@ CommandBuffer GraphBuilder::build_gemma4_layers_cached(
     uint32_t end_layer,
     uint32_t batch_size,
     uint32_t seq_len,
-    const KVCacheParams& cache
+    const KVCacheParams& cache,
+    Gemma4BidirectionalBlock bidirectional
 ) {
     if (first_layer > end_layer || end_layer > arch.num_layers) {
         throw std::invalid_argument("GraphBuilder: invalid Gemma 4 layer span");
@@ -965,7 +966,8 @@ CommandBuffer GraphBuilder::build_gemma4_layers_cached(
     cb.reserve(size_t(end_layer - first_layer) * 30);
     for (uint32_t layer = first_layer; layer < end_layer; ++layer) {
         cb.append(build_gemma4_layer_cached(
-            engine, config, gemma, arch, layer, batch_size, seq_len, cache));
+            engine, config, gemma, arch, layer, batch_size, seq_len, cache,
+            bidirectional));
     }
     return cb;
 }

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -237,31 +238,46 @@ void compare_boundary(const std::string& label,
             label + " falls below V0 correlation barrier");
 }
 
+// Pesos reales contra el oráculo FP32 de tools/gemma4_vision_oracle.py. La
+// geometría sale del HNF (E2B/E4B: 16 capas de 768; 26B: 27 de 1152), así que
+// el mismo test sirve para las dos torres.
 void test_real_frontier(const std::string& hnf_path,
                         const std::string& oracle_dir) {
+    helios::Engine engine;
+    helios::HnfLoader loader;
+    require(loader.open(hnf_path),
+            "cannot open visual HNF: " + loader.last_error());
+    require(loader.has_gemma4_vision_config(), "HNF has no GM4V vision config");
+    const helios::ModelConfig& base = loader.config_for_block(helios::BLOCK_VISION);
+    const size_t hidden = base.hidden_size();
+    const uint32_t layers = base.num_hidden_layers();
+    const size_t projection = loader.gemma4_vision_config().projection_dim;
+    char last_name[16];
+    std::snprintf(last_name, sizeof(last_name), "layer%02u", layers - 1);
+
     const auto patches = read_npy<float>(oracle_dir + "/patches.npy", "<f4");
     const auto positions = read_npy<int64_t>(oracle_dir + "/positions.npy", "<i8");
     const auto reference = read_npy<float>(
         oracle_dir + "/patch_embedder.npy", "<f4");
     const auto layer00 = read_npy<float>(oracle_dir + "/layer00.npy", "<f4");
-    const auto layer15 = read_npy<float>(oracle_dir + "/layer15.npy", "<f4");
+    const auto layer_last = read_npy<float>(
+        oracle_dir + "/" + last_name + ".npy", "<f4");
     const auto pooler = read_npy<float>(oracle_dir + "/pooler.npy", "<f4");
     const auto projected = read_npy<float>(
         oracle_dir + "/projected.npy", "<f4");
-    require(patches.shape == std::vector<size_t>({1, 2520, 768}),
-            "unexpected V0 patch shape");
-    require(positions.shape == std::vector<size_t>({1, 2520, 2}),
-            "unexpected V0 position shape");
-    require(reference.shape == std::vector<size_t>({1, 2520, 768}),
-            "unexpected V0 patch-embedder shape");
-    require(layer00.shape == std::vector<size_t>({1, 2520, 768}),
-            "unexpected V0 layer-0 shape");
-    require(layer15.shape == std::vector<size_t>({1, 2520, 768}),
-            "unexpected V0 layer-15 shape");
-    require(pooler.shape == std::vector<size_t>({1, 280, 768}),
-            "unexpected V0 pooler shape");
-    require(projected.shape == std::vector<size_t>({280, 1536}),
-            "unexpected V0 projected shape");
+    require(patches.shape.size() == 3 && patches.shape[0] == 1 &&
+            positions.shape == std::vector<size_t>({1, patches.shape[1], 2}),
+            "unexpected oracle patch or position shape");
+    const size_t patch_count = patches.shape[1];
+    const size_t soft = projected.shape.empty() ? 0 : projected.shape[0];
+    for (const auto* boundary : {&reference, &layer00, &layer_last}) {
+        require(boundary->shape == std::vector<size_t>({1, patch_count, hidden}),
+                "oracle hidden boundary does not match the HNF width");
+    }
+    require(pooler.shape == std::vector<size_t>({1, soft, hidden}),
+            "unexpected oracle pooler shape");
+    require(projected.shape == std::vector<size_t>({soft, projection}),
+            "unexpected oracle projected shape");
 
     helios::Gemma4VisionPreprocessResult input;
     input.max_patches = static_cast<uint32_t>(patches.shape[1]);
@@ -276,10 +292,6 @@ void test_real_frontier(const std::string& hnf_path,
         input.position_ids.push_back(static_cast<int32_t>(coordinate));
     }
 
-    helios::Engine engine;
-    helios::HnfLoader loader;
-    require(loader.open(hnf_path),
-            "cannot open visual HNF: " + loader.last_error());
     size_t free_before_load = 0;
     size_t total_vram = 0;
     cuda_require(cudaMemGetInfo(&free_before_load, &total_vram),
@@ -292,7 +304,7 @@ void test_real_frontier(const std::string& hnf_path,
 
     std::vector<float> actual;
     std::vector<float> actual_layer00;
-    std::vector<float> actual_layer15;
+    std::vector<float> actual_layer_last;
     std::vector<float> actual_pooler;
     std::vector<float> actual_projected;
     size_t free_runner_peak = 0;
@@ -307,21 +319,21 @@ void test_real_frontier(const std::string& hnf_path,
                 "visual layer 0 failed: " + error);
         require(runner.copy_hidden_states(actual_layer00, &error),
                 "layer-0 boundary download failed: " + error);
-        for (uint32_t layer = 1; layer < 16; ++layer) {
+        for (uint32_t layer = 1; layer < layers; ++layer) {
             require(runner.run_encoder_layer(layer, &error),
                     "visual layer " + std::to_string(layer) +
                     " failed: " + error);
         }
-        require(runner.copy_hidden_states(actual_layer15, &error),
-                "layer-15 boundary download failed: " + error);
+        require(runner.copy_hidden_states(actual_layer_last, &error),
+                "last-layer boundary download failed: " + error);
         require(runner.run_pooler(&error), "visual pooler failed: " + error);
         require(runner.copy_pooled_states(actual_pooler, &error),
                 "pooler boundary download failed: " + error);
         require(runner.run_projector(&error),
                 "visual projector failed: " + error);
         require(runner.projected_states_device() != nullptr &&
-                runner.soft_token_count() == 280 &&
-                runner.projection_size() == 1536,
+                runner.soft_token_count() == soft &&
+                runner.projection_size() == projection,
                 "visual projector must expose the V5 device boundary");
         require(runner.copy_projected_states(actual_projected, &error),
                 "projected boundary download failed: " + error);
@@ -334,8 +346,8 @@ void test_real_frontier(const std::string& hnf_path,
                      0.005, 0.99999);
     compare_boundary("real Gemma 4 layer-0 frontier", actual_layer00,
                      layer00.values, 0.015, 0.9998);
-    compare_boundary("real Gemma 4 layer-15 frontier", actual_layer15,
-                     layer15.values, 0.030, 0.9990);
+    compare_boundary(std::string("real Gemma 4 ") + last_name + " frontier",
+                     actual_layer_last, layer_last.values, 0.030, 0.9990);
     compare_boundary("real Gemma 4 pooler frontier", actual_pooler,
                      pooler.values, 0.030, 0.9990);
     compare_boundary("real Gemma 4 projected frontier", actual_projected,

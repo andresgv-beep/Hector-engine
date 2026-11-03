@@ -666,6 +666,11 @@ public:
     
     // Versión mayor del contenedor abierto (10) y tamaño que declara su cabecera.
     uint32_t format_major() const { return format_major_; }
+    // VRAM que pide un bloque: sus pesos más su memoria de trabajo en los máximos que
+    // declara el HNF (§8 de HNFV10.md). 0 si el bloque no existe o no la declara.
+    uint64_t block_vram_bytes(BlockID block) const {
+        return block < HNF_BLOCK_COUNT ? block_vram_[block] : 0;
+    }
     uint64_t file_size() const { return file_size_; }
     // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
     const std::string& chat_template() const { return chat_template_; }
@@ -744,6 +749,7 @@ private:
     // Metadata
     BlockEntry blocks_[HNF_BLOCK_COUNT];
     uint32_t format_major_ = 0;
+    uint64_t block_vram_[HNF_BLOCK_COUNT] = {};
     uint64_t file_size_ = 0;
     std::string chat_template_;
     ModelConfig config_;                                    // Default/text config
