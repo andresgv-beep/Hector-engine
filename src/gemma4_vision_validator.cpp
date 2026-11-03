@@ -243,7 +243,7 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
             const std::string linear = prefix + "attn." + projection + "_proj.";
             expect(linear + "weight", {hidden, hidden});
             for (const char* field : clamp_fields) {
-                if (clipped) expect(linear + field, {}, true);
+                if (clipped) expect(linear + field, {1}, true);
             }
         }
         for (const char* projection : mlp_projections) {
@@ -252,7 +252,7 @@ Gemma4VisionValidationReport validate_gemma4_vision_tensors(
             expect(linear + "weight", down ? Shape{hidden, intermediate}
                                             : Shape{intermediate, hidden});
             for (const char* field : clamp_fields) {
-                if (clipped) expect(linear + field, {}, true);
+                if (clipped) expect(linear + field, {1}, true);
             }
         }
     }
