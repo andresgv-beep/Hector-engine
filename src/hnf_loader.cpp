@@ -10,6 +10,7 @@
 
 #include "hnf_loader.hpp"
 #include "gemma4_vision_validator.hpp"
+#include "hnf10.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cstring>
@@ -229,7 +230,19 @@ bool HnfLoader::open(const std::string& path) {
     file_.open(path, std::ios::binary);
     if (!file_.is_open()) { std::cerr << "HnfLoader: Cannot open: " << path << std::endl; return false; }
     file_path_ = path;
-    
+    format_major_ = 0;
+    chat_template_.clear();
+
+    if (hnf10::is_hnf10(file_)) {
+        if (!open_hnf10(file_)) {
+            std::cerr << "HnfLoader: " << last_error_ << std::endl;
+            close();
+            return false;
+        }
+        load_tokenizer();
+        return true;
+    }
+    format_major_ = 9;
     if (!read_header(file_) || !read_block_table(file_) || !read_manifest(file_) || !parse_manifest()) {
         close(); return false;
     }
@@ -238,6 +251,68 @@ bool HnfLoader::open(const std::string& path) {
         return false;
     }
     load_tokenizer();
+    return true;
+}
+
+bool HnfLoader::open_hnf10(std::ifstream& f) {
+    hnf10::Contents contents;
+    if (!hnf10::read(f, contents, last_error_)) return false;
+    std::memset(&header_, 0, sizeof(header_));
+    std::memcpy(header_.magic, hnf10::MAGIC, 8);
+    header_.version_major = 10;
+    header_.file_size = contents.file_size;
+    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) blocks_[i] = BlockEntry{i, i, 0, 0, 0};
+    const hnf10::Component* text = nullptr;
+    for (const auto& c : contents.components) {
+        uint32_t block = HNF_BLOCK_COUNT;
+        switch (c.kind) {
+            case hnf10::TEXT: block = BLOCK_TEXT_MODEL; text = &c; break;
+            case hnf10::TOKENIZER: block = BLOCK_TOKENIZER; break;
+            case hnf10::CONFIG: block = BLOCK_EXEC_HINTS_BIN; break;
+            case hnf10::TEMPLATE: {
+                chat_template_.resize(c.size);
+                f.clear();
+                f.seekg(std::streamoff(c.offset));
+                f.read(chat_template_.data(), std::streamsize(c.size));
+                if (!f.good()) { last_error_ = "no leo la plantilla de chat del HNFv10"; return false; }
+                continue;
+            }
+            default:
+                if (c.required) { last_error_ = "HNFv10: el motor aún no carga componentes de tipo " + std::to_string(c.kind) + " (" + c.name + ")"; return false; }
+                continue;
+        }
+        if (blocks_[block].size != 0) { last_error_ = "HNFv10: dos componentes del mismo tipo: " + c.name; return false; }
+        blocks_[block] = BlockEntry{block, block, c.offset, c.size, 0};
+    }
+    if (!text) { last_error_ = "HNFv10 sin componente de texto"; return false; }
+    tensors_.clear();
+    for (const auto& t : contents.tensors) {
+        if (t.component != text->id) { last_error_ = "HNFv10: tensor fuera del texto: " + t.name; return false; }
+        TensorEntry entry;
+        entry.name = t.name;
+        entry.dtype = t.dtype;
+        entry.block = "text_model";
+        entry.shape = t.shape;
+        entry.offset = t.offset;
+        entry.size = t.size;
+        tensors_.push_back(std::move(entry));
+    }
+    if (!read_execution_hints(f)) return false;
+    // Propiedades de la configuración: solo campos que el binario no trae (una autoridad).
+    for (const auto& p : contents.properties) {
+        ConfigValue value;
+        switch (p.type) {
+            case 1: value = p.boolean; break;
+            case 2: value = p.integer; break;
+            case 3: value = p.real; break;
+            case 4: value = p.text; break;
+            default: continue;
+        }
+        if (config_.has(p.key)) { last_error_ = "HNFv10: " + p.key + " está a la vez en la configuración binaria y en propiedades"; return false; }
+        config_.set(p.key, value);
+        block_configs_[BLOCK_TEXT_MODEL].set(p.key, value);
+    }
+    format_major_ = 10;
     return true;
 }
 
@@ -883,11 +958,13 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+    const bool v10 = hnf10::is_hnf10(f);
+    format_major_ = v10 ? 10 : 9;
+    if (v10 ? !open_hnf10(f) : (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest())) {
         file_path_.clear();
         return false;
     }
-    if (!read_execution_hints(f)) { file_path_.clear(); return false; }
+    if (!v10 && !read_execution_hints(f)) { file_path_.clear(); return false; }
     if (has_gemma4_vision_config_) {
         const Gemma4VisionValidationReport report =
             validate_gemma4_vision_tensors(*this);
@@ -958,11 +1035,13 @@ bool HnfLoader::load_metadata(const std::string& path) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+    const bool v10 = hnf10::is_hnf10(f);
+    format_major_ = v10 ? 10 : 9;
+    if (v10 ? !open_hnf10(f) : (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest())) {
         file_path_.clear();
         return false;
     }
-    if (!read_execution_hints(f)) {
+    if (!v10 && !read_execution_hints(f)) {
         file_path_.clear();
         return false;
     }

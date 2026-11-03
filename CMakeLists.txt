@@ -66,6 +66,7 @@ set(ENGINE_SOURCES
     src/command.cpp
     src/engine.cpp
     src/hnf_loader.cpp
+    src/hnf10.cpp
     src/model_capabilities.cpp
     src/multimodal_adapter.cpp
     src/mapped_weight_pipeline.cpp
@@ -145,9 +146,15 @@ target_include_directories(helios-engine PUBLIC
     ${CUDA_INCLUDE_DIR}
 )
 
+# HNFv10: CRC32 de zlib y xxh3-128 de libxxhash del sistema (no hay cabecera de desarrollo:
+# src/hnf10.cpp declara la función con la misma ABI que xxhash.h 0.8).
+find_package(ZLIB REQUIRED)
+find_library(XXHASH_LIBRARY NAMES xxhash libxxhash.so.0 PATHS /usr/lib/x86_64-linux-gnu REQUIRED)
 target_link_libraries(helios-engine PUBLIC
     CUDA::cudart
     CUDA::cublas
+    ZLIB::ZLIB
+    ${XXHASH_LIBRARY}
 )
 
 # ============================================================================
@@ -282,6 +289,10 @@ target_link_libraries(inspect_hnf PRIVATE helios-engine)
 # context or load model weights.
 add_executable(helios_model_probe tools/helios_model_probe.cpp)
 target_link_libraries(helios_model_probe PRIVATE helios-engine)
+
+# Configuración efectiva clave a clave, para comparar formatos del mismo modelo.
+add_executable(hnf_config_dump tools/hnf_config_dump.cpp)
+target_link_libraries(hnf_config_dump PRIVATE helios-engine)
 
 # Enable testing
 enable_testing()

@@ -703,6 +703,10 @@ public:
     // ========================================
     
     const HnfHeader& header() const { return header_; }
+    // Versión mayor del contenedor abierto: 9 o 10.
+    uint32_t format_major() const { return format_major_; }
+    // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
+    const std::string& chat_template() const { return chat_template_; }
     
     // Default config (text/primary model)
     const ModelConfig& config() const { return config_; }
@@ -778,6 +782,8 @@ private:
     // Metadata
     HnfHeader header_;
     BlockEntry blocks_[HNF_BLOCK_COUNT];
+    uint32_t format_major_ = 0;
+    std::string chat_template_;
     ModelConfig config_;                                    // Default/text config
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs
     Gemma4Config gemma4_config_;
@@ -799,6 +805,8 @@ private:
     
     // Internal methods
     bool read_header(std::ifstream& f);
+    // HNFv10 (src/hnf10.hpp): rellena bloques, tensores y configuración desde sus componentes.
+    bool open_hnf10(std::ifstream& f);
     bool read_block_table(std::ifstream& f);
     bool read_manifest(std::ifstream& f);
     bool read_execution_hints(std::ifstream& f);
