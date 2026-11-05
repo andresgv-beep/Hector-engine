@@ -828,11 +828,10 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
 }
 
 void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
-    // Gemma 4 construye su grafo con una ruta explicita que pide q/k/v y
-    // gate/up por nombre y no mira has_fused_qkv / has_fused_gate_up, asi que
-    // fusionar le quitaria tensores que necesita. Se deja fuera hasta que esa
-    // ruta soporte los tensores fusionados.
-    if (has_gemma4_config()) return;
+    if (has_gemma4_config()) {
+        fuse_gemma4_weights(engine, state);
+        return;
+    }
 
     const char* qkv_env = getenv("HELIOS_FUSE_QKV");
     const char* gate_up_env = getenv("HELIOS_FUSE_GATE_UP");
@@ -869,6 +868,49 @@ void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
         std::cout << "  [FUSE] q/k/v=" << qkv_fusionadas
                   << " capas, gate/up=" << gate_up_fusionadas
                   << " capas" << std::endl;
+    }
+}
+
+
+// Gemma 4: el grafo mira por capa si existe el tensor fusionado y, si existe, hace
+// un solo GEMV y lee q/k/v (o gate/up) como trozos de su salida.
+//
+// - Las capas con KV compartido solo proyectan q: no se fusionan, o el GEMV
+//   calcularia k y v para nada.
+// - attention_k_eq_v (sin v_proj): V sale de la misma proyeccion que K, y hoy el
+//   grafo ya la calcula dos veces. Se pega q|k|k, que hace lo mismo en un GEMV;
+//   k ocupa dos veces, unos MB por capa global.
+// - Se recorren todas las capas del modelo y no se para en el primer hueco: con
+//   el texto repartido en dos GPU, el cargador de la segunda empieza a mitad.
+void HnfLoader::fuse_gemma4_weights(Engine& engine, BlockState& state) {
+    const char* qkv_env = getenv("HELIOS_FUSE_QKV");
+    const char* gate_up_env = getenv("HELIOS_FUSE_GATE_UP");
+    const bool fuse_qkv = qkv_env && qkv_env[0] == '1';
+    const bool fuse_gate_up = gate_up_env ? gate_up_env[0] == '1' : fuse_qkv;
+    const Gemma4Config& gemma = gemma4_config();
+    const uint32_t layers = static_cast<uint32_t>(gemma.layers.size());
+    const uint32_t first_shared = layers - std::min(gemma.num_kv_shared_layers, layers);
+
+    uint32_t qkv_fusionadas = 0, gate_up_fusionadas = 0;
+    for (uint32_t layer = 0; layer < layers; ++layer) {
+        const std::string b = "text.layer" + std::to_string(layer) + ".";
+        if (fuse_qkv && layer < first_shared && engine.tensors().exists(b + "attn.q_proj.weight")) {
+            const std::string k = b + "attn.k_proj.weight";
+            const std::string v = gemma.layers[layer].k_eq_v() ? k : b + "attn.v_proj.weight";
+            if (concat_tensors(engine, state, {b + "attn.q_proj.weight", k, v},
+                               b + "attn.qkv_proj.weight")) {
+                qkv_fusionadas++;
+            }
+        }
+        if (fuse_gate_up && engine.tensors().exists(b + "mlp.gate.weight") &&
+            concat_tensors(engine, state, {b + "mlp.gate.weight", b + "mlp.up.weight"},
+                           b + "mlp.gate_up.weight")) {
+            gate_up_fusionadas++;
+        }
+    }
+    if (qkv_fusionadas || gate_up_fusionadas) {
+        std::cout << "  [FUSE] Gemma 4 q/k/v=" << qkv_fusionadas
+                  << " capas, gate/up=" << gate_up_fusionadas << " capas" << std::endl;
     }
 }
 

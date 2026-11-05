@@ -473,6 +473,15 @@ private:
         uint32_t seq_len
     );
 
+    // q/k/v of one Gemma 4 layer, from three GEMVs or from the fused
+    // attn.qkv_proj.weight. Returns the names the following commands read: in
+    // fused decode they are fixed slices of the GEMV output.
+    struct Gemma4Qkv { std::string q, k, v; };
+    Gemma4Qkv append_gemma4_qkv(CommandBuffer& cb, const ModelConfig& config,
+                                const Gemma4Config& gemma, const ArchDescriptor& arch,
+                                uint32_t layer_idx, uint32_t batch_size, uint32_t seq_len,
+                                bool with_kv);
+
     // mlp_input_normed: the caller already left rmsnorm(hidden)*ln_mlp_in in
     // _scratch.normed (fused into the attention residual).
     void append_gemma4_mlp_ple_tail(
@@ -523,6 +532,8 @@ private:
     // ========================================================================
     
     bool scratch_allocated_ = false;
+    // Gemma 4 layers whose q|k|v or gate|up the loader fused (HELIOS_FUSE_QKV).
+    std::vector<char> g4_fused_qkv_, g4_fused_gate_up_;
     uint32_t alloc_batch_ = 0;
     uint32_t alloc_seq_ = 0;
     std::vector<std::string> scratch_names_;

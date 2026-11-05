@@ -531,6 +531,48 @@ void GraphBuilder::allocate_gemma4_scratch(
         view(G4(i, "up"), S("g4.up_backing"), {B, L, I});
         view(G4(i, "mlp_h"), S("g4.mlp_h_backing"), {B, L, I});
     }
+
+    // Pesos q|k|v y gate|up fusionados por el cargador (HELIOS_FUSE_QKV). El GEMV
+    // escribe [filas, q+k+v]; en decode, con una fila, q/k/v son trozos fijos de
+    // esa salida (vistas *_dec) y no hay que mover punteros, que con el CUDA Graph
+    // y las vistas de Gemma 4 no se podria deshacer. En prefill se copia a q/k/v.
+    uint32_t qkv_width = 0, gate_up_width = 0;
+    for (uint32_t i = 0; i < arch.num_layers; ++i) {
+        const Gemma4LayerConfig& layer = gemma.layers[i];
+        const uint32_t kv = layer.kv_heads_or(KVH) * layer.head_dim;
+        if (engine.tensors().exists(W(arch, i, "attn.qkv_proj.weight")))
+            qkv_width = std::max(qkv_width, H * layer.head_dim + 2 * kv);
+        if (engine.tensors().exists(W(arch, i, "mlp.gate_up.weight")))
+            gate_up_width = std::max(gate_up_width, 2 * layer.intermediate_size);
+    }
+    auto view_at = [&](const std::string& name, const std::string& backing, uint32_t offset,
+                       const std::vector<uint32_t>& shape) {
+        engine.tensors().register_external(
+            name, static_cast<half*>(engine.tensors().at(backing).ptr) + offset, shape, dtype::FP16());
+        scratch_view_names_.push_back(name);
+    };
+    g4_fused_qkv_.assign(arch.num_layers, 0);
+    g4_fused_gate_up_.assign(arch.num_layers, 0);
+    if (qkv_width) alloc(S("g4.qkv_backing"), {B, L, qkv_width});
+    if (gate_up_width) alloc(S("g4.gate_up_backing"), {B, L, gate_up_width});
+    for (uint32_t i = 0; i < arch.num_layers; ++i) {
+        const Gemma4LayerConfig& layer = gemma.layers[i];
+        const uint32_t q = H * layer.head_dim, kv = layer.kv_heads_or(KVH) * layer.head_dim;
+        if (engine.tensors().exists(W(arch, i, "attn.qkv_proj.weight"))) {
+            g4_fused_qkv_[i] = 1;
+            view(G4(i, "qkv"), S("g4.qkv_backing"), {B, L, q + 2 * kv});
+            view_at(G4(i, "q_dec"), S("g4.qkv_backing"), 0, {B, L, q});
+            view_at(G4(i, "k_dec"), S("g4.qkv_backing"), q, {B, L, kv});
+            view_at(G4(i, "v_dec"), S("g4.qkv_backing"), q + kv, {B, L, kv});
+        }
+        if (engine.tensors().exists(W(arch, i, "mlp.gate_up.weight"))) {
+            g4_fused_gate_up_[i] = 1;
+            const uint32_t I = layer.intermediate_size;
+            view(G4(i, "gate_up"), S("g4.gate_up_backing"), {B, L, 2 * I});
+            view_at(G4(i, "gate_dec"), S("g4.gate_up_backing"), 0, {B, L, I});
+            view_at(G4(i, "up_dec"), S("g4.gate_up_backing"), I, {B, L, I});
+        }
+    }
     scratch_allocated_ = true;
 }
 
@@ -546,6 +588,8 @@ void GraphBuilder::free_scratch(Engine& engine) {
         }
     }
     scratch_names_.clear();
+    g4_fused_qkv_.clear();
+    g4_fused_gate_up_.clear();
     scratch_allocated_ = false;
     alloc_batch_ = 0;
     alloc_seq_ = 0;
@@ -691,9 +735,6 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     // sigue usando el valor global, asi que esto es no-op para E2B/E4B.
     const uint32_t KVH = layer.kv_heads_or(config.num_key_value_heads());
     const uint32_t HD = layer.head_dim;
-    const std::string q = G4(layer_idx, "q");
-    const std::string k = G4(layer_idx, "k");
-    const std::string v = G4(layer_idx, "v");
     const std::string attn_out = G4(layer_idx, "attn_out");
     auto set_seq = [&](CommandBuffer& commands) {
         commands.commands().back().set("seq_len", seq_len);
@@ -704,18 +745,11 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     cb.add_rmsnorm(S("normed"), S("hidden"),
                    W(arch, layer_idx, "ln_attn_in.weight"),
                    config.rms_norm_eps());
-    cb.add_matmul(q, S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
-    set_seq(cb);
-    cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
-    set_seq(cb);
-    // attention_k_eq_v: la capa no tiene v_proj y V sale de la MISMA
-    // proyeccion que K.  Lo que sigue diferenciandolos es el tramo de abajo:
-    // K lleva k_norm + RoPE, V solo su norma sin peso.
-    cb.add_matmul(v, S("normed"),
-                  W(arch, layer_idx,
-                    layer.k_eq_v() ? "attn.k_proj.weight"
-                                   : "attn.v_proj.weight"));
-    set_seq(cb);
+    const Gemma4Qkv proj = append_gemma4_qkv(cb, config, gemma, arch, layer_idx,
+                                             batch_size, seq_len, true);
+    const std::string& q = proj.q;
+    const std::string& k = proj.k;
+    const std::string& v = proj.v;
 
     cb.add_rmsnorm(q, q, W(arch, layer_idx, "attn.q_norm.weight"),
                    config.rms_norm_eps(), HD);
@@ -795,9 +829,6 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
         throw std::invalid_argument("GraphBuilder: invalid cached Gemma 4 geometry");
     }
 
-    const std::string q = G4(layer_idx, "q");
-    const std::string k = G4(layer_idx, "k");
-    const std::string v = G4(layer_idx, "v");
     const std::string attn_out = G4(layer_idx, "attn_out");
     const std::string cache_base = cache.kv_prefix + ".layer" +
                                    std::to_string(layer_idx);
@@ -845,21 +876,16 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     cb.add_rmsnorm(S("normed"), S("hidden"),
                    W(arch, layer_idx, "ln_attn_in.weight"),
                    config.rms_norm_eps());
-    cb.add_matmul(q, S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
-    set_seq(cb);
+    const Gemma4Qkv proj = append_gemma4_qkv(cb, config, gemma, arch, layer_idx,
+                                             batch_size, seq_len, !shared);
+    const std::string& q = proj.q;
+    const std::string& k = proj.k;
+    const std::string& v = proj.v;
     cb.add_rmsnorm(q, q, W(arch, layer_idx, "attn.q_norm.weight"),
                    config.rms_norm_eps(), HD);
     add_rope(cb, q, H);
 
     if (!shared) {
-        cb.add_matmul(k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
-        set_seq(cb);
-        // attention_k_eq_v: ver nota en build_gemma4_single_layer.
-        cb.add_matmul(v, S("normed"),
-                      W(arch, layer_idx,
-                        layer.k_eq_v() ? "attn.k_proj.weight"
-                                       : "attn.v_proj.weight"));
-        set_seq(cb);
         cb.add_rmsnorm(k, k, W(arch, layer_idx, "attn.k_norm.weight"),
                        config.rms_norm_eps(), HD);
         cb.add_rmsnorm_no_weight(v, v, config.rms_norm_eps(), HD);
@@ -1094,6 +1120,46 @@ void GraphBuilder::append_gemma4_moe_branch(
     cb.add_add(S("mlp_out"), S("mlp_out"), S("g4.moe_out"));
 }
 
+GraphBuilder::Gemma4Qkv GraphBuilder::append_gemma4_qkv(
+    CommandBuffer& cb,
+    const ModelConfig& config,
+    const Gemma4Config& gemma,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t batch_size,
+    uint32_t seq_len,
+    bool with_kv
+) {
+    Gemma4Qkv names{G4(layer_idx, "q"), G4(layer_idx, "k"), G4(layer_idx, "v")};
+    const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
+    auto set_seq = [&]() { cb.commands().back().set("seq_len", seq_len); };
+    // El cargador no fusiona las capas con KV compartido, que solo proyectan q.
+    if (with_kv && layer_idx < g4_fused_qkv_.size() && g4_fused_qkv_[layer_idx]) {
+        cb.add_matmul(G4(layer_idx, "qkv"), S("normed"), W(arch, layer_idx, "attn.qkv_proj.weight"));
+        set_seq();
+        if (batch_size * seq_len == 1) {
+            return {G4(layer_idx, "q_dec"), G4(layer_idx, "k_dec"), G4(layer_idx, "v_dec")};
+        }
+        const uint32_t q = config.num_attention_heads() * layer.head_dim;
+        const uint32_t kv = layer.kv_heads_or(config.num_key_value_heads()) * layer.head_dim;
+        cb.add_split_qkv(names.q, names.k, names.v, G4(layer_idx, "qkv"), q, kv, kv);
+        cb.commands().back().set("seq_len", batch_size * seq_len);
+        return names;
+    }
+    cb.add_matmul(names.q, S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
+    set_seq();
+    if (!with_kv) return names;
+    cb.add_matmul(names.k, S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
+    set_seq();
+    // attention_k_eq_v: la capa no tiene v_proj y V sale de la MISMA
+    // proyeccion que K.  Lo que sigue diferenciandolos es el tramo de abajo:
+    // K lleva k_norm + RoPE, V solo su norma sin peso.
+    cb.add_matmul(names.v, S("normed"),
+                  W(arch, layer_idx, layer.k_eq_v() ? "attn.k_proj.weight" : "attn.v_proj.weight"));
+    set_seq();
+    return names;
+}
+
 void GraphBuilder::append_gemma4_mlp_ple_tail(
     CommandBuffer& cb,
     const ModelConfig& config,
@@ -1116,11 +1182,26 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
                        W(arch, layer_idx, "ln_mlp_in.weight"),
                        config.rms_norm_eps());
     }
-    cb.add_matmul(gate, S("normed"), W(arch, layer_idx, "mlp.gate.weight"));
-    set_seq(cb);
-    cb.add_matmul(up, S("normed"), W(arch, layer_idx, "mlp.up.weight"));
-    set_seq(cb);
-    cb.add_gelu_mul_rounded(mlp_h, gate, up, 0);
+    if (layer_idx < g4_fused_gate_up_.size() && g4_fused_gate_up_[layer_idx]) {
+        // gate|up en un GEMV. En decode el producto lee los dos trozos de su
+        // salida; en prefill se copian antes a gate y up.
+        cb.add_matmul(G4(layer_idx, "gate_up"), S("normed"), W(arch, layer_idx, "mlp.gate_up.weight"));
+        set_seq(cb);
+        if (batch_size * seq_len == 1) {
+            cb.add_gelu_mul_rounded(mlp_h, G4(layer_idx, "gate_dec"), G4(layer_idx, "up_dec"), 0);
+        } else {
+            cb.add_split_half(gate, up, G4(layer_idx, "gate_up"),
+                              gemma.layers[layer_idx].intermediate_size);
+            cb.commands().back().set("seq_len", batch_size * seq_len);
+            cb.add_gelu_mul_rounded(mlp_h, gate, up, 0);
+        }
+    } else {
+        cb.add_matmul(gate, S("normed"), W(arch, layer_idx, "mlp.gate.weight"));
+        set_seq(cb);
+        cb.add_matmul(up, S("normed"), W(arch, layer_idx, "mlp.up.weight"));
+        set_seq(cb);
+        cb.add_gelu_mul_rounded(mlp_h, gate, up, 0);
+    }
     // GM4X v2 guarda down con columnas fisicas: mlp_h entra con su cola a cero.
     const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
     const bool padded_down = layer.moe_shared_down.physical_cols != 0 &&
