@@ -414,9 +414,91 @@ __global__ void gemv_hq_symmetric_kernel(
     }
 }
 
+// La geometría A (un warp por fila) sin pasar la entrada por memoria compartida.
+// En el lm_head del E4B (K=2560, N=262144) el kernel de arriba lanza 65.536
+// bloques de 4 filas, y cada uno copia los 5 KB de entrada y espera en un
+// __syncthreads antes de leer un solo peso: ~335 MB de tráfico extra frente a
+// 482 MB de pesos. Aquí cada lane lee sus 8 halves de entrada con __ldg (la
+// entrada entera cabe en L1) y los pesos con palabras de 32 bits.
+//
+// Bits idénticos a A: los mismos fmaf en el mismo orden, superbloques pares en
+// acc y nones en acc_odd, y la misma reducción. Así una decisión «A» guardada en
+// tune.cache sigue certificando la misma trayectoria greedy.
+// Exige K % 256 == 0, entrada alineada a 16 bytes y pesos a 4.
+template<int BITS, int BLOCK_BYTES, int RPB>
+__global__ void gemv_hq_symmetric_rowwarp_kernel(
+    const half* __restrict__ input,
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * RPB + threadIdx.x / 32;
+    if (row >= N) return;
+    const int total_sb = K / SUPER_BLOCK_SIZE;
+    const uint8_t* row_weights = weights + size_t(row) * total_sb * BLOCK_BYTES;
+    const uint4* input4 = reinterpret_cast<const uint4*>(input);
+    // q_step del grupo `lane`: 5 bits a partir del bit lane*5 de los bytes 4..24.
+    const int q_word = 1 + (lane * 5) / 32;
+    const int q_shift = (lane * 5) % 32;
+    float acc = 0.0f;
+    float acc_odd = 0.0f;
+
+    #pragma unroll 2
+    for (int sb = 0; sb < total_sb; ++sb) {
+        const uint32_t* block32 = reinterpret_cast<const uint32_t*>(row_weights + size_t(sb) * BLOCK_BYTES);
+        const uint4 x4 = __ldg(input4 + sb * (SUPER_BLOCK_SIZE / 8) + lane);
+        const uint32_t h0 = __ldg(block32);
+        const uint32_t q_step = __funnelshift_r(__ldg(block32 + q_word), __ldg(block32 + q_word + 1), q_shift) & 0x1f;
+        const float d_step = __half2float(__ushort_as_half(uint16_t(h0 & 0xffff)));
+        const float step = d_step * float(q_step) * (1.0f / 31.0f);
+        const half* x = reinterpret_cast<const half*>(&x4);
+        float& a = (sb & 1) ? acc_odd : acc;
+        if constexpr (BITS == 4) {
+            const uint32_t packed = __ldg(block32 + SYMMETRIC_HEADER_SIZE / 4 + lane);
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const uint8_t byte = (packed >> (i * 8)) & 0xff;
+                const float w0 = float(int(byte >> 4) - 8) * step;
+                const float w1 = float(int(byte & 0x0f) - 8) * step;
+                a = fmaf(w0, __half2float(x[i * 2]), a);
+                a = fmaf(w1, __half2float(x[i * 2 + 1]), a);
+            }
+        } else {
+            const int offset = SYMMETRIC_HEADER_SIZE + lane * 5;
+            const uint32_t lo = __ldg(block32 + offset / 4);
+            const uint32_t hi = __ldg(block32 + offset / 4 + 1);
+            const uint64_t packed = ((uint64_t(hi) << 32) | lo) >> ((offset % 4) * 8);
+            #pragma unroll
+            for (int i = 0; i < GROUP_SIZE; ++i) {
+                const float w = float(int((packed >> (i * 5)) & 0x1f) - 16) * step;
+                a = fmaf(w, __half2float(x[i]), a);
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+        acc_odd += __shfl_down_sync(0xffffffff, acc_odd, offset);
+    }
+    if (lane == 0) output[row] = __float2half(acc + acc_odd);
+}
+
 template<int BITS, int BLOCK_BYTES, int WPR, int RPB>
 static void launch_symmetric(const half* in, const uint8_t* weights, half* out,
                              int K, int N, cudaStream_t stream) {
+    if constexpr (WPR == 1) {
+        if (K % hqs::SUPER_BLOCK_SIZE == 0 &&
+            (reinterpret_cast<uintptr_t>(in) & 15u) == 0 &&
+            (reinterpret_cast<uintptr_t>(weights) & 3u) == 0) {
+            constexpr int ROWS = 8;
+            gemv_hq_symmetric_rowwarp_kernel<BITS, BLOCK_BYTES, ROWS>
+                <<<(N + ROWS - 1) / ROWS, ROWS * 32, 0, stream>>>(in, weights, out, K, N);
+            return;
+        }
+    }
     const int threads = WPR * RPB * 32;
     const int blocks = (N + RPB - 1) / RPB;
     const size_t shared = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) +
