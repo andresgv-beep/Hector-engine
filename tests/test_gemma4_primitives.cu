@@ -246,6 +246,7 @@ void test_rmsnorm_residual_matches_sequence() {
         {1, 2560, false, true}, {1, 2560, false, false}, {1, 2560, true, false},
         {7, 2560, true, true}, {1, 3840, true, false}, {3, 2816, false, true},
         {2, 8192, true, true}, {1, 100, true, true}, {2, 9216, false, true},
+        {1, 2816, true, false}, {4, 2816, true, false},  // 26B: cierre del MLP con layer_scalar
     };
     for (const Shape& s : shapes) {
         const size_t n = size_t(s.rows) * s.dim;
