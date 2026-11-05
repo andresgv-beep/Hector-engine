@@ -82,6 +82,10 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "gelu_mul"; info.category = "activation";
     info.min_inputs = 2; info.max_inputs = 2;
     register_op(info);
+
+    info = OpTypeInfo{}; info.name = "gelu_mul_rounded"; info.category = "activation";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
     
     // Normalization
     info = OpTypeInfo{}; info.name = "rmsnorm"; info.category = "norm";
@@ -93,6 +97,12 @@ void OpTypeRegistry::register_builtins() {
     register_op(info);
 
     info = OpTypeInfo{}; info.name = "add_rmsnorm"; info.category = "norm";
+    info.min_inputs = 3; info.max_inputs = 3;
+    register_op(info);
+
+    // Inputs: x, w1, hidden (hidden is also the output). Optional "scalar",
+    // "norm2_weight" and "normed" name further tensors.
+    info = OpTypeInfo{}; info.name = "rmsnorm_residual"; info.category = "norm";
     info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
     

@@ -473,6 +473,8 @@ private:
         uint32_t seq_len
     );
 
+    // mlp_input_normed: the caller already left rmsnorm(hidden)*ln_mlp_in in
+    // _scratch.normed (fused into the attention residual).
     void append_gemma4_mlp_ple_tail(
         CommandBuffer& cb,
         const ModelConfig& config,
@@ -480,7 +482,8 @@ private:
         const ArchDescriptor& arch,
         uint32_t layer_idx,
         uint32_t batch_size,
-        uint32_t seq_len
+        uint32_t seq_len,
+        bool mlp_input_normed = false
     );
     
     // ========================================================================

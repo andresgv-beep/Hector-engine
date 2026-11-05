@@ -29,6 +29,9 @@ struct Gemma4PleLayerNames {
     std::string ple_segment = "_scratch.gemma4_ple_layer";
     std::string gate = "_scratch.gemma4_ple_gate";
     std::string projected = "_scratch.gemma4_ple_projected";
+    // Non-empty: read this layer's segment straight from the packed PLE rows
+    // instead of from `ple_segment`, so no PLE_SLICE is needed.
+    std::string ple_packed;
 };
 
 // Appends the complete pre-layer PLE preparation:

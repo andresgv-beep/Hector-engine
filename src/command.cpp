@@ -78,6 +78,23 @@ void CommandBuffer::add_gelu(const std::string& dst, const std::string& src) {
     add_op(op::GELU(), dst).in({src});
 }
 
+void CommandBuffer::add_gelu_mul_rounded(const std::string& dst, const std::string& gate,
+                                         const std::string& up, uint32_t dim,
+                                         uint32_t layers, uint32_t layer) {
+    add_op(op::GELU_MUL_ROUNDED(), dst).in({gate, up})
+        .set("dim", dim).set("layers", layers).set("layer", layer);
+}
+
+void CommandBuffer::add_rmsnorm_residual(const std::string& hidden, const std::string& x,
+                                         const std::string& w1, float eps,
+                                         const std::string& scalar,
+                                         const std::string& normed,
+                                         const std::string& w2) {
+    auto& cmd = add_op(op::RMSNORM_RESIDUAL(), hidden).in({x, w1, hidden}).set("eps", eps);
+    if (!scalar.empty()) cmd.set("scalar", scalar);
+    if (!normed.empty()) cmd.set("normed", normed).set("norm2_weight", w2);
+}
+
 void CommandBuffer::add_softmax(const std::string& dst, const std::string& src, int32_t dim) {
     add_op(op::SOFTMAX(), dst).in({src}).set("dim", dim);
 }

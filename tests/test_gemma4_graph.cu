@@ -249,7 +249,9 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
 
     const auto layer = builder.build_gemma4_single_layer(
         engine, config, gemma, arch, 0, 2, 3, 7);
-    require(layer.size() == 29, "Gemma 4 explicit layer command count");
+    // 29 before the fusions: norm+add+norm, gelu+mul twice, norm+add, ple_slice and
+    // norm+add+layer_scalar now take 8 commands fewer.
+    require(layer.size() == 21, "Gemma 4 explicit layer command count");
     const auto& v_norm = command_with_op(layer, helios::op::RMSNORM(), 3);
     require(v_norm.inputs.size() == 1 && v_norm.get<bool>("no_weight", false) &&
             v_norm.get<uint32_t>("dim", 0) == 256,
@@ -262,12 +264,18 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
     require(first_rope.get<uint32_t>("proportional", 0) == 1 &&
             first_rope.get<uint32_t>("offset", 0) == 7,
             "Gemma 4 proportional RoPE command");
-    const auto& ple_slice = command_with_op(layer, helios::op::PLE_SLICE());
-    require(ple_slice.get<uint32_t>("layer", 99) == 0 &&
-            ple_slice.get<uint32_t>("layers", 0) == 35 &&
-            ple_slice.get<uint32_t>("dim", 0) == 256,
+    const auto& ple_gelu = command_with_op(layer, helios::op::GELU_MUL_ROUNDED(), 1);
+    require(ple_gelu.inputs.size() == 2 && ple_gelu.inputs[1] == "_s.g4.ple" &&
+            ple_gelu.get<uint32_t>("layer", 99) == 0 &&
+            ple_gelu.get<uint32_t>("layers", 0) == 35 &&
+            ple_gelu.get<uint32_t>("dim", 0) == 256,
             "Gemma 4 packed PLE selection command");
-    require(layer[layer.size() - 1].op == helios::op::MUL_SCALAR_TENSOR(),
+    const auto& attn_residual = command_with_op(layer, helios::op::RMSNORM_RESIDUAL());
+    require(attn_residual.get<std::string>("normed", "") == "_s.normed" &&
+            attn_residual.get<std::string>("norm2_weight", "").find("ln_mlp_in") != std::string::npos,
+            "Gemma 4 attention residual must leave the MLP input normalized");
+    require(layer[layer.size() - 1].op == helios::op::RMSNORM_RESIDUAL() &&
+            !layer[layer.size() - 1].get<std::string>("scalar", "").empty(),
             "Gemma 4 layer must finish with layer_scalar");
 
     bool rejected_shared = false;

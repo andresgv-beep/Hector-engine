@@ -216,6 +216,85 @@ void test_rmsnorm_shapes() {
     std::cout << "PASS: RMSNorm across graph shapes, in place and fallback" << std::endl;
 }
 
+half* device_copy(const std::vector<half>& host) {
+    half* device = nullptr;
+    cuda_require(cudaMalloc(&device, host.size() * sizeof(half)), "device copy allocation");
+    cudaMemcpy(device, host.data(), host.size() * sizeof(half), cudaMemcpyHostToDevice);
+    return device;
+}
+
+std::vector<uint16_t> device_bits(const half* device, size_t n) {
+    std::vector<uint16_t> bits(n);
+    cudaMemcpy(bits.data(), device, n * sizeof(half), cudaMemcpyDeviceToHost);
+    return bits;
+}
+
+std::vector<half> random_halves(size_t n, uint32_t seed, float scale) {
+    std::vector<half> v(n);
+    for (auto& x : v) {
+        seed = seed * 1664525u + 1013904223u;
+        x = __float2half(scale * (float((seed >> 8) & 65535) / 32768.0f - 1.0f));
+    }
+    return v;
+}
+
+// Las fusiones tienen que dar los bits de la secuencia que sustituyen, no solo
+// acercarse: cambiar uno solo cambia la trayectoria greedy.
+void test_rmsnorm_residual_matches_sequence() {
+    struct Shape { int rows, dim; bool scalar, second; };
+    const Shape shapes[] = {
+        {1, 2560, false, true}, {1, 2560, false, false}, {1, 2560, true, false},
+        {7, 2560, true, true}, {1, 3840, true, false}, {3, 2816, false, true},
+        {2, 8192, true, true}, {1, 100, true, true}, {2, 9216, false, true},
+    };
+    for (const Shape& s : shapes) {
+        const size_t n = size_t(s.rows) * s.dim;
+        const auto x = random_halves(n, 11 + s.dim, 40.0f), hidden = random_halves(n, 23 + s.rows, 8.0f);
+        const auto w1 = random_halves(s.dim, 5, 2.0f), w2 = random_halves(s.dim, 9, 1.5f);
+        const std::vector<half> scalar{__float2half(0.37f)};
+        half *dx = device_copy(x), *dh = device_copy(hidden), *dw1 = device_copy(w1), *dw2 = device_copy(w2);
+        half *dsc = device_copy(scalar), *dn = device_copy(std::vector<half>(n));
+        half *rx = device_copy(x), *rh = device_copy(hidden), *rn = device_copy(std::vector<half>(n));
+        launch_rmsnorm_fp16(rx, dw1, rx, s.rows, s.dim, 1.0e-6f);
+        launch_add_fp16(rh, rx, rh, n);
+        if (s.scalar) launch_mul_scalar_tensor_fp16(rh, dsc, rh, n);
+        if (s.second) launch_rmsnorm_fp16(rh, dw2, rn, s.rows, s.dim, 1.0e-6f);
+        launch_rmsnorm_residual_fp16(dx, dw1, dh, s.scalar ? dsc : nullptr, s.second ? dw2 : nullptr,
+                                     s.second ? dn : nullptr, s.rows, s.dim, 1.0e-6f);
+        cuda_require(cudaDeviceSynchronize(), "rmsnorm_residual synchronize");
+        const std::string shape = " rows=" + std::to_string(s.rows) + " dim=" + std::to_string(s.dim);
+        require(device_bits(dh, n) == device_bits(rh, n), "rmsnorm_residual hidden differs" + shape);
+        if (s.second) require(device_bits(dn, n) == device_bits(rn, n), "rmsnorm_residual normed differs" + shape);
+        for (half* p : {dx, dh, dw1, dw2, dsc, dn, rx, rh, rn}) cudaFree(p);
+    }
+    std::cout << "PASS: rmsnorm_residual bit-identical to rmsnorm + add + scalar + rmsnorm" << std::endl;
+}
+
+void test_gelu_mul_rounded_matches_sequence() {
+    // MLP: up con sus propias filas. PLE: el segmento de la capa 5 de 42 dentro de las filas empaquetadas.
+    struct Shape { int rows, dim, layers, layer; };
+    const Shape shapes[] = {{1, 10240, 1, 0}, {3, 10240, 1, 0}, {1, 256, 42, 5}, {4, 256, 42, 41}, {2, 15, 3, 1}};
+    for (const Shape& s : shapes) {
+        const size_t n = size_t(s.rows) * s.dim;
+        const auto gate = random_halves(n, 31 + s.dim, 6.0f);
+        const auto packed = random_halves(n * s.layers, 47 + s.layer, 3.0f);
+        half *dg = device_copy(gate), *dp = device_copy(packed), *dout = device_copy(std::vector<half>(n));
+        half *rg = device_copy(gate), *rs = device_copy(std::vector<half>(n)), *rout = device_copy(std::vector<half>(n));
+        launch_gelu_fp16(rg, rg, n);
+        if (s.layers == 1) launch_mul_fp16(rg, dp, rout, n);
+        else {
+            launch_ple_slice_fp16(dp, rs, s.rows, s.layers, s.dim, s.layer);
+            launch_mul_fp16(rg, rs, rout, n);
+        }
+        launch_gelu_mul_rounded_fp16(dg, dp, dout, s.rows, s.dim, s.dim * s.layers, s.dim * s.layer);
+        cuda_require(cudaDeviceSynchronize(), "gelu_mul_rounded synchronize");
+        require(device_bits(dout, n) == device_bits(rout, n),
+                "gelu_mul_rounded differs rows=" + std::to_string(s.rows) + " dim=" + std::to_string(s.dim));
+        for (half* p : {dg, dp, dout, rg, rs, rout}) cudaFree(p);
+    }
+    std::cout << "PASS: gelu_mul_rounded bit-identical to gelu + (ple_slice) + mul" << std::endl;
+}
+
 void test_embedding_scale_and_gelu() {
     const float scale = std::sqrt(1536.0f);
     const auto scaled = run_unary({0.25f, -0.5f, 1.0f},
@@ -370,6 +449,8 @@ int main(int argc, char** argv) {
     require(devices > 0, "CUDA device required");
     test_gemma_rmsnorm();
     test_rmsnorm_shapes();
+    test_rmsnorm_residual_matches_sequence();
+    test_gelu_mul_rounded_matches_sequence();
     test_embedding_scale_and_gelu();
     test_layer_scalar_and_softcap();
     test_proportional_rope();

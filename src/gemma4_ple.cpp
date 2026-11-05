@@ -62,16 +62,21 @@ void append_gemma4_ple_layer_injection(
     const std::string prefix = "text.layer" + std::to_string(layer_index) + '.';
     commands.add_matmul(names.gate, names.hidden,
                         prefix + "ple.input_gate.weight");
-    commands.add_gelu(names.gate, names.gate);
-    commands.add_mul(names.gate, names.gate, names.ple_segment);
+    // gelu + mul and post-norm + residual + layer_scalar, fused with the same fp16
+    // roundings as the separate commands.
+    if (names.ple_packed.empty()) {
+        commands.add_gelu_mul_rounded(names.gate, names.gate, names.ple_segment,
+                                      gemma.ple_hidden_size);
+    } else {
+        commands.add_gelu_mul_rounded(names.gate, names.gate, names.ple_packed,
+                                      gemma.ple_hidden_size, model.num_hidden_layers(),
+                                      layer_index);
+    }
     commands.add_matmul(names.projected, names.gate,
                         prefix + "ple.projection.weight");
-    commands.add_rmsnorm(names.projected, names.projected,
-                         prefix + "ln_ple_post.weight",
-                         model.rms_norm_eps());
-    commands.add_add(names.hidden, names.hidden, names.projected);
-    commands.add_mul_scalar_tensor(names.hidden, names.hidden,
-                                   prefix + "layer_scalar");
+    commands.add_rmsnorm_residual(names.hidden, names.projected,
+                                  prefix + "ln_ple_post.weight", model.rms_norm_eps(),
+                                  prefix + "layer_scalar");
 }
 
 } // namespace helios

@@ -259,6 +259,24 @@ void register_activation_kernels(Engine& engine) {
         });
     }
     
+    // GELU_MUL_ROUNDED — gelu(gate) rounded to fp16, times up (or one packed segment of it)
+    engine.register_kernel(op::GELU_MUL_ROUNDED(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* gate = ctx.in(0);
+        TensorInfo* up = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        const uint32_t dim = cmd.get<uint32_t>("dim", 0) ? cmd.get<uint32_t>("dim", 0)
+                                                           : (gate ? uint32_t(gate->shape.back()) : 0u);
+        const uint32_t layers = cmd.get<uint32_t>("layers", 1);
+        const uint32_t layer = cmd.get<uint32_t>("layer", 0);
+        if (!gate || !up || !output || dim == 0 || layers == 0 || layer >= layers ||
+            gate->numel() % dim != 0 || output->numel() != gate->numel() ||
+            up->numel() != gate->numel() * layers)
+            throw std::runtime_error("GELU_MUL_ROUNDED: invalid tensors or dimensions");
+        launch_gelu_mul_rounded_fp16(
+            as_fp16_const(gate), as_fp16_const(up), as_fp16(output),
+            int(gate->numel() / dim), int(dim), int(dim * layers), int(dim * layer), ctx.stream);
+    });
+
     // SOFTMAX
     engine.register_kernel(op::SOFTMAX(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* input = ctx.in(0);
@@ -316,6 +334,35 @@ void register_norm_kernels(Engine& engine) {
         }
     });
     
+
+    // RMSNORM_RESIDUAL — post-norm + residual [+ layer_scalar] [+ next norm]
+    engine.register_kernel(op::RMSNORM_RESIDUAL(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* x = ctx.in(0);
+        TensorInfo* w1 = ctx.in(1);
+        TensorInfo* hidden = ctx.output;
+        const float eps = cmd.get<float>("eps", 1e-5f);
+        auto named = [&](const char* key) -> TensorInfo* {
+            const std::string name = cmd.get<std::string>(key, "");
+            if (name.empty()) return nullptr;
+            TensorInfo* t = ctx.registry->get(name);
+            if (!t) throw std::runtime_error(std::string("RMSNORM_RESIDUAL: missing ") + key + " " + name);
+            return t;
+        };
+        TensorInfo* scalar = named("scalar");
+        TensorInfo* normed = named("normed");
+        TensorInfo* w2 = normed ? named("norm2_weight") : nullptr;
+        if (!x || !w1 || !hidden || (normed && !w2)) throw std::runtime_error("RMSNORM_RESIDUAL: missing tensors");
+        const int dim = int(hidden->shape.back());
+        if (x->numel() != hidden->numel() || w1->numel() != size_t(dim) ||
+            (scalar && scalar->numel() != 1) ||
+            (normed && (normed->numel() != hidden->numel() || w2->numel() != size_t(dim))))
+            throw std::runtime_error("RMSNORM_RESIDUAL: shape mismatch");
+        launch_rmsnorm_residual_fp16(
+            as_fp16(x), as_fp16_const(w1), as_fp16(hidden),
+            scalar ? as_fp16_const(scalar) : nullptr, w2 ? as_fp16_const(w2) : nullptr,
+            normed ? as_fp16(normed) : nullptr,
+            int(hidden->numel() / dim), dim, eps, ctx.stream);
+    });
 
     // ADD_RMSNORM — fused add + rmsnorm
     {

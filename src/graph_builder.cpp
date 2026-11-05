@@ -745,13 +745,14 @@ CommandBuffer GraphBuilder::build_gemma4_single_layer(
     cb.add_matmul(S("attn_proj"), attn_out,
                   W(arch, layer_idx, "attn.o_proj.weight"));
     set_seq(cb);
-    cb.add_rmsnorm(S("attn_proj"), S("attn_proj"),
-                   W(arch, layer_idx, "ln_attn_post.weight"),
-                   config.rms_norm_eps());
-    cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
+    // Post-norm + residual + the MLP's input norm, in one kernel.
+    cb.add_rmsnorm_residual(S("hidden"), S("attn_proj"),
+                            W(arch, layer_idx, "ln_attn_post.weight"),
+                            config.rms_norm_eps(), "", S("normed"),
+                            W(arch, layer_idx, "ln_mlp_in.weight"));
 
     append_gemma4_mlp_ple_tail(
-        cb, config, gemma, arch, layer_idx, batch_size, seq_len);
+        cb, config, gemma, arch, layer_idx, batch_size, seq_len, true);
     return cb;
 }
 
@@ -915,11 +916,12 @@ CommandBuffer GraphBuilder::build_gemma4_layer_cached(
     cb.add_matmul(S("attn_proj"), attn_out,
                   W(arch, layer_idx, "attn.o_proj.weight"));
     set_seq(cb);
-    cb.add_rmsnorm(S("attn_proj"), S("attn_proj"),
-                   W(arch, layer_idx, "ln_attn_post.weight"),
-                   config.rms_norm_eps());
-    cb.add_add(S("hidden"), S("hidden"), S("attn_proj"));
-    append_gemma4_mlp_ple_tail(cb, config, gemma, arch, layer_idx, batch_size, seq_len);
+    // Post-norm + residual + the MLP's input norm, in one kernel.
+    cb.add_rmsnorm_residual(S("hidden"), S("attn_proj"),
+                            W(arch, layer_idx, "ln_attn_post.weight"),
+                            config.rms_norm_eps(), "", S("normed"),
+                            W(arch, layer_idx, "ln_mlp_in.weight"));
+    append_gemma4_mlp_ple_tail(cb, config, gemma, arch, layer_idx, batch_size, seq_len, true);
     return cb;
 }
 
@@ -1099,7 +1101,8 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
     const ArchDescriptor& arch,
     uint32_t layer_idx,
     uint32_t batch_size,
-    uint32_t seq_len
+    uint32_t seq_len,
+    bool mlp_input_normed
 ) {
     const std::string gate = G4(layer_idx, "gate");
     const std::string up = G4(layer_idx, "up");
@@ -1108,15 +1111,16 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
         commands.commands().back().set("seq_len", seq_len);
     };
 
-    cb.add_rmsnorm(S("normed"), S("hidden"),
-                   W(arch, layer_idx, "ln_mlp_in.weight"),
-                   config.rms_norm_eps());
+    if (!mlp_input_normed) {
+        cb.add_rmsnorm(S("normed"), S("hidden"),
+                       W(arch, layer_idx, "ln_mlp_in.weight"),
+                       config.rms_norm_eps());
+    }
     cb.add_matmul(gate, S("normed"), W(arch, layer_idx, "mlp.gate.weight"));
     set_seq(cb);
     cb.add_matmul(up, S("normed"), W(arch, layer_idx, "mlp.up.weight"));
     set_seq(cb);
-    cb.add_gelu(gate, gate);
-    cb.add_mul(mlp_h, gate, up);
+    cb.add_gelu_mul_rounded(mlp_h, gate, up, 0);
     // GM4X v2 guarda down con columnas fisicas: mlp_h entra con su cola a cero.
     const Gemma4LayerConfig& layer = gemma.layers[layer_idx];
     const bool padded_down = layer.moe_shared_down.physical_cols != 0 &&
@@ -1128,29 +1132,22 @@ void GraphBuilder::append_gemma4_mlp_ple_tail(
     if (gemma.has_flag(GEMMA4_EXT_FLAG_MOE)) {
         append_gemma4_moe_branch(cb, config, gemma, arch, layer_idx, batch_size, seq_len);
     }
-    cb.add_rmsnorm(S("mlp_out"), S("mlp_out"),
-                   W(arch, layer_idx, "ln_mlp_post.weight"),
-                   config.rms_norm_eps());
-    cb.add_add(S("hidden"), S("hidden"), S("mlp_out"));
-
     // Gemma 4 «unified» no tiene Per-Layer Embeddings, pero SI layer_scalar:
     // la referencia cierra cada capa con `hidden_states *= layer_scalar`, y en
     // las E-series ese producto viaja dentro de la inyeccion PLE.  Sin PLE hay
     // que aplicarlo igualmente o las 48 capas salen sin escalar.
-    if (!gemma.has_flag(GEMMA4_EXT_FLAG_PLE)) {
-        if (gemma.has_flag(GEMMA4_EXT_FLAG_LAYER_SCALAR)) {
-            cb.add_mul_scalar_tensor(
-                S("hidden"), S("hidden"),
-                "text.layer" + std::to_string(layer_idx) + ".layer_scalar");
-        }
-        return;
-    }
+    const bool ple = gemma.has_flag(GEMMA4_EXT_FLAG_PLE);
+    const bool scalar_here = !ple && gemma.has_flag(GEMMA4_EXT_FLAG_LAYER_SCALAR);
+    cb.add_rmsnorm_residual(S("hidden"), S("mlp_out"),
+                            W(arch, layer_idx, "ln_mlp_post.weight"),
+                            config.rms_norm_eps(),
+                            scalar_here ? "text.layer" + std::to_string(layer_idx) + ".layer_scalar"
+                                        : std::string());
+    if (!ple) return;
 
-    cb.add_ple_slice(S("g4.ple_segment"), S("g4.ple"), layer_idx,
-                     arch.num_layers, gemma.ple_hidden_size);
     Gemma4PleLayerNames ple_names;
     ple_names.hidden = S("hidden");
-    ple_names.ple_segment = S("g4.ple_segment");
+    ple_names.ple_packed = S("g4.ple");
     ple_names.gate = S("g4.ple_gate");
     ple_names.projected = S("g4.ple_projected");
     append_gemma4_ple_layer_injection(

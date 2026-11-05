@@ -141,10 +141,12 @@ namespace op {
     inline OpTypeID SOFTCAP() { return OpTypeRegistry::instance().get_id("softcap"); }
     inline OpTypeID SILU_MUL() { return OpTypeRegistry::instance().get_id("silu_mul"); }
     inline OpTypeID GELU_MUL() { return OpTypeRegistry::instance().get_id("gelu_mul"); }
+    inline OpTypeID GELU_MUL_ROUNDED() { return OpTypeRegistry::instance().get_id("gelu_mul_rounded"); }
     
     inline OpTypeID RMSNORM() { return OpTypeRegistry::instance().get_id("rmsnorm"); }
     inline OpTypeID LAYERNORM() { return OpTypeRegistry::instance().get_id("layernorm"); }
     inline OpTypeID ADD_RMSNORM() { return OpTypeRegistry::instance().get_id("add_rmsnorm"); }
+    inline OpTypeID RMSNORM_RESIDUAL() { return OpTypeRegistry::instance().get_id("rmsnorm_residual"); }
     
     inline OpTypeID MATMUL() { return OpTypeRegistry::instance().get_id("matmul"); }
     inline OpTypeID MATMUL_T() { return OpTypeRegistry::instance().get_id("matmul_t"); }

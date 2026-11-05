@@ -305,6 +305,13 @@ void launch_silu_mul_fp16(
     cudaStream_t stream = nullptr
 );
 
+// gelu(gate) redondeado a fp16 por up (fila r de up en r*up_stride + up_offset).
+void launch_gelu_mul_rounded_fp16(
+    const half* gate, const half* up, half* output,
+    int rows, int dim, int up_stride, int up_offset,
+    cudaStream_t stream = nullptr
+);
+
 void launch_gelu_mul_fp16(
     const half* gate, const half* up, half* output,
     size_t numel,
@@ -337,6 +344,15 @@ void launch_rmsnorm_no_weight_fp16(
     int batch_size,
     int dim,
     float eps,
+    cudaStream_t stream = nullptr
+);
+
+// x = rmsnorm(x)*w1; hidden += x; [hidden *= scalar]; [normed = rmsnorm(hidden)*w2].
+// Bits idénticos a la secuencia separada; scalar, w2 y normed pueden ser nulos.
+void launch_rmsnorm_residual_fp16(
+    half* x, const half* w1, half* hidden,
+    const half* scalar, const half* w2, half* normed,
+    int rows, int dim, float eps,
     cudaStream_t stream = nullptr
 );
 

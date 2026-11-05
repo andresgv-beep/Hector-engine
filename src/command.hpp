@@ -165,6 +165,19 @@ public:
     // Activations
     void add_silu(const std::string& dst, const std::string& src);
     void add_gelu(const std::string& dst, const std::string& src);
+    // gelu(gate) rounded to fp16, times up. With `layers` > 1, up packs `layers`
+    // segments of `dim` per row and the product takes segment `layer`. dim 0 is
+    // gate's last dimension.
+    void add_gelu_mul_rounded(const std::string& dst, const std::string& gate,
+                              const std::string& up, uint32_t dim,
+                              uint32_t layers = 1, uint32_t layer = 0);
+    // x = rmsnorm(x)*w1; hidden += x; [hidden *= scalar]; [normed = rmsnorm(hidden)*w2].
+    // Empty names skip the optional steps. Bit-identical to those commands apart.
+    void add_rmsnorm_residual(const std::string& hidden, const std::string& x,
+                              const std::string& w1, float eps,
+                              const std::string& scalar = "",
+                              const std::string& normed = "",
+                              const std::string& w2 = "");
     void add_softmax(const std::string& dst, const std::string& src, int32_t dim = -1);
     void add_softcap(const std::string& dst, const std::string& src, float cap);
     
