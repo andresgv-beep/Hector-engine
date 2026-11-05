@@ -18,6 +18,10 @@ static float rnd(uint32_t& s) { s = 1664525u * s + 1013904223u; return float((s 
 struct Geometry { const char* name; int heads, kvh, hd, window, slots; };
 
 int main(int argc, char** argv) {
+    if (!helios::kernels::device_has_m16n8k16()) {
+        printf("SKIP: esta GPU no tiene mma m16n8k16\n");
+        return 0;
+    }
     const bool bench = argc > 1 && std::string(argv[1]) == "bench";
     const Geometry geometries[] = {
         {"qwen3-8b", 32, 8, 128, 0, 16896},

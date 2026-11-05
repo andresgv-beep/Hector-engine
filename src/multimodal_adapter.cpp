@@ -52,17 +52,30 @@ class Gemma4VisionAdapter final : public MultimodalAdapter {
 public:
     Gemma4VisionAdapter(Engine& engine, HnfLoader& loader,
                         GraphBuilder& graph, const ArchDescriptor& text_arch,
-                        uint32_t max_prefill_tokens)
-        : engine_(engine), loader_(loader), graph_(graph), text_arch_(text_arch),
-          max_prefill_tokens_(max_prefill_tokens) {}
+                        uint32_t max_prefill_tokens, MultimodalPlacement placement)
+        : engine_(engine),
+          vision_engine_(placement.vision_engine ? *placement.vision_engine : engine),
+          loader_(loader), graph_(graph), text_arch_(text_arch),
+          max_prefill_tokens_(max_prefill_tokens),
+          text_forward_(std::move(placement.text_forward)),
+          resident_(placement.vision_engine != nullptr),
+          // 26B: los soft tokens de una imagen se ven entre sí en las capas
+          // deslizantes (upstream use_bidirectional_attention="vision"); el
+          // texto de alrededor sigue causal y va por el prefill normal.
+          image_block_only_(loader.config().get<std::string>(
+              "use_bidirectional_attention", "") == "vision") {}
 
     ~Gemma4VisionAdapter() override {
         if (loaded_vision_here_ && loader_.is_block_loaded(BLOCK_VISION)) {
-            loader_.unload_block(BLOCK_VISION, engine_);
+            vision_engine_.activate();
+            loader_.unload_block(BLOCK_VISION, vision_engine_);
+            engine_.activate();
         }
     }
 
     const char* id() const override { return "helios.gemma4.vision.v1"; }
+
+    bool prefix_is_text() const override { return image_block_only_; }
 
     int32_t marker_token(AttachmentKind kind) const override {
         return kind == AttachmentKind::ImageRgb8 && loader_.has_gemma4_vision_config()
@@ -161,10 +174,22 @@ public:
 
             const Gemma4MultimodalInputNames names{
                 kEmbeddingTokens, kPleTokens, kImageEmbeddings, kImagePositions};
-            engine_.execute(graph_.build_gemma4_multimodal_forward_cached(
-                engine_, loader_.config(), loader_.gemma4_config(), text_arch_,
-                names, 1, sequence, cache));
-            engine_.sync();
+            Gemma4BidirectionalBlock block;
+            if (image_block_only_) {
+                block.begin = static_cast<uint32_t>(plan.image_positions.front());
+                block.end = static_cast<uint32_t>(plan.image_positions.back()) + 1;
+            }
+            if (text_forward_) {
+                CommandBuffer input = graph_.build_gemma4_multimodal_input(
+                    engine_, loader_.config(), loader_.gemma4_config(), text_arch_,
+                    names, 1, sequence);
+                text_forward_(input, sequence, cache, block);
+            } else {
+                engine_.execute(graph_.build_gemma4_multimodal_forward_cached(
+                    engine_, loader_.config(), loader_.gemma4_config(), text_arch_,
+                    names, 1, sequence, cache, block));
+                engine_.sync();
+            }
 
             result.sequence_tokens = sequence;
             result.injected_tokens = preprocessed.soft_tokens;
@@ -210,21 +235,34 @@ private:
         }
     }
 
+    // The tower may run on another GPU than the decoder; the primary engine
+    // is active again on return either way.
     bool run_vision(const Gemma4VisionPreprocessResult& input,
                     std::string* error) {
+        vision_engine_.activate();
+        const bool ok = run_vision_on_device(input, error);
+        engine_.activate();
+        return ok;
+    }
+
+    bool run_vision_on_device(const Gemma4VisionPreprocessResult& input,
+                              std::string* error) {
         const bool was_loaded = loader_.is_block_loaded(BLOCK_VISION);
-        if (!was_loaded && !loader_.load_block(BLOCK_VISION, engine_)) {
+        if (!was_loaded && !loader_.load_block(BLOCK_VISION, vision_engine_)) {
             return fail(error, "cannot load vision block: " + loader_.last_error());
         }
-        const bool keep_mapped = [] {
+        // Se queda cargada con HELIOS_VISION_MMAP=1 (pesos mapeados en RAM) o
+        // cuando el reparto entre GPUs ya le guardó su sitio en la secundaria:
+        // así cada imagen no vuelve a subir 1,15 GB. Si no, se carga por turno.
+        const bool keep = resident_ || [] {
             const char* value = std::getenv("HELIOS_VISION_MMAP");
             return value && value[0] == '1';
         }();
-        loaded_vision_here_ = !was_loaded && keep_mapped;
+        if (!was_loaded && keep) loaded_vision_here_ = true;
 
         bool ok = false;
         {
-            Gemma4VisionRunner runner(engine_, loader_);
+            Gemma4VisionRunner runner(vision_engine_, loader_);
             ok = runner.run_patch_embedder(input, error);
             for (uint32_t layer = 0; ok && layer < runner.num_layers(); ++layer) {
                 ok = runner.run_encoder_layer(layer, error);
@@ -238,17 +276,29 @@ private:
             if (ok) {
                 const size_t bytes = size_t(input.soft_tokens) *
                     runner.projection_size() * sizeof(half);
-                ok = cuda_ok(cudaMemcpyAsync(
-                    engine_.tensors().at(kImageEmbeddings).ptr,
-                    runner.projected_states_device(), bytes,
-                    cudaMemcpyDeviceToDevice, engine_.config().stream),
-                    "persist multimodal visual embeddings", error);
-                if (ok) engine_.sync();
+                if (&vision_engine_ == &engine_) {
+                    ok = cuda_ok(cudaMemcpyAsync(
+                        engine_.tensors().at(kImageEmbeddings).ptr,
+                        runner.projected_states_device(), bytes,
+                        cudaMemcpyDeviceToDevice, engine_.config().stream),
+                        "persist multimodal visual embeddings", error);
+                    if (ok) engine_.sync();
+                } else {
+                    // Otra GPU: el runner termina en su stream y la copia
+                    // entre dispositivos (1,6 MB) es síncrona.
+                    vision_engine_.sync();
+                    ok = cuda_ok(cudaMemcpyPeer(
+                        engine_.tensors().at(kImageEmbeddings).ptr,
+                        engine_.config().device,
+                        runner.projected_states_device(),
+                        vision_engine_.config().device, bytes),
+                        "move visual embeddings to the decoder GPU", error);
+                }
             }
         }
 
-        if (!was_loaded && !keep_mapped) {
-            if (!loader_.unload_block(BLOCK_VISION, engine_)) {
+        if (!was_loaded && !keep) {
+            if (!loader_.unload_block(BLOCK_VISION, vision_engine_)) {
                 return fail(error, "cannot unload transient vision block");
             }
         }
@@ -261,10 +311,14 @@ private:
     static constexpr const char* kImageEmbeddings = "_mm.g4v1.image_embeddings";
 
     Engine& engine_;
+    Engine& vision_engine_;
     HnfLoader& loader_;
     GraphBuilder& graph_;
     const ArchDescriptor& text_arch_;
     uint32_t max_prefill_tokens_ = 0;
+    MultimodalTextForward text_forward_;
+    bool resident_ = false;
+    bool image_block_only_ = false;
     bool loaded_vision_here_ = false;
 };
 
@@ -309,7 +363,8 @@ bool validate_multimodal_turn(const MultimodalTurnInput& turn,
 std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
     const std::string& adapter_id, Engine& engine, HnfLoader& loader,
     GraphBuilder& graph, const ArchDescriptor& text_architecture,
-    uint32_t max_prefill_tokens, std::string* error) {
+    uint32_t max_prefill_tokens, std::string* error,
+    MultimodalPlacement placement) {
     if (error) error->clear();
     if (adapter_id == "helios.gemma4.vision.v1") {
         if (!loader.has_gemma4_config() ||
@@ -318,7 +373,8 @@ std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
             return nullptr;
         }
         return std::make_unique<Gemma4VisionAdapter>(
-            engine, loader, graph, text_architecture, max_prefill_tokens);
+            engine, loader, graph, text_architecture, max_prefill_tokens,
+            std::move(placement));
     }
     if (adapter_id == "helios.gemma4u.multimodal.v1") {
         // One HNF carrying text, vision and audio: the same loader serves both.

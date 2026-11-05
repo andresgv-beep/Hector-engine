@@ -141,10 +141,12 @@ namespace op {
     inline OpTypeID SOFTCAP() { return OpTypeRegistry::instance().get_id("softcap"); }
     inline OpTypeID SILU_MUL() { return OpTypeRegistry::instance().get_id("silu_mul"); }
     inline OpTypeID GELU_MUL() { return OpTypeRegistry::instance().get_id("gelu_mul"); }
+    inline OpTypeID GELU_MUL_ROUNDED() { return OpTypeRegistry::instance().get_id("gelu_mul_rounded"); }
     
     inline OpTypeID RMSNORM() { return OpTypeRegistry::instance().get_id("rmsnorm"); }
     inline OpTypeID LAYERNORM() { return OpTypeRegistry::instance().get_id("layernorm"); }
     inline OpTypeID ADD_RMSNORM() { return OpTypeRegistry::instance().get_id("add_rmsnorm"); }
+    inline OpTypeID RMSNORM_RESIDUAL() { return OpTypeRegistry::instance().get_id("rmsnorm_residual"); }
     
     inline OpTypeID MATMUL() { return OpTypeRegistry::instance().get_id("matmul"); }
     inline OpTypeID MATMUL_T() { return OpTypeRegistry::instance().get_id("matmul_t"); }
@@ -170,6 +172,18 @@ namespace op {
     inline OpTypeID PLE_SLICE() { return OpTypeRegistry::instance().get_id("ple_slice"); }
     /// Gemma 4 «unified»: suma la posicion factorizada (X+Y) a cada parche.
     inline OpTypeID G4U_POS_ADD() { return OpTypeRegistry::instance().get_id("g4u_pos_add"); }
+    /// Gemma 4 MoE: entrada del router en FP32.
+    inline OpTypeID MOE_ROUTER_INPUT() { return OpTypeRegistry::instance().get_id("moe_router_input"); }
+    /// Gemma 4 MoE: logits del router en FP32.
+    inline OpTypeID MOE_LOGITS() { return OpTypeRegistry::instance().get_id("moe_logits"); }
+    /// Gemma 4 MoE: top-k por token desde los logits del router.
+    inline OpTypeID MOE_ROUTE() { return OpTypeRegistry::instance().get_id("moe_route"); }
+    /// Gemma 4 MoE: suma ponderada de expertos, version de referencia.
+    inline OpTypeID MOE_EXPERTS() { return OpTypeRegistry::instance().get_id("moe_experts"); }
+    /// Gemma 4 MoE: un solo token, capturable en un CUDA Graph.
+    inline OpTypeID MOE_EXPERTS_DECODE() { return OpTypeRegistry::instance().get_id("moe_experts_decode"); }
+    /// Rellena con ceros las columnas fisicas que pasan de las logicas.
+    inline OpTypeID PAD_COLUMNS() { return OpTypeRegistry::instance().get_id("pad_columns"); }
 }
 
 } // namespace helios

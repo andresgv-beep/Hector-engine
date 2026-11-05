@@ -244,6 +244,39 @@ void launch_gelu_mul_fp16(
     );
 }
 
+// gelu(gate) redondeado a fp16 y luego __hmul con up: los mismos dos redondeos que
+// gelu_fp16_kernel seguido de mul_fp16_kernel, así que da sus bits (gelu_mul_fp16
+// no redondea el gelu y por eso no sirve para sustituirlos). `up` puede ser un
+// trozo de filas más anchas: la fila r empieza en r * up_stride + up_offset, que
+// es como la PLE lee su segmento de capa sin copiarlo antes.
+__global__ void gelu_mul_rounded_fp16_kernel(
+    const half* gate,
+    const half* __restrict__ up,
+    half* output,
+    int rows, int dim, int up_stride, int up_offset
+) {
+    const size_t numel = size_t(rows) * dim;
+    const size_t stride = size_t(blockDim.x) * gridDim.x;
+    for (size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x; i < numel; i += stride) {
+        const size_t r = i / dim;
+        const half g = __float2half(gelu_f32(__half2float(gate[i])));
+        output[i] = __hmul(g, up[r * up_stride + up_offset + (i - r * dim)]);
+    }
+}
+
+void launch_gelu_mul_rounded_fp16(
+    const half* gate, const half* up, half* output,
+    int rows, int dim, int up_stride, int up_offset,
+    cudaStream_t stream
+) {
+    const size_t numel = size_t(rows) * dim;
+    if (numel == 0) return;
+    int num_blocks = int((numel + ACTIVATION_BLOCK_SIZE - 1) / ACTIVATION_BLOCK_SIZE);
+    num_blocks = min(num_blocks, 65535);
+    gelu_mul_rounded_fp16_kernel<<<num_blocks, ACTIVATION_BLOCK_SIZE, 0, stream>>>(
+        gate, up, output, rows, dim, up_stride, up_offset);
+}
+
 // Gemma final-logit softcap: tanh(x / cap) * cap.
 __global__ void softcap_fp16_kernel(
     const half* __restrict__ input,

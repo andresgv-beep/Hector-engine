@@ -119,23 +119,18 @@ void test_command_contract() {
     helios::CommandBuffer layer_commands;
     helios::append_gemma4_ple_layer_injection(
         layer_commands, model, gemma, 4);
-    require(layer_commands.size() == 7,
-            "PLE layer injection must contain seven commands");
+    require(layer_commands.size() == 4,
+            "PLE layer injection must contain four commands");
     require(layer_commands[0].op == helios::op::MATMUL() &&
             layer_commands[0].inputs[1] == "text.layer4.ple.input_gate.weight",
             "PLE layer injection must use the selected gate");
-    require(layer_commands[1].op == helios::op::GELU(),
-            "PLE layer injection must use GELU tanh");
-    require(layer_commands[2].op == helios::op::MUL(),
-            "PLE layer injection must multiply its segment");
-    require(layer_commands[3].op == helios::op::MATMUL(),
+    require(layer_commands[1].op == helios::op::GELU_MUL_ROUNDED(),
+            "PLE layer injection must multiply GELU tanh by its segment");
+    require(layer_commands[2].op == helios::op::MATMUL(),
             "PLE layer injection must project to hidden");
-    require(layer_commands[4].op == helios::op::RMSNORM(),
-            "PLE layer injection must apply its post norm");
-    require(layer_commands[5].op == helios::op::ADD(),
-            "PLE layer injection must add its residual");
-    require(layer_commands[6].op == helios::op::MUL_SCALAR_TENSOR(),
-            "PLE layer injection must finish with layer_scalar");
+    require(layer_commands[3].op == helios::op::RMSNORM_RESIDUAL() &&
+            layer_commands[3].get<std::string>("scalar", "") == "text.layer4.layer_scalar",
+            "PLE layer injection must post-norm, add its residual and apply layer_scalar");
     std::cout << "PASS: PLE preparation command contract" << std::endl;
 }
 

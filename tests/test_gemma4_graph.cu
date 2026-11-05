@@ -249,7 +249,9 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
 
     const auto layer = builder.build_gemma4_single_layer(
         engine, config, gemma, arch, 0, 2, 3, 7);
-    require(layer.size() == 29, "Gemma 4 explicit layer command count");
+    // 29 before the fusions: norm+add+norm, gelu+mul twice, norm+add, ple_slice and
+    // norm+add+layer_scalar now take 8 commands fewer.
+    require(layer.size() == 21, "Gemma 4 explicit layer command count");
     const auto& v_norm = command_with_op(layer, helios::op::RMSNORM(), 3);
     require(v_norm.inputs.size() == 1 && v_norm.get<bool>("no_weight", false) &&
             v_norm.get<uint32_t>("dim", 0) == 256,
@@ -262,12 +264,18 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
     require(first_rope.get<uint32_t>("proportional", 0) == 1 &&
             first_rope.get<uint32_t>("offset", 0) == 7,
             "Gemma 4 proportional RoPE command");
-    const auto& ple_slice = command_with_op(layer, helios::op::PLE_SLICE());
-    require(ple_slice.get<uint32_t>("layer", 99) == 0 &&
-            ple_slice.get<uint32_t>("layers", 0) == 35 &&
-            ple_slice.get<uint32_t>("dim", 0) == 256,
+    const auto& ple_gelu = command_with_op(layer, helios::op::GELU_MUL_ROUNDED(), 1);
+    require(ple_gelu.inputs.size() == 2 && ple_gelu.inputs[1] == "_s.g4.ple" &&
+            ple_gelu.get<uint32_t>("layer", 99) == 0 &&
+            ple_gelu.get<uint32_t>("layers", 0) == 35 &&
+            ple_gelu.get<uint32_t>("dim", 0) == 256,
             "Gemma 4 packed PLE selection command");
-    require(layer[layer.size() - 1].op == helios::op::MUL_SCALAR_TENSOR(),
+    const auto& attn_residual = command_with_op(layer, helios::op::RMSNORM_RESIDUAL());
+    require(attn_residual.get<std::string>("normed", "") == "_s.normed" &&
+            attn_residual.get<std::string>("norm2_weight", "").find("ln_mlp_in") != std::string::npos,
+            "Gemma 4 attention residual must leave the MLP input normalized");
+    require(layer[layer.size() - 1].op == helios::op::RMSNORM_RESIDUAL() &&
+            !layer[layer.size() - 1].get<std::string>("scalar", "").empty(),
             "Gemma 4 layer must finish with layer_scalar");
 
     bool rejected_shared = false;
@@ -287,6 +295,60 @@ void test_heterogeneous_graph_contract(helios::Engine& engine) {
     cudaFree(dummy);
     std::cout << "PASS: heterogeneous Gemma 4 scratch and first local layer graph"
               << std::endl;
+}
+
+// With q|k|v and gate|up fused by the loader (HELIOS_FUSE_QKV) the layer makes one
+// GEMV for each. Prefill copies the output into q/k/v and gate/up; decode reads
+// fixed slices of it and must not emit a split, which would move view pointers.
+void test_fused_projection_contract(helios::Engine& engine) {
+    void* dummy = nullptr;
+    cuda_require(cudaMalloc(&dummy, sizeof(half)), "fused contract dummy");
+    auto names = register_detection_contract(engine, dummy);
+    for (const char* fused : {"text.layer0.attn.qkv_proj.weight", "text.layer0.mlp.gate_up.weight"}) {
+        engine.tensors().register_external(fused, dummy, {1}, helios::dtype::FP16());
+        names.push_back(fused);
+    }
+    const auto config = synthetic_model();
+    const auto gemma = synthetic_gemma();
+    helios::GraphBuilder builder;
+    const auto arch = builder.detect_architecture(engine, "text", config);
+    builder.allocate_gemma4_scratch(engine, config, gemma, arch, 2, 3);
+
+    const uint32_t q = config.num_attention_heads() * 256;
+    const uint32_t kv = config.num_key_value_heads() * 256;
+    const half* base = static_cast<const half*>(engine.tensors().at("_s.g4.qkv_backing").ptr);
+    require(engine.tensors().at("_s.g4.layer0.q_dec").ptr == base &&
+            engine.tensors().at("_s.g4.layer0.k_dec").ptr == base + q &&
+            engine.tensors().at("_s.g4.layer0.v_dec").ptr == base + q + kv,
+            "fused q/k/v decode views must slice the GEMV output");
+    require(!engine.tensors().exists("_s.g4.layer1.q_dec"),
+            "layers without fused weights get no fused views");
+
+    const auto prefill = builder.build_gemma4_single_layer(engine, config, gemma, arch, 0, 2, 3, 7);
+    const auto& qkv = command_with_op(prefill, helios::op::MATMUL());
+    require(qkv.inputs[1] == "text.layer0.attn.qkv_proj.weight" && qkv.output == "_s.g4.layer0.qkv",
+            "fused prefill must project q|k|v in one GEMV");
+    const auto& split = command_with_op(prefill, helios::op::SPLIT_QKV());
+    require(split.get<uint32_t>("q_size", 0) == q && split.get<uint32_t>("k_size", 0) == kv &&
+            split.get<uint32_t>("seq_len", 0) == 6, "fused prefill must copy six rows into q/k/v");
+    require(command_with_op(prefill, helios::op::SPLIT_HALF()).get<uint32_t>("split_size", 0) == 6144,
+            "fused prefill must copy gate|up");
+
+    const auto decode = builder.build_gemma4_single_layer(engine, config, gemma, arch, 0, 1, 1, 7);
+    for (const auto& command : decode.commands()) {
+        require(command.op != helios::op::SPLIT_QKV() && command.op != helios::op::SPLIT_HALF(),
+                "fused decode must not move view pointers");
+    }
+    require(command_with_op(decode, helios::op::ATTENTION()).inputs[0] == "_s.g4.layer0.q_dec",
+            "fused decode attention must read the q slice");
+    const auto& gelu = command_with_op(decode, helios::op::GELU_MUL_ROUNDED());
+    require(gelu.inputs[0] == "_s.g4.layer0.gate_dec" && gelu.inputs[1] == "_s.g4.layer0.up_dec",
+            "fused decode GELU-mul must read the gate and up slices");
+
+    builder.free_scratch(engine);
+    for (const std::string& name : names) engine.tensors().remove(name);
+    cudaFree(dummy);
+    std::cout << "PASS: fused q/k/v and gate/up projections, prefill and decode" << std::endl;
 }
 
 const helios::TensorEntry& tensor_named(const helios::HnfLoader& loader,
@@ -814,6 +876,7 @@ int main(int argc, char** argv) {
     test_no_weight_rmsnorm_command(engine);
     test_multitoken_ple_slice(engine);
     test_heterogeneous_graph_contract(engine);
+    test_fused_projection_contract(engine);
     require(argc <= 2, "Usage: test_gemma4_graph [compact-gemma4.hnf]");
     if (argc == 2) test_real_first_local_layer(engine, argv[1]);
     return 0;

@@ -8,8 +8,10 @@
 //
 
 #include "hqs_common.cuh"
+#include "per_device.hpp"
 #include "hqs_v3_gemv.cuh"
 #include "hqs_v4_gemv.cuh"
+#include "hq8_gemv.cuh"
 #include <stdexcept>
 #include <cuda_fp16.h>
 #include <unordered_map>
@@ -412,9 +414,91 @@ __global__ void gemv_hq_symmetric_kernel(
     }
 }
 
+// La geometría A (un warp por fila) sin pasar la entrada por memoria compartida.
+// En el lm_head del E4B (K=2560, N=262144) el kernel de arriba lanza 65.536
+// bloques de 4 filas, y cada uno copia los 5 KB de entrada y espera en un
+// __syncthreads antes de leer un solo peso: ~335 MB de tráfico extra frente a
+// 482 MB de pesos. Aquí cada lane lee sus 8 halves de entrada con __ldg (la
+// entrada entera cabe en L1) y los pesos con palabras de 32 bits.
+//
+// Bits idénticos a A: los mismos fmaf en el mismo orden, superbloques pares en
+// acc y nones en acc_odd, y la misma reducción. Así una decisión «A» guardada en
+// tune.cache sigue certificando la misma trayectoria greedy.
+// Exige K % 256 == 0, entrada alineada a 16 bytes y pesos a 4.
+template<int BITS, int BLOCK_BYTES, int RPB>
+__global__ void gemv_hq_symmetric_rowwarp_kernel(
+    const half* __restrict__ input,
+    const uint8_t* __restrict__ weights,
+    half* __restrict__ output,
+    int K, int N
+) {
+    using namespace hqs;
+    const int lane = threadIdx.x % 32;
+    const int row = blockIdx.x * RPB + threadIdx.x / 32;
+    if (row >= N) return;
+    const int total_sb = K / SUPER_BLOCK_SIZE;
+    const uint8_t* row_weights = weights + size_t(row) * total_sb * BLOCK_BYTES;
+    const uint4* input4 = reinterpret_cast<const uint4*>(input);
+    // q_step del grupo `lane`: 5 bits a partir del bit lane*5 de los bytes 4..24.
+    const int q_word = 1 + (lane * 5) / 32;
+    const int q_shift = (lane * 5) % 32;
+    float acc = 0.0f;
+    float acc_odd = 0.0f;
+
+    #pragma unroll 2
+    for (int sb = 0; sb < total_sb; ++sb) {
+        const uint32_t* block32 = reinterpret_cast<const uint32_t*>(row_weights + size_t(sb) * BLOCK_BYTES);
+        const uint4 x4 = __ldg(input4 + sb * (SUPER_BLOCK_SIZE / 8) + lane);
+        const uint32_t h0 = __ldg(block32);
+        const uint32_t q_step = __funnelshift_r(__ldg(block32 + q_word), __ldg(block32 + q_word + 1), q_shift) & 0x1f;
+        const float d_step = __half2float(__ushort_as_half(uint16_t(h0 & 0xffff)));
+        const float step = d_step * float(q_step) * (1.0f / 31.0f);
+        const half* x = reinterpret_cast<const half*>(&x4);
+        float& a = (sb & 1) ? acc_odd : acc;
+        if constexpr (BITS == 4) {
+            const uint32_t packed = __ldg(block32 + SYMMETRIC_HEADER_SIZE / 4 + lane);
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const uint8_t byte = (packed >> (i * 8)) & 0xff;
+                const float w0 = float(int(byte >> 4) - 8) * step;
+                const float w1 = float(int(byte & 0x0f) - 8) * step;
+                a = fmaf(w0, __half2float(x[i * 2]), a);
+                a = fmaf(w1, __half2float(x[i * 2 + 1]), a);
+            }
+        } else {
+            const int offset = SYMMETRIC_HEADER_SIZE + lane * 5;
+            const uint32_t lo = __ldg(block32 + offset / 4);
+            const uint32_t hi = __ldg(block32 + offset / 4 + 1);
+            const uint64_t packed = ((uint64_t(hi) << 32) | lo) >> ((offset % 4) * 8);
+            #pragma unroll
+            for (int i = 0; i < GROUP_SIZE; ++i) {
+                const float w = float(int((packed >> (i * 5)) & 0x1f) - 16) * step;
+                a = fmaf(w, __half2float(x[i]), a);
+            }
+        }
+    }
+
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        acc += __shfl_down_sync(0xffffffff, acc, offset);
+        acc_odd += __shfl_down_sync(0xffffffff, acc_odd, offset);
+    }
+    if (lane == 0) output[row] = __float2half(acc + acc_odd);
+}
+
 template<int BITS, int BLOCK_BYTES, int WPR, int RPB>
 static void launch_symmetric(const half* in, const uint8_t* weights, half* out,
                              int K, int N, cudaStream_t stream) {
+    if constexpr (WPR == 1) {
+        if (K % hqs::SUPER_BLOCK_SIZE == 0 &&
+            (reinterpret_cast<uintptr_t>(in) & 15u) == 0 &&
+            (reinterpret_cast<uintptr_t>(weights) & 3u) == 0) {
+            constexpr int ROWS = 8;
+            gemv_hq_symmetric_rowwarp_kernel<BITS, BLOCK_BYTES, ROWS>
+                <<<(N + ROWS - 1) / ROWS, ROWS * 32, 0, stream>>>(in, weights, out, K, N);
+            return;
+        }
+    }
     const int threads = WPR * RPB * 32;
     const int blocks = (N + RPB - 1) / RPB;
     const size_t shared = std::min(K, COMPACT_INPUT_CHUNK) * sizeof(half) +
@@ -506,6 +590,11 @@ static float benchmark_compact_kernel(
 // DISPATCH
 // ============================================================================
 
+// Cada GPU elige su layout: la forma sola no basta para reutilizar una decisión.
+static uint64_t tune_key(int K, int N) {
+    return (uint64_t(PerDevice<int>::current_device()) << 58) | (uint64_t(K) << 32) | uint64_t(N);
+}
+
 static std::unordered_map<uint64_t, int> s_tune_cache_hq41k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq51k;
 static std::unordered_map<uint64_t, int> s_tune_cache_hq42k;
@@ -516,6 +605,9 @@ static std::unordered_map<uint64_t, int> s_tune_cache_hq44k;
 // decisions recorded for another variant set are ignored and re-timed.
 static constexpr const char* HQ44K_TUNE_TAG = "hq44k_g16.v2";
 static constexpr int HQ44K_TUNE_VARIANTS = 4;
+static std::unordered_map<uint64_t, int> s_tune_cache_hq8k;
+static constexpr const char* HQ8K_TUNE_TAG = "hq8k.v1";
+static constexpr int HQ8K_TUNE_VARIANTS = 4;
 
 // ----------------------------------------------------------------------------
 // Sidecar del auto-tune: ~/.helios/tune.cache (o $HELIOS_HOME/.helios)
@@ -526,10 +618,11 @@ static constexpr int HQ44K_TUNE_VARIANTS = 4;
 // (mismo árbol de reducción, bits idénticos), pero A parte la suma distinto:
 // un cruce A<->B/C cambia la trayectoria greedy certificada. El sidecar
 // persiste la primera decisión por forma y por GPU; borrar el fichero fuerza
-// re-tune. HELIOS_TUNE_NOCACHE=1 desactiva lectura y escritura.
+// re-tune. HELIOS_TUNE_NOCACHE=1 desactiva lectura y escritura. Cada GPU tiene
+// sus secciones en el fichero: con dos tarjetas ninguna borra lo de la otra.
 
-static bool s_tune_sidecar_loaded = false;
-static bool s_tune_sidecar_has_header = false;
+static PerDevice<bool> s_tune_sidecar_loaded;
+static std::string s_tune_sidecar_tail_device;  // GPU de la ultima seccion del fichero
 static std::string s_tune_sidecar_path;
 
 static std::string tune_device_name() {
@@ -541,8 +634,9 @@ static std::string tune_device_name() {
 }
 
 static void tune_sidecar_load_once() {
-    if (s_tune_sidecar_loaded) return;
-    s_tune_sidecar_loaded = true;
+    bool& loaded_here = s_tune_sidecar_loaded.current();
+    if (loaded_here) return;
+    loaded_here = true;
     if (getenv("HELIOS_TUNE_NOCACHE")) return;
     // Misma semántica que helios_chat: HELIOS_HOME es el directorio de perfil
     // completo; sin él, ~/.helios.
@@ -565,10 +659,12 @@ static void tune_sidecar_load_once() {
     char line[256];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#') {
-            // Cabecera "# helios tune.cache v1 <GPU>": otra GPU invalida el
-            // contenido (las decisiones se recronometran y el fichero se
-            // reescribe en el primer append).
+            // Cabecera "# helios tune.cache v1 <GPU>": solo cuentan las
+            // secciones de esta GPU.
             device_ok = strstr(line, device.c_str()) != nullptr;
+            std::string tail(line);
+            while (!tail.empty() && tail.back() == '\n') tail.pop_back();
+            s_tune_sidecar_tail_device = tail;
             continue;
         }
         if (!device_ok) continue;
@@ -576,9 +672,10 @@ static void tune_sidecar_load_once() {
         if (sscanf(line, "%15s %d %d %c", fmt, &K, &N, &choice) != 4) continue;
         int best = choice - 'A';
         // hq44k has four candidates; the older formats keep A-C.
-        const int variants = strcmp(fmt, HQ44K_TUNE_TAG) == 0 ? HQ44K_TUNE_VARIANTS : 3;
+        const int variants = strcmp(fmt, HQ44K_TUNE_TAG) == 0 ? HQ44K_TUNE_VARIANTS :
+                             strcmp(fmt, HQ8K_TUNE_TAG) == 0 ? HQ8K_TUNE_VARIANTS : 3;
         if (best < 0 || best >= variants) continue;
-        uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        uint64_t key = tune_key(K, N);
         if      (strcmp(fmt, "hq41k") == 0) s_tune_cache_hq41k[key] = best;
         else if (strcmp(fmt, "hq51k") == 0) s_tune_cache_hq51k[key] = best;
         else if (strcmp(fmt, "hq42k") == 0) s_tune_cache_hq42k[key] = best;
@@ -588,10 +685,10 @@ static void tune_sidecar_load_once() {
                  strcmp(fmt,"hq53k_g16")==0 || strcmp(fmt,"hq53k_g32")==0)
             s_tune_cache_v3[fmt][key] = best;
         else if (strcmp(fmt, HQ44K_TUNE_TAG) == 0) s_tune_cache_hq44k[key] = best;
+        else if (strcmp(fmt, HQ8K_TUNE_TAG) == 0) s_tune_cache_hq8k[key] = best;
         loaded++;
     }
     fclose(f);
-    s_tune_sidecar_has_header = device_ok;
     if (getenv("HELIOS_TUNE_DEBUG"))
         fprintf(stderr, "[tune] sidecar: %d decisiones cargadas de %s\n",
                 loaded, s_tune_sidecar_path.c_str());
@@ -599,12 +696,12 @@ static void tune_sidecar_load_once() {
 
 static void tune_sidecar_append(const char* fmt, int K, int N, int best) {
     if (s_tune_sidecar_path.empty() || getenv("HELIOS_TUNE_NOCACHE")) return;
-    // Sin cabecera válida (fichero nuevo o de otra GPU) se reescribe entero.
-    FILE* f = fopen(s_tune_sidecar_path.c_str(), s_tune_sidecar_has_header ? "a" : "w");
+    FILE* f = fopen(s_tune_sidecar_path.c_str(), "a");
     if (!f) return;
-    if (!s_tune_sidecar_has_header) {
-        fprintf(f, "# helios tune.cache v1 %s\n", tune_device_name().c_str());
-        s_tune_sidecar_has_header = true;
+    const std::string header = "# helios tune.cache v1 " + tune_device_name();
+    if (s_tune_sidecar_tail_device != header) {
+        fprintf(f, "%s\n", header.c_str());
+        s_tune_sidecar_tail_device = header;
     }
     fprintf(f, "%s %d %d %c\n", fmt, K, N, (char)('A' + best));
     fclose(f);
@@ -615,7 +712,7 @@ void launch_matmul_hq41k(
     int M, int K, int N, cudaStream_t stream
 ) {
     if (M == 1) {
-        uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        uint64_t key = tune_key(K, N);
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq41k.find(key);
         if (it == s_tune_cache_hq41k.end()) {
@@ -660,7 +757,7 @@ void launch_matmul_hq51k(
     int M, int K, int N, cudaStream_t stream
 ) {
     if (M == 1) {
-        uint64_t key = ((uint64_t)K << 32) | (uint64_t)N;
+        uint64_t key = tune_key(K, N);
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq51k.find(key);
         if (it == s_tune_cache_hq51k.end()) {
@@ -694,7 +791,7 @@ void launch_matmul_hq42k(
     int M, int K, int N, cudaStream_t stream
 ) {
     if (M == 1) {
-        const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+        const uint64_t key = tune_key(K, N);
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq42k.find(key);
         if (it == s_tune_cache_hq42k.end()) {
@@ -730,7 +827,7 @@ void launch_matmul_hq52k(
     int M, int K, int N, cudaStream_t stream
 ) {
     if (M == 1) {
-        const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+        const uint64_t key = tune_key(K, N);
         tune_sidecar_load_once();
         auto it = s_tune_cache_hq52k.find(key);
         if (it == s_tune_cache_hq52k.end()) {
@@ -774,7 +871,7 @@ static void matmul_v3(const half* input,const uint8_t* weights,half* output,
     static const Fn functions[] = {hqs_v3::launch_symmetric<Bits,Group,1,4>,
         hqs_v3::launch_symmetric<Bits,Group,2,8>, hqs_v3::launch_symmetric<Bits,Group,2,4>};
     const std::string format = "hq" + std::to_string(Bits) + "3k_g" + std::to_string(Group);
-    const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+    const uint64_t key = tune_key(K, N);
     tune_sidecar_load_once();
     auto& cache = s_tune_cache_v3[format];
     auto it = cache.find(key);
@@ -810,8 +907,11 @@ static float benchmark_cold_l2(
     void(*launcher)(const half*, const uint8_t*, half*, int, int, cudaStream_t),
     const half* input, const uint8_t* weights, half* output, int K, int N, cudaStream_t stream
 ) {
-    static void* flush = nullptr;
-    static size_t flush_bytes = 0;
+    struct Flush { void* data = nullptr; size_t bytes = 0; };
+    static PerDevice<Flush> flushes;
+    Flush& current = flushes.current();
+    void*& flush = current.data;
+    size_t& flush_bytes = current.bytes;
     if (!flush) {
         int device = 0, l2 = 0;
         cudaGetDevice(&device);
@@ -853,7 +953,7 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
         hqs_v4::launch_gemv2<2,4,2>, hqs_v4::launch_gemv2<4,2,2>};
     constexpr int count = sizeof(functions)/sizeof(functions[0]);
     static_assert(count == HQ44K_TUNE_VARIANTS, "update HQ44K_TUNE_TAG and HQ44K_TUNE_VARIANTS with the candidate list");
-    const uint64_t key = (uint64_t(K) << 32) | uint64_t(N);
+    const uint64_t key = tune_key(K, N);
     tune_sidecar_load_once();
     auto it = s_tune_cache_hq44k.find(key);
     if (it == s_tune_cache_hq44k.end() || it->second >= count) {
@@ -863,6 +963,36 @@ void launch_matmul_hq44k(const half* input,const uint8_t* weights,half* output,
         s_tune_cache_hq44k[key]=best; tune_sidecar_append(HQ44K_TUNE_TAG,K,N,best);
         if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",HQ44K_TUNE_TAG,K,N,'A'+best);
         it=s_tune_cache_hq44k.find(key);
+    }
+    for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
+}
+
+void launch_matmul_hq8k_cublas(const half*,const uint8_t*,half*,int,int,int,cudaStream_t);
+
+// HQ8K: same tuner and layouts as hq44k. The cuBLAS path accumulates in FP32.
+void launch_matmul_hq8k(const half* input,const uint8_t* weights,half* output,
+                        int M,int K,int N,cudaStream_t stream) {
+    if (M<=0 || K<=0 || N<=0) return;
+    if (K%256) throw std::runtime_error("hq8k GEMV requires K divisible by 256");
+    if (M >= COMPACT_GEMM_THRESHOLD) {
+        launch_matmul_hq8k_cublas(input,weights,output,M,K,N,stream);
+        return;
+    }
+    using Fn = void(*)(const half*,const uint8_t*,half*,int,int,cudaStream_t);
+    static const Fn functions[] = {hq8::launch_gemv<1,8,4>, hq8::launch_gemv<2,8,2>,
+        hq8::launch_gemv<2,4,2>, hq8::launch_gemv<4,2,2>};
+    constexpr int count = sizeof(functions)/sizeof(functions[0]);
+    static_assert(count == HQ8K_TUNE_VARIANTS, "update HQ8K_TUNE_TAG and HQ8K_TUNE_VARIANTS with the candidate list");
+    const uint64_t key = tune_key(K, N);
+    tune_sidecar_load_once();
+    auto it = s_tune_cache_hq8k.find(key);
+    if (it == s_tune_cache_hq8k.end() || it->second >= count) {
+        int best = 0; float times[count];
+        for (int i=0;i<count;++i) times[i]=benchmark_cold_l2(functions[i],input,weights,output,K,N,stream);
+        for (int i=1;i<count;++i) if (times[i]<times[best]) best=i;
+        s_tune_cache_hq8k[key]=best; tune_sidecar_append(HQ8K_TUNE_TAG,K,N,best);
+        if (getenv("HELIOS_TUNE_DEBUG")) fprintf(stderr,"[tune] %s K=%d N=%d -> %c\n",HQ8K_TUNE_TAG,K,N,'A'+best);
+        it=s_tune_cache_hq8k.find(key);
     }
     for (int m=0;m<M;++m) functions[it->second](input+size_t(m)*K,weights,output+size_t(m)*N,K,N,stream);
 }

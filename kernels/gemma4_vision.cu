@@ -244,6 +244,23 @@ __global__ void fp32_to_fp16_kernel(
     }
 }
 
+__global__ void gemma4_vision_standardize_fp16_kernel(
+    const float* __restrict__ input,
+    const half* __restrict__ bias,
+    const half* __restrict__ scale,
+    half* __restrict__ output,
+    size_t elements,
+    uint32_t hidden_size) {
+    size_t index = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    const size_t stride = size_t(blockDim.x) * gridDim.x;
+    for (; index < elements; index += stride) {
+        const uint32_t channel = index % hidden_size;
+        output[index] = __float2half(
+            (input[index] - __half2float(bias[channel])) *
+            __half2float(scale[channel]));
+    }
+}
+
 } // namespace
 
 void launch_gemma4_patch_input_fp16(
@@ -396,6 +413,23 @@ void launch_gemma4_vision_pool3x3_fp32(
     grid = min(grid, 65535u);
     gemma4_vision_pool3x3_fp32_kernel<<<grid, block, 0, stream>>>(
         hidden, pooled, patch_columns, patch_rows, hidden_size);
+}
+
+void launch_gemma4_vision_standardize_fp16(
+    const float* input,
+    const half* bias,
+    const half* scale,
+    half* output,
+    uint32_t rows,
+    uint32_t hidden_size,
+    cudaStream_t stream) {
+    const size_t elements = size_t(rows) * hidden_size;
+    if (elements == 0) return;
+    constexpr uint32_t block = 256;
+    uint32_t grid = static_cast<uint32_t>((elements + block - 1) / block);
+    grid = min(grid, 65535u);
+    gemma4_vision_standardize_fp16_kernel<<<grid, block, 0, stream>>>(
+        input, bias, scale, output, elements, hidden_size);
 }
 
 void launch_fp32_to_fp16(

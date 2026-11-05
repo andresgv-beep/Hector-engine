@@ -14,7 +14,11 @@
 #include "engine.hpp"
 #include "graph_builder.hpp"
 #include "gemma4_kv_cache.hpp"
+#include "gemma4_split.hpp"
+#include "gemma4_validator.hpp"
 #include <algorithm>
+#include <iostream>
+#include <limits>
 #include "hnf_loader.hpp"
 #include "htf_tokenizer.hpp"
 #include "kv_cache.hpp"
@@ -94,6 +98,16 @@ struct Model::Impl {
     bool use_cuda_graphs = true;
     std::unique_ptr<Engine> engine;
     HnfLoader loader;
+    // Dónde va cada cosa (gemma4_placement). Con reparto, la segunda GPU lleva las capas
+    // [split_boundary, N); split_boundary puede ser 0 (todas allí, embedding y cabeza aquí).
+    Gemma4Placement placement;
+    uint32_t split_boundary = 0;
+    bool split_active() const { return placement.fit == Gemma4Fit::Split; }
+    OwnedStream secondary_stream;
+    std::unique_ptr<Engine> secondary_engine;
+    HnfLoader secondary_loader;
+    GraphBuilder secondary_gb;
+    std::unique_ptr<Gemma4SplitForward> split;
     // Before `multimodal`: the unified adapter reads this loader's hints and
     // must be destroyed first.
     HnfLoader modality_loader;
@@ -156,10 +170,13 @@ struct InferenceSession::Impl {
     KVCacheConfig kv_config;
     KVCache kv_cache;
     Gemma4KVCache gemma_kv_cache;
+    Gemma4KVCache secondary_kv_cache;
     std::vector<char> saved_rings;
+    std::vector<char> secondary_saved_rings;
     Sampler sampler;
     SamplingConfig sample_config;
     CommandBuffer decode_cb;
+    CommandBuffer decode_rest, decode_head;
     bool decode_cb_built = false;
     bool graph_unavailable = false;
     uint32_t graph_captures = 0, graph_replays = 0, graph_fallbacks = 0;
@@ -191,15 +208,41 @@ struct InferenceSession::Impl {
     ~Impl() {
         std::lock_guard<std::timed_mutex> lock(M.en_uso);
         engine->sync();
-        engine->invalidate_graph();
+        invalidate_graphs();
         // External tensor views must not outlive this session's allocations.
         if (!kv_prefix.empty()) {
             for (uint32_t l = 0; l < kv_config.num_layers; ++l) {
+                Engine& owner = M.split && l >= M.split_boundary ? *M.secondary_engine : *engine;
                 const auto base = kv_prefix + ".layer" + std::to_string(l);
-                engine->tensors().remove(base + ".k");
-                engine->tensors().remove(base + ".v");
+                owner.tensors().remove(base + ".k");
+                owner.tensors().remove(base + ".v");
             }
         }
+    }
+
+    void invalidate_graphs() {
+        if (M.split) {
+            M.secondary_engine->activate();
+            M.secondary_engine->invalidate_graph();
+            engine->activate();
+        }
+        engine->invalidate_graph();
+    }
+
+    // Las mismas piezas de build_gemma4_forward_cached, cada una en su GPU.
+    void build_split(uint32_t seq, uint32_t pos, CommandBuffer& first, CommandBuffer& rest,
+                     CommandBuffer& head) {
+        const Gemma4Config& gemma = loader.gemma4_config();
+        const KVCacheParams params{kv_prefix, pos, kv_config.max_seq_len};
+        M.secondary_engine->activate();
+        rest = M.secondary_gb.build_gemma4_layers_cached(
+            *M.secondary_engine, model_config, gemma, arch, M.split_boundary, arch.num_layers,
+            1, seq, params);
+        engine->activate();
+        first = gb.build_gemma4_input(*engine, model_config, gemma, arch, "input_tokens", 1, seq);
+        first.append(gb.build_gemma4_layers_cached(*engine, model_config, gemma, arch, 0,
+                                                   M.split_boundary, 1, seq, params));
+        head = gb.build_gemma4_head(model_config, gemma, arch, seq);
     }
 
     uint32_t position() const {
@@ -322,9 +365,29 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
     cudaMemcpy(input_info->ptr, &token, sizeof(int32_t), cudaMemcpyHostToDevice);
     uint32_t pos = position();
     if (is_gemma4) gemma_kv_cache.note_write_end(pos + 1);
-    engine->update_device_cache_pos(pos, 1);
+    if (M.split) M.split->update_device_cache_pos(pos, 1);
+    else engine->update_device_cache_pos(pos, 1);
 
-    if (!decode_cb_built) {
+    if (M.split) {
+        const Gemma4SplitForward::Parts parts{decode_cb, decode_rest, decode_head};
+        if (!decode_cb_built) {
+            build_split(1, pos, decode_cb, decode_rest, decode_head);
+            decode_cb_built = true;
+            M.split->run(parts);
+            engine->sync();
+        } else if (M.use_cuda_graphs && !graph_unavailable) {
+            const bool replay = M.split->graphs_ready();
+            M.split->replay(parts);
+            if (M.split->graphs_ready()) {
+                if (replay) ++graph_replays; else ++graph_captures;
+            } else {
+                ++graph_fallbacks;
+                graph_unavailable = true; // do not retry the same failure per token
+            }
+        } else {
+            M.split->run(parts);
+        }
+    } else if (!decode_cb_built) {
         if (is_gemma4) {
             const KVCacheParams params{kv_prefix, pos, kv_config.max_seq_len};
             decode_cb = gb.build_gemma4_forward_cached(
@@ -385,10 +448,15 @@ std::optional<int32_t> InferenceSession::Impl::forward_batch(
         if (is_gemma4) gemma_kv_cache.note_write_end(pos + static_cast<uint32_t>(n));
         // Prefill mutates scratch views, including zero-copy QKV/gate splits.
         // The next decode must rebuild its views before capture or eager use.
-        engine->invalidate_graph();
+        invalidate_graphs();
         decode_cb_built = false;
         CommandBuffer pcb;
-        if (is_gemma4) {
+        if (M.split) {
+            CommandBuffer rest, head;
+            M.split->update_device_cache_pos(int32_t(pos), int32_t(n));
+            build_split(static_cast<uint32_t>(n), pos, pcb, rest, head);
+            M.split->run({pcb, rest, head});
+        } else if (is_gemma4) {
             const KVCacheParams params{kv_prefix, pos, kv_config.max_seq_len};
             pcb = gb.build_gemma4_forward_cached(
                 *engine, model_config, loader.gemma4_config(), arch,
@@ -398,7 +466,7 @@ std::optional<int32_t> InferenceSession::Impl::forward_batch(
                 *engine, model_config, arch, "input_tokens", 1,
                 static_cast<uint32_t>(n), kv_prefix, pos, kv_config.max_seq_len);
         }
-        engine->execute(pcb);
+        if (!M.split) engine->execute(pcb);
         engine->sync();
         advance(static_cast<uint32_t>(n));
         if (kv_tracked) kv_tokens.insert(kv_tokens.end(), ids.begin() + done,
@@ -425,7 +493,7 @@ uint32_t InferenceSession::cache_position() const {
 
 void InferenceSession::reset() {
     std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
-    impl_->engine->invalidate_graph();
+    impl_->invalidate_graphs();
     impl_->decode_cb_built = false;
     impl_->clear();
     impl_->sampler.clear_context();
@@ -447,13 +515,69 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         s.engine_config.use_gemm_prefill = config.use_gemm_prefill;
         s.engine_config.use_flash_prefill = config.use_flash_prefill;
         s.use_cuda_graphs = config.use_cuda_graphs;
-        s.engine = std::make_unique<Engine>(s.engine_config);
-        kernels::register_all_kernels(*s.engine);
-
         if (!s.loader.open(config.hnf_path)) {
             *error = "no pude abrir el HNF";
             return nullptr;
         }
+        const uint32_t layers = s.loader.config().num_hidden_layers();
+        s.placement = gemma4_placement(s.loader, config.max_seq_len, kPrefillChunk);
+        if (s.placement.fit == Gemma4Fit::NoFit) {
+            *error = "el modelo no cabe en las GPUs disponibles con un contexto de " +
+                     std::to_string(config.max_seq_len) + " tokens";
+            return nullptr;
+        }
+        if (s.placement.vision_dropped) {
+            std::cerr << "[modelo] la visión no cabe junto al texto: se abre solo el texto" << std::endl;
+        }
+        s.split_boundary = s.placement.boundary;
+        // La segunda GPU hace falta con capas repartidas o con la torre allí sola.
+        const bool second_gpu_used = s.split_active() || s.placement.vision == Gemma4VisionPlace::Secondary;
+        if (second_gpu_used) s.engine_config.device = 0;
+        s.engine = std::make_unique<Engine>(s.engine_config);
+        kernels::register_all_kernels(*s.engine);
+        if (second_gpu_used) {
+            const cudaError_t second_gpu = cudaSetDevice(1);
+            const cudaError_t second_stream = second_gpu == cudaSuccess
+                ? cudaStreamCreate(&s.secondary_stream.handle) : second_gpu;
+            if (second_stream != cudaSuccess) {
+                throw std::runtime_error(std::string("segunda GPU: ") + cudaGetErrorString(second_stream));
+            }
+            EngineConfig secondary_config = s.engine_config;
+            secondary_config.device = 1;
+            secondary_config.stream = s.secondary_stream.handle;
+            s.secondary_engine = std::make_unique<Engine>(secondary_config);
+            kernels::register_all_kernels(*s.secondary_engine);
+            s.engine->activate();
+        }
+        if (!s.split_active() && s.placement.vision == Gemma4VisionPlace::Secondary) {
+            std::cerr << "[modelo] texto entero en GPU 0, visión en GPU 1" << std::endl;
+        }
+        if (s.split_active()) {
+            if (s.split_boundary == 0) {
+                std::cerr << "[modelo] todas las capas en GPU 1; embedding y cabeza en GPU 0" << std::endl;
+            } else {
+                std::cerr << "[modelo] capas 0-" << s.split_boundary - 1 << " en GPU 0, "
+                          << s.split_boundary << "-" << layers - 1 << " en GPU 1" << std::endl;
+            }
+            s.secondary_engine->activate();
+            if (!s.secondary_loader.open(config.hnf_path)) {
+                *error = s.secondary_loader.last_error();
+                return nullptr;
+            }
+            const uint32_t boundary = s.split_boundary;
+            s.secondary_loader.set_tensor_filter([=](const TensorEntry& tensor) {
+                return gemma4_tensor_in_span(tensor, boundary, layers, false);
+            });
+            if (!s.secondary_loader.load_block(BLOCK_TEXT_MODEL, *s.secondary_engine)) {
+                *error = s.secondary_loader.last_error();
+                return nullptr;
+            }
+            s.engine->activate();
+            s.loader.set_tensor_filter([=](const TensorEntry& tensor) {
+                return gemma4_tensor_in_span(tensor, 0, boundary, true);
+            });
+        }
+
         s.model_config = s.loader.config();
         if (!s.loader.load_block(BLOCK_TEXT_MODEL, *s.engine)) {
             *error = "no pude cargar el bloque de texto";
@@ -484,20 +608,41 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
 
         // El grafo y sus buffers de trabajo son del MODELO: los comparten
         // todas las sesiones, y por eso los turnos van en serie.
-        s.arch = s.gb.detect_architecture(*s.engine, "text", s.model_config);
+        s.arch = s.split_active() ? gemma4_split_arch(s.model_config.num_hidden_layers())
+                                  : s.gb.detect_architecture(*s.engine, "text", s.model_config);
+        if (s.is_gemma4 && s.loader.gemma4_config().has_flag(GEMMA4_EXT_FLAG_MOE)) {
+            const auto problems = validate_gemma4_moe_tensors(
+                s.loader.gemma4_config(), s.model_config.hidden_size(), s.loader.tensors());
+            if (!problems.empty()) {
+                *error = "HNF MoE incoherente: " + problems.front();
+                return nullptr;
+            }
+        }
         // Gemma de solo texto nunca prefillea más de kPrefillChunk.
         // Conservar el techo multimodal para los demás caminos.
         const bool multimodal_file = !config.multimodal_hnf_path.empty();
         // The unified adapter only prefills the attachment itself (<= 752
-        // tokens); the surrounding text goes through the normal chunks.
-        const uint32_t scratch_tokens = s.is_gemma4 && !s.loader.has_gemma4_vision_config()
-                                            ? kPrefillChunk : kScratchTokens;
+        // tokens); the surrounding text goes through the normal chunks. So does
+        // a tower whose image block is bidirectional (26B, ~282 tokens).
+        const bool image_block_only = s.loader.config().get<std::string>(
+            "use_bidirectional_attention", "") == "vision";
+        const uint32_t scratch_tokens =
+            s.is_gemma4 && (!s.loader.has_gemma4_vision_config() || image_block_only)
+                ? kPrefillChunk : kScratchTokens;
         s.engine->tensors().allocate_and_register(
             "input_tokens", {1, scratch_tokens}, dtype::INT32());
         if (s.is_gemma4) {
             s.gb.allocate_gemma4_scratch(*s.engine, s.model_config,
                                          s.loader.gemma4_config(), s.arch,
                                          1, scratch_tokens);
+            if (s.split_active()) {
+                s.secondary_engine->activate();
+                s.secondary_gb.allocate_gemma4_scratch(*s.secondary_engine, s.model_config,
+                                                       s.loader.gemma4_config(), s.arch,
+                                                       1, scratch_tokens);
+                s.engine->activate();
+                s.split = std::make_unique<Gemma4SplitForward>(*s.engine, *s.secondary_engine, "_s.hidden");
+            }
         } else {
             s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
                                   1, scratch_tokens);
@@ -513,13 +658,40 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
 
         const ModelCapabilities caps = inspect_model_capabilities(s.loader);
         const auto* vision = caps.find(ModelModality::Vision);
-        if (vision && vision->status == AdapterStatus::RuntimeReady) {
+        // Solo si el plan le encontró sitio: si no, el modelo abre con texto y no anuncia visión.
+        if (vision && vision->status == AdapterStatus::RuntimeReady &&
+            s.placement.vision != Gemma4VisionPlace::None) {
             std::string adapter_error;
             // The scratch bounds what any adapter may prefill: 6k for the
             // E4B tower path, one text chunk for the unified 12B.
+            // La torre va donde la puso el plan (en la GPU 1 si no cabía con el
+            // texto). Con el texto repartido, el prefill de la imagen cruza las dos.
+            MultimodalPlacement placement;
+            if (s.placement.vision == Gemma4VisionPlace::Secondary) {
+                placement.vision_engine = s.secondary_engine.get();
+            }
+            if (s.split_active()) {
+                placement.text_forward = [&s](CommandBuffer& input, uint32_t seq,
+                                              const KVCacheParams& cache,
+                                              Gemma4BidirectionalBlock block) {
+                    const Gemma4Config& gemma = s.loader.gemma4_config();
+                    s.split->update_device_cache_pos(int32_t(cache.cache_position), int32_t(seq));
+                    s.secondary_engine->activate();
+                    CommandBuffer rest = s.secondary_gb.build_gemma4_layers_cached(
+                        *s.secondary_engine, s.model_config, gemma, s.arch, s.split_boundary,
+                        s.arch.num_layers, 1, seq, cache, block);
+                    s.engine->activate();
+                    input.append(s.gb.build_gemma4_layers_cached(
+                        *s.engine, s.model_config, gemma, s.arch, 0, s.split_boundary,
+                        1, seq, cache, block));
+                    const CommandBuffer head = s.gb.build_gemma4_head(s.model_config, gemma, s.arch, seq);
+                    s.split->run({input, rest, head});
+                    s.engine->sync();
+                };
+            }
             s.multimodal = create_multimodal_adapter(
                 vision->adapter_id, *s.engine, s.loader, s.gb, s.arch,
-                scratch_tokens, &adapter_error);
+                scratch_tokens, &adapter_error, std::move(placement));
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
                 return nullptr;
@@ -561,14 +733,30 @@ bool InferenceSession::borrows_rings() const {
 
 bool InferenceSession::save_rings() {
     std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
+    auto& s = *impl_;
+    if (s.M.split) {
+        s.M.secondary_engine->activate();
+        const bool saved = cudaDeviceSynchronize() == cudaSuccess &&
+                           s.secondary_kv_cache.save_rings(s.secondary_saved_rings);
+        s.engine->activate();
+        if (!saved) return false;
+    }
     return cudaDeviceSynchronize() == cudaSuccess &&
-           impl_->gemma_kv_cache.save_rings(impl_->saved_rings);
+           s.gemma_kv_cache.save_rings(s.saved_rings);
 }
 
 bool InferenceSession::restore_rings() {
     std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);
+    auto& s = *impl_;
+    if (s.M.split) {
+        s.M.secondary_engine->activate();
+        const bool restored = cudaDeviceSynchronize() == cudaSuccess &&
+                              s.secondary_kv_cache.restore_rings(s.secondary_saved_rings);
+        s.engine->activate();
+        if (!restored) return false;
+    }
     return cudaDeviceSynchronize() == cudaSuccess &&
-           impl_->gemma_kv_cache.restore_rings(impl_->saved_rings);
+           s.gemma_kv_cache.restore_rings(s.saved_rings);
 }
 
 bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
@@ -613,11 +801,27 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                                            M.model_config.num_key_value_heads(),
                                            1, s.kv_config.max_seq_len, tanda,
                                            ring_owner ? &ring_owner->impl_->gemma_kv_cache
-                                                      : nullptr)) {
+                                                      : nullptr,
+                                           0, M.split ? M.split_boundary
+                                                      : std::numeric_limits<uint32_t>::max())) {
                 *error = "no pude reservar el KV heterogeneo de Gemma 4";
                 return false;
             }
             s.gemma_kv_cache.register_tensors(*s.engine, s.kv_prefix);
+            if (M.split) {
+                M.secondary_engine->activate();
+                const bool allocated = s.secondary_kv_cache.allocate(
+                    s.loader.gemma4_config(), M.model_config.num_key_value_heads(),
+                    1, s.kv_config.max_seq_len, tanda,
+                    ring_owner ? &ring_owner->impl_->secondary_kv_cache : nullptr,
+                    M.split_boundary, s.arch.num_layers);
+                if (allocated) s.secondary_kv_cache.register_tensors(*M.secondary_engine, s.kv_prefix);
+                s.engine->activate();
+                if (!allocated) {
+                    *error = "no pude reservar el KV de la segunda GPU";
+                    return false;
+                }
+            }
         } else {
             if (!s.kv_cache.allocate(s.kv_config)) {
                 *error = "no pude reservar el KV";
@@ -707,7 +911,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     }
     // Engine owns a single executable graph. Rebind it at every turn so no
     // session can replay another session's KV pointers or stale scratch shapes.
-    s.engine->invalidate_graph();
+    s.invalidate_graphs();
     s.decode_cb_built = false;
     s.graph_unavailable = false;
     s.graph_captures = s.graph_replays = s.graph_fallbacks = 0;
@@ -894,6 +1098,10 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                 return false;
             }
             MultimodalPrefillResult pr;
+            // El prefill visual reescribe las vistas de scratch igual que
+            // forward_batch: el próximo decode tiene que reconstruir las suyas.
+            s.invalidate_graphs();
+            s.decode_cb_built = false;
             if (!prefill_cancelled &&
                 !s.multimodal->prefill(turn, {s.kv_prefix, s.position(),
                                               s.kv_config.max_seq_len},

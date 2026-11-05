@@ -192,7 +192,9 @@ void hilo_lector() {
             if (by > 0 && by <= kTope) {
                 buf.resize((size_t)by);
                 std::cin.read(reinterpret_cast<char*>(buf.data()), by);
-                if (std::cin.peek() == '\n') std::cin.get();
+                // Sin peek(): esperaría el siguiente byte y, si el cliente no
+                // pone salto tras el payload, el adjunto nunca se confirmaría.
+                // El salto opcional llega como línea vacía y el bucle la salta.
             }
             if (!geo_ok || (long long)buf.size() != by) {
                 emit_error(p.id, "invalid_attachment",

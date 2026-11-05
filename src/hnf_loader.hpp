@@ -10,6 +10,7 @@
 
 #include "engine.hpp"
 #include "htf_tokenizer.hpp"
+#include <functional>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -25,15 +26,13 @@ class MappedWeightPipeline;
 // HNF CONSTANTS
 // ============================================================================
 
-constexpr uint8_t HNF_MAGIC[8] = {'H', 'N', 'F', 'v', '9', 0, 0, 0};
-constexpr uint32_t HNF_HEADER_SIZE = 64;
-constexpr uint32_t HNF_BLOCK_TABLE_SIZE = 512;
-constexpr uint32_t HNF_BLOCK_ENTRY_SIZE = 32;
+// El contenedor es HNFv10 (src/hnf10.hpp). Sus componentes se colocan en estas ranuras
+// internas de bloque, que ya no corresponden a ninguna tabla del fichero.
 constexpr uint32_t HNF_BLOCK_COUNT = 16;
 constexpr uint32_t HNF_ALIGNMENT = 32;
 
 // ============================================================================
-// BLOCK IDs - HNFv9.1
+// RANURAS INTERNAS DE BLOQUE
 // ============================================================================
 
 enum BlockID : uint32_t {
@@ -47,7 +46,7 @@ enum BlockID : uint32_t {
     BLOCK_CORTEX          = 0x7,
     BLOCK_CODE_EXEC       = 0x8,
     BLOCK_TOKENIZER       = 0x9,   // HTF multi-domain
-    BLOCK_EXEC_HINTS      = 0xA,   // JSON (obligatorio)
+    BLOCK_EXEC_HINTS      = 0xA,   // hints JSON de HNFv9: ya no existe
     BLOCK_EXEC_HINTS_BIN  = 0xB,   // Binario (preferido) ← NUEVO
     BLOCK_TOOLS           = 0xC,
     BLOCK_EXPERT_ROUTER   = 0xD,
@@ -66,48 +65,12 @@ inline const char* block_name(uint32_t id) {
 }
 
 // ============================================================================
-// FLAGS - HNFv9.1
-// ============================================================================
-
-enum HnfFlags : uint32_t {
-    HNF_HAS_VISION         = (1 << 0),
-    HNF_HAS_AUDIO          = (1 << 1),
-    HNF_HAS_VIDEO          = (1 << 2),
-    HNF_HAS_SPATIAL        = (1 << 3),
-    HNF_HAS_PERSONALITY    = (1 << 4),
-    HNF_HAS_MEMORY         = (1 << 5),
-    HNF_HAS_CORTEX         = (1 << 6),
-    HNF_HAS_CODE_EXEC      = (1 << 7),
-    HNF_HAS_TOKENIZER      = (1 << 8),   // ← NUEVO
-    HNF_HAS_EXEC_HINTS_BIN = (1 << 9),   // ← NUEVO
-    HNF_HAS_TOOLS          = (1 << 10),
-    HNF_HAS_EXPERT_ROUTER  = (1 << 11),
-    HNF_IS_MOE             = (1 << 12),
-    HNF_IS_MULTIMODAL      = (1 << 13),
-};
-
-// ============================================================================
 // BINARY STRUCTURES (packed, little-endian)
 // ============================================================================
 
 #pragma pack(push, 1)
 
-struct HnfHeader {
-    uint8_t  magic[8];              // "HNFv9\x00\x00\x00"
-    uint16_t version_major;         // 9
-    uint16_t version_minor;         // 0
-    uint32_t flags;                 // Capability flags
-    uint32_t block_count;           // 16
-    uint32_t header_size;           // 64
-    uint64_t block_table_offset;    // 64
-    uint64_t manifest_offset;       // Offset del manifest JSON
-    uint64_t manifest_size;         // Tamaño del manifest
-    uint64_t file_size;             // Tamaño total
-    uint32_t checksum;              // CRC32
-    uint32_t reserved;              // 0
-};
-static_assert(sizeof(HnfHeader) == 64, "HnfHeader must be 64 bytes");
-
+// Dónde está un componente en el fichero; `checksum` ya no se usa (los hashes son de HNFv10).
 struct BlockEntry {
     uint32_t block_id;
     uint32_t block_type;
@@ -120,7 +83,7 @@ static_assert(sizeof(BlockEntry) == 32, "BlockEntry must be 32 bytes");
 // ============================================================================
 // EXECUTION HINTS BINARY STRUCTURES (block 0xB)
 // ============================================================================
-// Prioridad: Si [0xB] existe, usar binario. Fallback a JSON [0xA].
+// La configuración binaria es la única fuente de configuración.
 
 constexpr uint32_t HINTS_MAGIC = 0x48494E54;  // "HINT"
 
@@ -331,7 +294,67 @@ struct Gemma4LayerConfigBin {
 static_assert(sizeof(Gemma4LayerConfigBin) == 40,
               "Gemma4LayerConfigBin must be 40 bytes");
 
+// GM4X v2 describes the MoE experts. The v1 header is kept as a prefix, with
+// base.reserved holding the size of this header.
+struct Gemma4ExtensionV2HeaderBin {
+    Gemma4ExtensionHeaderBin base;
+    uint32_t descriptor_size;
+    uint32_t descriptors_per_layer;
+    uint64_t extension_size;
+    uint32_t expert_order;           // 1 = packed by expert
+    uint32_t gate_up_order;          // 1 = gate before up inside each expert
+    uint64_t reserved;
+};
+static_assert(sizeof(Gemma4ExtensionV2HeaderBin) == 64,
+              "Gemma4ExtensionV2HeaderBin must be 64 bytes");
+
+// Physical columns are the logical ones rounded up to 256; the extra columns
+// are zeros and the engine must feed zeros in the matching input tail.
+struct Gemma4MoeMatrixBin {
+    uint32_t role;                   // Gemma4MoeRole
+    uint32_t storage;                // Gemma4MoeStorage
+    uint32_t rows;
+    uint32_t logical_cols;
+    uint32_t physical_rows;
+    uint32_t physical_cols;
+    uint32_t experts;
+    uint32_t layout;                 // 0=float, 1=HQ44
+    uint64_t row_bytes;
+    uint64_t expert_stride;
+};
+static_assert(sizeof(Gemma4MoeMatrixBin) == 48,
+              "Gemma4MoeMatrixBin must be 48 bytes");
+
+struct Gemma4LayerConfigV2Bin {
+    Gemma4LayerConfigBin base;
+    uint32_t experts;
+    uint32_t top_k;
+    uint32_t intermediate_size;
+    uint32_t descriptor_mask;        // Bit (role - 1) set per matrix present
+    uint32_t descriptor_count;
+    uint32_t reserved;
+    Gemma4MoeMatrixBin gate_up;
+    Gemma4MoeMatrixBin down;
+    Gemma4MoeMatrixBin shared_down;
+};
+static_assert(sizeof(Gemma4LayerConfigV2Bin) == 208,
+              "Gemma4LayerConfigV2Bin must be 208 bytes");
+
 #pragma pack(pop)
+
+enum Gemma4MoeRole : uint32_t {
+    GEMMA4_MOE_ROLE_GATE_UP = 1,
+    GEMMA4_MOE_ROLE_DOWN = 2,
+    GEMMA4_MOE_ROLE_SHARED_DOWN = 3,
+};
+
+enum Gemma4MoeStorage : uint32_t {
+    GEMMA4_MOE_STORAGE_FP16 = 0,
+    GEMMA4_MOE_STORAGE_BF16 = 1,
+    GEMMA4_MOE_STORAGE_FP32 = 2,
+    GEMMA4_MOE_STORAGE_HQ44 = 3,
+    GEMMA4_MOE_STORAGE_HQ8 = 4,     // solo down compartido: los kernels MoE leen FP16 o HQ44
+};
 
 constexpr uint32_t GEMMA4_EXT_FLAG_PLE              = (1u << 0);
 constexpr uint32_t GEMMA4_EXT_FLAG_LAYER_SCALAR     = (1u << 1);
@@ -339,6 +362,7 @@ constexpr uint32_t GEMMA4_EXT_FLAG_LOGIT_SOFTCAP    = (1u << 2);
 constexpr uint32_t GEMMA4_EXT_FLAG_SHARED_KV        = (1u << 3);
 constexpr uint32_t GEMMA4_EXT_FLAG_DOUBLE_WIDE_MLP  = (1u << 4);
 constexpr uint32_t GEMMA4_EXT_FLAG_FOUR_NORM_BLOCK  = (1u << 5);
+constexpr uint32_t GEMMA4_EXT_FLAG_MOE              = (1u << 6);
 
 // Flags de Gemma4LayerConfigBin.flags (por CAPA, no confundir con los EXT del
 // modelo).  Bit 0: la capa no tiene v_proj y reutiliza la proyeccion K como V
@@ -362,6 +386,20 @@ constexpr uint32_t GEMMA4_VISION_FLAG_POOL_NORM_WEIGHTLESS = (1u << 13);
 constexpr uint32_t GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN = (1u << 14);
 constexpr uint32_t GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE = (1u << 15);
 
+struct Gemma4MoeMatrix {
+    uint32_t storage = GEMMA4_MOE_STORAGE_FP16;
+    uint32_t rows = 0;
+    uint32_t logical_cols = 0;
+    uint32_t physical_cols = 0;
+    uint32_t experts = 0;
+    uint64_t row_bytes = 0;
+    uint64_t expert_stride = 0;
+
+    uint64_t expert_offset(uint32_t expert) const {
+        return uint64_t{expert} * expert_stride;
+    }
+};
+
 struct Gemma4LayerConfig {
     uint32_t attention_kind = 0;
     uint32_t sliding_window = 0;
@@ -373,6 +411,10 @@ struct Gemma4LayerConfig {
     float partial_rotary_factor = 1.0f;
     int32_t kv_share_group = -1;
     uint32_t num_kv_heads = 0;   // 0 = usar el valor global del modelo
+    // Solo con GM4X v2.
+    Gemma4MoeMatrix moe_gate_up;
+    Gemma4MoeMatrix moe_down;
+    Gemma4MoeMatrix moe_shared_down;
 
     bool is_global_attention() const { return attention_kind == 1; }
     bool k_eq_v() const { return (flags & GEMMA4_LAYER_FLAG_K_EQ_V) != 0; }
@@ -388,6 +430,10 @@ struct Gemma4Config {
     uint32_t global_head_dim = 0;
     uint32_t ple_hidden_size = 0;
     uint32_t num_kv_shared_layers = 0;
+    // Expertos por capa, expertos usados por token y filas de la matriz gate/up.
+    uint32_t moe_experts = 0;
+    uint32_t moe_top_k = 0;
+    uint32_t moe_intermediate_size = 0;
     std::vector<Gemma4LayerConfig> layers;
 
     bool has_flag(uint32_t flag) const { return (flags & flag) != 0; }
@@ -582,6 +628,10 @@ public:
     // Load specific block to GPU
     // CK calls this when switching modality
     bool load_block(BlockID block_id, Engine& engine);
+    // Con el modelo partido, cada GPU sube solo los tensores de sus capas.
+    void set_tensor_filter(std::function<bool(const TensorEntry&)> filter) {
+        tensor_filter_ = std::move(filter);
+    }
     bool load_block(const std::string& block_name, Engine& engine);
     
     // Unload specific block from GPU (free VRAM)
@@ -614,7 +664,16 @@ public:
     // ACCESS (after open or load_metadata)
     // ========================================
     
-    const HnfHeader& header() const { return header_; }
+    // Versión mayor del contenedor abierto (10) y tamaño que declara su cabecera.
+    uint32_t format_major() const { return format_major_; }
+    // VRAM que pide un bloque: sus pesos más su memoria de trabajo en los máximos que
+    // declara el HNF (§8 de HNFV10.md). 0 si el bloque no existe o no la declara.
+    uint64_t block_vram_bytes(BlockID block) const {
+        return block < HNF_BLOCK_COUNT ? block_vram_[block] : 0;
+    }
+    uint64_t file_size() const { return file_size_; }
+    // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
+    const std::string& chat_template() const { return chat_template_; }
     
     // Default config (text/primary model)
     const ModelConfig& config() const { return config_; }
@@ -688,8 +747,11 @@ private:
     mutable std::ifstream file_;
     
     // Metadata
-    HnfHeader header_;
     BlockEntry blocks_[HNF_BLOCK_COUNT];
+    uint32_t format_major_ = 0;
+    uint64_t block_vram_[HNF_BLOCK_COUNT] = {};
+    uint64_t file_size_ = 0;
+    std::string chat_template_;
     ModelConfig config_;                                    // Default/text config
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs
     Gemma4Config gemma4_config_;
@@ -698,25 +760,22 @@ private:
     bool has_gemma4_vision_config_ = false;
     std::string last_error_;
     std::vector<TensorEntry> tensors_;
-    std::string manifest_json_;
     
     // Tokenizer (multi-domain support)
     mutable std::unordered_map<std::string, HTFTokenizer> tokenizers_;
     std::vector<uint8_t> htf_data_;  // Cached HTF blob for lazy loading
     bool htf_loaded_ = false;
+    std::function<bool(const TensorEntry&)> tensor_filter_;
     
     // Block loading state
     BlockState block_states_[HNF_BLOCK_COUNT];
     
     // Internal methods
-    bool read_header(std::ifstream& f);
-    bool read_block_table(std::ifstream& f);
-    bool read_manifest(std::ifstream& f);
+    // HNFv10 (src/hnf10.hpp): rellena bloques, tensores y configuración desde sus componentes.
+    bool open_hnf10(std::ifstream& f);
     bool read_execution_hints(std::ifstream& f);
-    bool parse_manifest();
-    bool parse_execution_hints(const std::string& json);
-    
-    // Binary hints parsing (priority over JSON)
+
+    // Configuración binaria (TNIH, GM4X, GM4V)
     bool read_execution_hints_binary(std::ifstream& f);
     bool parse_execution_hints_binary(const uint8_t* data, size_t size);
     bool parse_gemma4_extension(const uint8_t* data, size_t size,
@@ -737,6 +796,7 @@ private:
     // Fusiones opcionales de q/k/v y gate/up. HELIOS_FUSE_QKV conserva la
     // compatibilidad historica; HELIOS_FUSE_GATE_UP permite separarlas.
     void fuse_qkv_weights(Engine& engine, BlockState& state);
+    void fuse_gemma4_weights(Engine& engine, BlockState& state);
     bool concat_tensors(Engine& engine, BlockState& state,
                         const std::vector<std::string>& partes,
                         const std::string& destino);

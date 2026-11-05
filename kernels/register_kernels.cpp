@@ -259,6 +259,24 @@ void register_activation_kernels(Engine& engine) {
         });
     }
     
+    // GELU_MUL_ROUNDED — gelu(gate) rounded to fp16, times up (or one packed segment of it)
+    engine.register_kernel(op::GELU_MUL_ROUNDED(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* gate = ctx.in(0);
+        TensorInfo* up = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        const uint32_t dim = cmd.get<uint32_t>("dim", 0) ? cmd.get<uint32_t>("dim", 0)
+                                                           : (gate ? uint32_t(gate->shape.back()) : 0u);
+        const uint32_t layers = cmd.get<uint32_t>("layers", 1);
+        const uint32_t layer = cmd.get<uint32_t>("layer", 0);
+        if (!gate || !up || !output || dim == 0 || layers == 0 || layer >= layers ||
+            gate->numel() % dim != 0 || output->numel() != gate->numel() ||
+            up->numel() != gate->numel() * layers)
+            throw std::runtime_error("GELU_MUL_ROUNDED: invalid tensors or dimensions");
+        launch_gelu_mul_rounded_fp16(
+            as_fp16_const(gate), as_fp16_const(up), as_fp16(output),
+            int(gate->numel() / dim), int(dim), int(dim * layers), int(dim * layer), ctx.stream);
+    });
+
     // SOFTMAX
     engine.register_kernel(op::SOFTMAX(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* input = ctx.in(0);
@@ -316,6 +334,35 @@ void register_norm_kernels(Engine& engine) {
         }
     });
     
+
+    // RMSNORM_RESIDUAL — post-norm + residual [+ layer_scalar] [+ next norm]
+    engine.register_kernel(op::RMSNORM_RESIDUAL(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* x = ctx.in(0);
+        TensorInfo* w1 = ctx.in(1);
+        TensorInfo* hidden = ctx.output;
+        const float eps = cmd.get<float>("eps", 1e-5f);
+        auto named = [&](const char* key) -> TensorInfo* {
+            const std::string name = cmd.get<std::string>(key, "");
+            if (name.empty()) return nullptr;
+            TensorInfo* t = ctx.registry->get(name);
+            if (!t) throw std::runtime_error(std::string("RMSNORM_RESIDUAL: missing ") + key + " " + name);
+            return t;
+        };
+        TensorInfo* scalar = named("scalar");
+        TensorInfo* normed = named("normed");
+        TensorInfo* w2 = normed ? named("norm2_weight") : nullptr;
+        if (!x || !w1 || !hidden || (normed && !w2)) throw std::runtime_error("RMSNORM_RESIDUAL: missing tensors");
+        const int dim = int(hidden->shape.back());
+        if (x->numel() != hidden->numel() || w1->numel() != size_t(dim) ||
+            (scalar && scalar->numel() != 1) ||
+            (normed && (normed->numel() != hidden->numel() || w2->numel() != size_t(dim))))
+            throw std::runtime_error("RMSNORM_RESIDUAL: shape mismatch");
+        launch_rmsnorm_residual_fp16(
+            as_fp16(x), as_fp16_const(w1), as_fp16(hidden),
+            scalar ? as_fp16_const(scalar) : nullptr, w2 ? as_fp16_const(w2) : nullptr,
+            normed ? as_fp16(normed) : nullptr,
+            int(hidden->numel() / dim), dim, eps, ctx.stream);
+    });
 
     // ADD_RMSNORM — fused add + rmsnorm
     {
@@ -445,6 +492,8 @@ void register_linear_kernels(Engine& engine) {
             );
         } else if (weight->dtype == dtype::HQ44K()) {
             launch_matmul_hq44k(in_ptr, as_u8_const(weight), as_fp16(output), M, K, N, ctx.stream);
+        } else if (weight->dtype == dtype::HQ8K()) {
+            launch_matmul_hq8k(in_ptr, as_u8_const(weight), as_fp16(output), M, K, N, ctx.stream);
         } else if (const auto* format = dtype::hqs_v3(weight->dtype)) {
             launch_matmul_hqs_v3(in_ptr, as_u8_const(weight), as_fp16(output),
                                 M, K, N, format->bits, format->group, ctx.stream);
@@ -469,6 +518,32 @@ void register_linear_kernels(Engine& engine) {
 // ============================================================================
 // MEMORY KERNEL REGISTRATION
 // ============================================================================
+
+static bool moe_expert_dtype(const TensorInfo& tensor) {
+    return tensor.dtype == dtype::FP16() || tensor.dtype == dtype::HQ44K();
+}
+
+struct MoeExpertShape {
+    uint32_t experts, hidden, inner, physical;
+};
+
+// I sale de gate_up y P de down: con padding GM4X v2 son distintas.
+static MoeExpertShape moe_expert_shape(const TensorInfo& input, const TensorInfo& gate_up,
+                                       const TensorInfo& down, const TensorInfo& output) {
+    if (gate_up.shape.size() != 3 || down.shape.size() != 3 ||
+        gate_up.shape[0] != down.shape[0]) {
+        throw std::runtime_error("MOE_EXPERTS: experts must be rank 3 with equal E");
+    }
+    const uint32_t hidden = gate_up.shape[2];
+    const uint32_t inner = gate_up.shape[1] / 2;
+    const uint32_t physical = down.shape[2];
+    if (gate_up.shape[1] % 2 != 0 || down.shape[1] != hidden ||
+        (physical != inner && physical != (inner + 255) / 256 * 256) ||
+        input.shape.back() != hidden || input.numel() != output.numel()) {
+        throw std::runtime_error("MOE_EXPERTS: incompatible expert shapes");
+    }
+    return {gate_up.shape[0], hidden, inner, physical};
+}
 
 void register_memory_kernels(Engine& engine) {
     
@@ -510,6 +585,12 @@ void register_memory_kernels(Engine& engine) {
         } else if (const auto* format = dtype::hqs_v3(table->dtype)) {
             launch_embedding_hqs_v3(as_i32(indices), as_u8_const(table), as_fp16(output),
                                    batch, seq, vocab, dim, format->bits, format->group, ctx.stream);
+        } else if (table->dtype == dtype::HQ8K()) {
+            launch_embedding_hq8k(as_i32(indices), as_u8_const(table), as_fp16(output),
+                                  batch, seq, vocab, dim, ctx.stream);
+        } else if (table->dtype == dtype::HQ44K()) {
+            launch_embedding_hq44k(as_i32(indices), as_u8_const(table), as_fp16(output),
+                                   batch, seq, vocab, dim, ctx.stream);
         } else if (table->dtype == dtype::HQ62K()) {
             launch_embedding_hq62k(
                 as_i32(indices), as_u8_const(table), as_fp16(output),
@@ -574,6 +655,146 @@ void register_memory_kernels(Engine& engine) {
             as_fp16_const(rows), as_i32(indices), as_fp16(output),
             static_cast<int>(row_count), static_cast<int>(row_width),
             static_cast<int>(output->numel() / row_width), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_ROUTER_INPUT(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* hidden = ctx.in(0);
+        TensorInfo* scale = ctx.in(1);
+        TensorInfo* output = ctx.output;
+        if (!hidden || !scale || !output || output->dtype != dtype::FP32() ||
+            scale->numel() != hidden->shape.back() || output->numel() != hidden->numel()) {
+            throw std::runtime_error("MOE_ROUTER_INPUT: invalid tensors");
+        }
+        const uint32_t width = hidden->shape.back();
+        launch_moe_router_input(as_fp16_const(hidden), as_fp16_const(scale),
+                                static_cast<float*>(output->ptr),
+                                static_cast<int>(hidden->numel() / width), static_cast<int>(width),
+                                cmd.get<float>("eps", 1e-6f), cmd.get<float>("factor", 1.0f), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_LOGITS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* router = ctx.in(1);
+        TensorInfo* logits = ctx.output;
+        if (!input || !router || !logits) throw std::runtime_error("MOE_LOGITS: missing tensors");
+        if (input->dtype != dtype::FP32() || router->dtype != dtype::FP16() ||
+            logits->dtype != dtype::FP32()) {
+            throw std::runtime_error("MOE_LOGITS: needs an FP16 router, FP32 input and logits");
+        }
+        if (router->shape.size() != 2 || input->shape.back() != router->shape[1] ||
+            logits->numel() != input->numel() / router->shape[1] * router->shape[0]) {
+            throw std::runtime_error("MOE_LOGITS: incompatible shapes");
+        }
+        const uint32_t experts = router->shape[0], hidden = router->shape[1];
+        launch_moe_logits(static_cast<const float*>(input->ptr), as_fp16_const(router),
+                          static_cast<float*>(logits->ptr),
+                          static_cast<int>(input->numel() / hidden), static_cast<int>(experts),
+                          static_cast<int>(hidden), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_ROUTE(), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* logits = ctx.in(0);
+        TensorInfo* expert_scale = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* indices = ctx.output;
+        const uint32_t top_k = cmd.get<uint32_t>("top_k", 0);
+        if (!logits || !expert_scale || !weights || !indices || top_k == 0) {
+            throw std::runtime_error("MOE_ROUTE: missing tensors or top_k");
+        }
+        if (indices->dtype != dtype::INT32() || weights->dtype != dtype::FP32() ||
+            logits->dtype != dtype::FP32()) {
+            throw std::runtime_error("MOE_ROUTE: indices must be INT32, logits and weights FP32");
+        }
+        const size_t experts = expert_scale->numel();
+        if (experts == 0 || logits->numel() % experts != 0) {
+            throw std::runtime_error("MOE_ROUTE: logits do not match the expert count");
+        }
+        const size_t tokens = logits->numel() / experts;
+        if (indices->numel() != tokens * top_k || weights->numel() != tokens * top_k) {
+            throw std::runtime_error("MOE_ROUTE: outputs must be [tokens, top_k]");
+        }
+        launch_moe_route(
+            static_cast<const float*>(logits->ptr), as_fp16_const(expert_scale), as_i32(indices),
+            static_cast<float*>(weights->ptr), static_cast<int>(tokens),
+            static_cast<int>(experts), static_cast<int>(top_k), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_EXPERTS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* indices = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* gate_up = ctx.in(3);
+        TensorInfo* down = ctx.in(4);
+        TensorInfo* output = ctx.output;
+        if (!input || !indices || !weights || !gate_up || !down || !output) {
+            throw std::runtime_error("MOE_EXPERTS: missing tensors");
+        }
+        if (!moe_expert_dtype(*gate_up) || !moe_expert_dtype(*down)) {
+            throw std::runtime_error("MOE_EXPERTS: experts must be FP16 or HQ44");
+        }
+        const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        const uint32_t hidden = shape.hidden;
+        const size_t tokens = input->numel() / hidden;
+        if (tokens == 0 || indices->numel() % tokens != 0 ||
+            indices->numel() != weights->numel()) {
+            throw std::runtime_error("MOE_EXPERTS: indices and weights must be [tokens, top_k]");
+        }
+        run_moe_experts_reference(
+            as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
+            gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
+            as_fp16(output), static_cast<int>(tokens), static_cast<int>(shape.experts),
+            static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
+            static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream);
+    });
+
+    engine.register_kernel(op::MOE_EXPERTS_DECODE(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* indices = ctx.in(1);
+        TensorInfo* weights = ctx.in(2);
+        TensorInfo* gate_up = ctx.in(3);
+        TensorInfo* down = ctx.in(4);
+        TensorInfo* gate_up_scratch = ctx.in(5);
+        TensorInfo* hidden_scratch = ctx.in(6);
+        TensorInfo* rows_scratch = ctx.in(7);
+        TensorInfo* output = ctx.output;
+        if (!input || !indices || !weights || !gate_up || !down || !gate_up_scratch ||
+            !hidden_scratch || !rows_scratch || !output) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: missing tensors");
+        }
+        if (!moe_expert_dtype(*gate_up) || !moe_expert_dtype(*down)) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: experts must be FP16 or HQ44");
+        }
+        const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        const size_t top_k = indices->numel();
+        if (input->numel() != shape.hidden || top_k == 0 || weights->numel() != top_k) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: expects one token");
+        }
+        if (gate_up_scratch->numel() < top_k * 2 * shape.inner ||
+            hidden_scratch->numel() < top_k * shape.physical ||
+            rows_scratch->numel() < top_k * shape.hidden) {
+            throw std::runtime_error("MOE_EXPERTS_DECODE: scratch too small");
+        }
+        launch_moe_experts_decode(
+            as_fp16_const(input), as_i32(indices), static_cast<const float*>(weights->ptr),
+            gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
+            as_fp16(gate_up_scratch), as_fp16(hidden_scratch), as_fp16(rows_scratch), as_fp16(output),
+            static_cast<int>(top_k), static_cast<int>(shape.hidden), static_cast<int>(shape.inner),
+            static_cast<int>(shape.physical), ctx.stream);
+    });
+
+    engine.register_kernel(op::PAD_COLUMNS(), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0);
+        TensorInfo* output = ctx.output;
+        if (!input || !output || input->shape.empty() || output->shape.empty() ||
+            input->shape.back() > output->shape.back() ||
+            input->numel() / input->shape.back() != output->numel() / output->shape.back()) {
+            throw std::runtime_error("PAD_COLUMNS: incompatible shapes");
+        }
+        const uint32_t logical = input->shape.back();
+        launch_pad_columns_fp16(as_fp16_const(input), as_fp16(output),
+                                static_cast<int>(input->numel() / logical),
+                                static_cast<int>(logical),
+                                static_cast<int>(output->shape.back()), ctx.stream);
     });
 
     engine.register_kernel(op::PLE_SLICE(), [](ExecContext& ctx, const Command& cmd) {
@@ -926,8 +1147,8 @@ void register_attention_kernels(Engine& engine) {
                 // Grouped decode uses a linear cache; retain the generic path
                 // for other geometries or an explicitly smaller ring allocation.
                 const uint32_t slots = cache_slots ? cache_slots : max_seq_len;
-                if (cmd.get<uint32_t>("flash_grouped", 0) && num_heads == 16 &&
-                    num_kv_heads == 1 && head_dim == 512 && window_size == 0 &&
+                if (cmd.get<uint32_t>("flash_grouped", 0) && device_has_m16n8k16() &&
+                    num_heads == 16 && num_kv_heads == 1 && head_dim == 512 && window_size == 0 &&
                     slots >= max_seq_len) {
                     launch_attention_global_grouped_dp(
                         as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache),

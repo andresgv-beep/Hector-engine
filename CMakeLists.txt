@@ -32,6 +32,10 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 # (ojo: CUDA 13 eliminó soporte para < sm_75)
 set(CMAKE_CUDA_ARCHITECTURES "native")
 
+# nvcc declara el directorio de su propio gcc. Si CXX es más nuevo, ese -L hace
+# enlazar un libstdc++ viejo que no tiene los símbolos del código ya compilado.
+list(FILTER CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES EXCLUDE REGEX "/gcc/")
+
 # ============================================================================
 # Compiler Flags
 # ============================================================================
@@ -62,10 +66,12 @@ set(ENGINE_SOURCES
     src/command.cpp
     src/engine.cpp
     src/hnf_loader.cpp
+    src/hnf10.cpp
     src/model_capabilities.cpp
     src/multimodal_adapter.cpp
     src/mapped_weight_pipeline.cpp
     src/gemma4_ple.cpp
+    src/gemma4_split.cpp
     src/gemma4_multimodal.cpp
     src/gemma4_validator.cpp
     src/gemma4_vision_validator.cpp
@@ -93,6 +99,7 @@ set(KERNEL_SOURCES
     kernels/matmul_cublas.cu
     kernels/hqs_v3.cu
     kernels/hqs_v4.cu
+    kernels/hq8.cu
     kernels/attention.cu
     kernels/attention_flash_decode.cu
     kernels/attention_global_grouped.cu
@@ -139,9 +146,15 @@ target_include_directories(helios-engine PUBLIC
     ${CUDA_INCLUDE_DIR}
 )
 
+# HNFv10: CRC32 de zlib y xxh3-128 de libxxhash del sistema (no hay cabecera de desarrollo:
+# src/hnf10.cpp declara la función con la misma ABI que xxhash.h 0.8).
+find_package(ZLIB REQUIRED)
+find_library(XXHASH_LIBRARY NAMES xxhash libxxhash.so.0 PATHS /usr/lib/x86_64-linux-gnu REQUIRED)
 target_link_libraries(helios-engine PUBLIC
     CUDA::cudart
     CUDA::cublas
+    ZLIB::ZLIB
+    ${XXHASH_LIBRARY}
 )
 
 # ============================================================================
@@ -192,6 +205,8 @@ target_link_libraries(test_hnf_loader PRIVATE helios-engine)
 # Gemma 4 HNF/GM4X metadata contract (no model weights or CUDA allocations)
 add_executable(test_gemma4_metadata tests/test_gemma4_metadata.cpp)
 target_link_libraries(test_gemma4_metadata PRIVATE helios-engine)
+target_compile_definitions(test_gemma4_metadata PRIVATE
+    GM4X_V2_FIXTURES="${CMAKE_SOURCE_DIR}/tests/data/gm4x-v2")
 
 # Gemma 4 GM4V, visual inventory and optional real block load/unload
 add_executable(test_gemma4_vision_metadata tests/test_gemma4_vision_metadata.cpp)
@@ -219,6 +234,28 @@ target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
 # Gemma 4 MoE contra una referencia generada con Transformers
 add_executable(test_gemma4_moe tests/test_gemma4_moe.cu)
 target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
+
+# Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
+# un add_test porque esos datos no viven en el repositorio.
+add_executable(gemma4_moe_generate tools/gemma4_moe_generate.cu)
+target_link_libraries(gemma4_moe_generate PRIVATE helios-engine)
+
+add_executable(gemma4_moe_control_replay tools/gemma4_moe_control_replay.cu)
+target_link_libraries(gemma4_moe_control_replay PRIVATE helios-engine)
+
+# GPTQ sobre rejillas HQS para las herramientas de refinado; el runtime no enlaza cuSOLVER.
+add_library(helios-gptq STATIC src/gptq.cu)
+target_link_libraries(helios-gptq PUBLIC helios-engine CUDA::cublas CUDA::cusolver)
+add_executable(test_gptq tests/test_gptq.cu)
+target_link_libraries(test_gptq PRIVATE helios-gptq)
+add_executable(hnf_refine tools/hnf_refine.cu)
+target_link_libraries(hnf_refine PRIVATE helios-gptq)
+
+add_executable(test_gemma4_split tests/test_gemma4_split.cu)
+target_link_libraries(test_gemma4_split PRIVATE helios-engine)
+
+add_executable(test_gemma4_moe_layer tests/test_gemma4_moe_layer.cu)
+target_link_libraries(test_gemma4_moe_layer PRIVATE helios-engine)
 
 # Gemma 4 complete PLE preparation path and real-weight numerical reference
 add_executable(test_gemma4_ple tests/test_gemma4_ple.cu)
@@ -253,6 +290,14 @@ target_link_libraries(inspect_hnf PRIVATE helios-engine)
 add_executable(helios_model_probe tools/helios_model_probe.cpp)
 target_link_libraries(helios_model_probe PRIVATE helios-engine)
 
+# Lector HNFv10 con ficheros del escritor de Rust (helios_convert_v10, `hnf10 fixtures`).
+add_executable(test_hnf10 tests/test_hnf10.cpp)
+target_link_libraries(test_hnf10 PRIVATE helios-engine)
+
+# Configuración efectiva clave a clave, para comparar formatos del mismo modelo.
+add_executable(hnf_config_dump tools/hnf_config_dump.cpp)
+target_link_libraries(hnf_config_dump PRIVATE helios-engine)
+
 # Enable testing
 enable_testing()
 add_test(NAME TensorRegistryTest COMMAND test_tensor)
@@ -269,9 +314,20 @@ add_test(NAME Gemma4MetadataTest COMMAND test_gemma4_metadata)
 add_test(NAME Gemma4VisionMetadataTest COMMAND test_gemma4_vision_metadata)
 add_test(NAME Gemma4VisionPreprocessTest COMMAND test_gemma4_vision_preprocess)
 add_test(NAME Gemma4VisionRunnerTest COMMAND test_gemma4_vision_runner)
+# Torre visual del 26B con pesos reales contra el oráculo FP32
+# (tools/gemma4_vision_oracle.py). Se salta si este equipo no tiene los ficheros.
+set(HELIOS_26B_VISION_HNF
+    "$ENV{HOME}/Documentos/GitHub/helios_convert_v10/output/gemma4-26b-moe-dense-hq8-gptq-vision.v10.hnf"
+    CACHE FILEPATH "HNFv10 del 26B con visión para Gemma4VisionRunner26BTest")
+set(HELIOS_26B_VISION_ORACLE "$ENV{HOME}/.cache/helios/gemma4_vision_oracle/26b-fp32"
+    CACHE PATH "Oráculo FP32 de la torre del 26B")
+add_test(NAME Gemma4VisionRunner26BTest
+         COMMAND test_gemma4_vision_runner ${HELIOS_26B_VISION_HNF} ${HELIOS_26B_VISION_ORACLE})
+set_tests_properties(Gemma4VisionRunner26BTest PROPERTIES SKIP_RETURN_CODE 77)
 add_test(NAME Gemma4MultimodalTest COMMAND test_gemma4_multimodal)
 add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
+add_test(NAME Gemma4SplitTest COMMAND test_gemma4_split)
 add_test(NAME Gemma4MoeTest COMMAND test_gemma4_moe ${CMAKE_SOURCE_DIR}/tests/data/gemma4_moe_small.bin)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
@@ -298,6 +354,8 @@ target_link_libraries(test_attention_prefill PRIVATE helios-engine)
 add_test(NAME AttentionPrefillTest COMMAND test_attention_prefill)
 add_executable(test_attention_prefill_model tests/test_attention_prefill_model.cu)
 target_link_libraries(test_attention_prefill_model PRIVATE helios-engine)
+add_test(NAME GptqTest COMMAND test_gptq)
+add_test(NAME Hnf10ReaderTest COMMAND test_hnf10 ${CMAKE_SOURCE_DIR}/tests/data/hnf10)
 add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 add_test(NAME CkPolicyTest COMMAND test_ck_policy)
@@ -423,6 +481,11 @@ add_executable(test_hqs_v4 tests/test_hqs_v4.cu)
 target_include_directories(test_hqs_v4 PRIVATE kernels)
 target_link_libraries(test_hqs_v4 PRIVATE helios-engine)
 add_test(NAME HqsV4Kernels COMMAND test_hqs_v4)
+
+add_executable(test_hq8 tests/test_hq8.cu)
+target_include_directories(test_hq8 PRIVATE kernels)
+target_link_libraries(test_hq8 PRIVATE helios-engine)
+add_test(NAME Hq8Kernels COMMAND test_hq8)
 
 add_executable(test_global_grouped tests/test_global_grouped.cu)
 target_link_libraries(test_global_grouped PRIVATE helios-engine)

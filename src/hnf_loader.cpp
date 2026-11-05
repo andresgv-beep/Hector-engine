@@ -10,161 +10,18 @@
 
 #include "hnf_loader.hpp"
 #include "gemma4_vision_validator.hpp"
+#include "hnf10.hpp"
 #include <iostream>
 #include <iomanip>
 #include <cstring>
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <limits>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-
-// ============================================================================
-// MINIMAL JSON PARSER
-// ============================================================================
-
-namespace {
-
-const char* skip_ws(const char* p) {
-    while (*p && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
-    return p;
-}
-
-std::string parse_string(const char*& p) {
-    if (*p != '"') return "";
-    p++;
-    std::string result;
-    while (*p && *p != '"') {
-        if (*p == '\\' && *(p+1)) {
-            p++;
-            switch (*p) {
-                case 'n': result += '\n'; break;
-                case 't': result += '\t'; break;
-                case '"': result += '"'; break;
-                case '\\': result += '\\'; break;
-                default: result += *p;
-            }
-        } else {
-            result += *p;
-        }
-        p++;
-    }
-    if (*p == '"') p++;
-    return result;
-}
-
-int64_t parse_int(const char*& p) {
-    char* end;
-    int64_t val = strtoll(p, &end, 10);
-    p = end;
-    return val;
-}
-
-double parse_number(const char*& p) {
-    char* end;
-    double val = strtod(p, &end);
-    p = end;
-    return val;
-}
-
-const char* find_key(const char* json, const std::string& key) {
-    std::string search = "\"" + key + "\"";
-    const char* p = strstr(json, search.c_str());
-    if (!p) return nullptr;
-    p += search.length();
-    p = skip_ws(p);
-    if (*p == ':') p++;
-    return skip_ws(p);
-}
-
-std::string get_string(const char* json, const std::string& key, const std::string& def = "") {
-    const char* p = find_key(json, key);
-    if (!p || *p != '"') return def;
-    return parse_string(p);
-}
-
-int64_t get_int(const char* json, const std::string& key, int64_t def = 0) {
-    const char* p = find_key(json, key);
-    if (!p) return def;
-    if (*p == '"') { p++; return parse_int(p); }
-    return parse_int(p);
-}
-
-bool get_bool(const char* json, const std::string& key, bool def = false) {
-    const char* p = find_key(json, key);
-    if (!p) return def;
-    if (strncmp(p, "true", 4) == 0) return true;
-    if (strncmp(p, "false", 5) == 0) return false;
-    return def;
-}
-
-std::vector<uint32_t> get_int_array(const char* json, const std::string& key) {
-    std::vector<uint32_t> result;
-    const char* p = find_key(json, key);
-    if (!p || *p != '[') return result;
-    p++;
-    while (*p && *p != ']') {
-        p = skip_ws(p);
-        if (*p == ']') break;
-        result.push_back(static_cast<uint32_t>(parse_int(p)));
-        p = skip_ws(p);
-        if (*p == ',') p++;
-    }
-    return result;
-}
-
-// Single-pass JSON object → map
-void parse_json_object_to_map(const char* json, 
-                               std::unordered_map<std::string, helios::ConfigValue>& out) {
-    const char* p = skip_ws(json);
-    if (*p != '{') return;
-    p++;
-    
-    while (*p && *p != '}') {
-        p = skip_ws(p);
-        if (*p == '}') break;
-        if (*p == ',') { p++; continue; }
-        if (*p != '"') { p++; continue; }
-        
-        std::string key = parse_string(p);
-        p = skip_ws(p);
-        if (*p != ':') continue;
-        p++;
-        p = skip_ws(p);
-        
-        if (*p == '"') {
-            out[key] = parse_string(p);
-        } else if (*p == 't') {
-            out[key] = true; p += 4;
-        } else if (*p == 'f') {
-            out[key] = false; p += 5;
-        } else if (*p == '-' || (*p >= '0' && *p <= '9')) {
-            const char* start = p;
-            bool is_float = false;
-            while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n') {
-                if (*p == '.' || *p == 'e' || *p == 'E') is_float = true;
-                p++;
-            }
-            std::string num_str(start, p - start);
-            if (is_float) out[key] = std::stod(num_str);
-            else out[key] = (int64_t)std::stoll(num_str);
-        } else if (*p == '{' || *p == '[') {
-            int depth = 1;
-            char open = *p, close = (open == '{') ? '}' : ']';
-            p++;
-            while (*p && depth > 0) {
-                if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } if (*p == '"') p++; continue; }
-                if (*p == open) depth++;
-                else if (*p == close) depth--;
-                p++;
-            }
-        } else { p++; }
-    }
-}
-
-} // anonymous namespace
 
 namespace helios {
 
@@ -207,7 +64,6 @@ bool embedding_is_lookup_only(
 // ============================================================================
 
 HnfLoader::HnfLoader() {
-    memset(&header_, 0, sizeof(header_));
     memset(blocks_, 0, sizeof(blocks_));
 }
 
@@ -229,15 +85,85 @@ bool HnfLoader::open(const std::string& path) {
     file_.open(path, std::ios::binary);
     if (!file_.is_open()) { std::cerr << "HnfLoader: Cannot open: " << path << std::endl; return false; }
     file_path_ = path;
-    
-    if (!read_header(file_) || !read_block_table(file_) || !read_manifest(file_) || !parse_manifest()) {
-        close(); return false;
+    format_major_ = 0;
+    chat_template_.clear();
+
+    if (hnf10::is_hnf10(file_)) {
+        if (!open_hnf10(file_)) {
+            std::cerr << "HnfLoader: " << last_error_ << std::endl;
+            close();
+            return false;
+        }
+        load_tokenizer();
+        return true;
     }
-    if (!read_execution_hints(file_)) {
-        close();
-        return false;
+    last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
+    std::cerr << "HnfLoader: " << last_error_ << std::endl;
+    close();
+    return false;
+}
+
+bool HnfLoader::open_hnf10(std::ifstream& f) {
+    hnf10::Contents contents;
+    if (!hnf10::read(f, contents, last_error_)) return false;
+    file_size_ = contents.file_size;
+    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) { blocks_[i] = BlockEntry{i, i, 0, 0, 0}; block_vram_[i] = 0; }
+    const hnf10::Component* text = nullptr;
+    std::map<uint32_t, std::string> block_of;   // id de componente -> nombre de bloque de sus tensores
+    for (const auto& c : contents.components) {
+        uint32_t block = HNF_BLOCK_COUNT;
+        switch (c.kind) {
+            case hnf10::TEXT: block = BLOCK_TEXT_MODEL; text = &c; block_of[c.id] = "text_model"; break;
+            case hnf10::VISION: block = BLOCK_VISION; block_of[c.id] = "vision"; break;
+            case hnf10::TOKENIZER: block = BLOCK_TOKENIZER; break;
+            case hnf10::CONFIG: block = BLOCK_EXEC_HINTS_BIN; break;
+            case hnf10::TEMPLATE: {
+                chat_template_.resize(c.size);
+                f.clear();
+                f.seekg(std::streamoff(c.offset));
+                f.read(chat_template_.data(), std::streamsize(c.size));
+                if (!f.good()) { last_error_ = "no leo la plantilla de chat del HNFv10"; return false; }
+                continue;
+            }
+            default:
+                if (c.required) { last_error_ = "HNFv10: el motor aún no carga componentes de tipo " + std::to_string(c.kind) + " (" + c.name + ")"; return false; }
+                continue;
+        }
+        if (blocks_[block].size != 0) { last_error_ = "HNFv10: dos componentes del mismo tipo: " + c.name; return false; }
+        blocks_[block] = BlockEntry{block, block, c.offset, c.size, 0};
+        block_vram_[block] = c.weight_bytes + c.working_bytes;
     }
-    load_tokenizer();
+    // Puede no haber texto: un HNF solo de visión acompaña a otro de texto (--multimodal).
+    (void)text;
+    tensors_.clear();
+    for (const auto& t : contents.tensors) {
+        const auto owner = block_of.find(t.component);
+        if (owner == block_of.end()) { last_error_ = "HNFv10: tensor de un componente sin pesos: " + t.name; return false; }
+        TensorEntry entry;
+        entry.name = t.name;
+        entry.dtype = t.dtype;
+        entry.block = owner->second;
+        entry.shape = t.shape;
+        entry.offset = t.offset;
+        entry.size = t.size;
+        tensors_.push_back(std::move(entry));
+    }
+    if (!read_execution_hints(f)) return false;
+    // Propiedades de la configuración: solo campos que el binario no trae (una autoridad).
+    for (const auto& p : contents.properties) {
+        ConfigValue value;
+        switch (p.type) {
+            case 1: value = p.boolean; break;
+            case 2: value = p.integer; break;
+            case 3: value = p.real; break;
+            case 4: value = p.text; break;
+            default: continue;
+        }
+        if (config_.has(p.key)) { last_error_ = "HNFv10: " + p.key + " está a la vez en la configuración binaria y en propiedades"; return false; }
+        config_.set(p.key, value);
+        block_configs_[BLOCK_TEXT_MODEL].set(p.key, value);
+    }
+    format_major_ = 10;
     return true;
 }
 
@@ -775,6 +701,7 @@ bool HnfLoader::load_block_tensors(BlockID id, Engine& engine) {
     
     for (const auto& entry : tensors_) {
         if (entry.block != target) continue;
+        if (tensor_filter_ && !tensor_filter_(entry)) continue;
         if (!load_tensor(file_, entry, engine.tensors())) {
             for (const auto& n : state.tensor_names) engine.tensors().remove(n);
             state = BlockState{};
@@ -882,11 +809,12 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+    if (!hnf10::is_hnf10(f)) {
+        last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
         file_path_.clear();
         return false;
     }
-    if (!read_execution_hints(f)) { file_path_.clear(); return false; }
+    if (!open_hnf10(f)) { file_path_.clear(); return false; }
     if (has_gemma4_vision_config_) {
         const Gemma4VisionValidationReport report =
             validate_gemma4_vision_tensors(*this);
@@ -900,11 +828,10 @@ bool HnfLoader::load(const std::string& path, Engine& engine) {
 }
 
 void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
-    // Gemma 4 construye su grafo con una ruta explicita que pide q/k/v y
-    // gate/up por nombre y no mira has_fused_qkv / has_fused_gate_up, asi que
-    // fusionar le quitaria tensores que necesita. Se deja fuera hasta que esa
-    // ruta soporte los tensores fusionados.
-    if (has_gemma4_config()) return;
+    if (has_gemma4_config()) {
+        fuse_gemma4_weights(engine, state);
+        return;
+    }
 
     const char* qkv_env = getenv("HELIOS_FUSE_QKV");
     const char* gate_up_env = getenv("HELIOS_FUSE_GATE_UP");
@@ -945,6 +872,49 @@ void HnfLoader::fuse_qkv_weights(Engine& engine, BlockState& state) {
 }
 
 
+// Gemma 4: el grafo mira por capa si existe el tensor fusionado y, si existe, hace
+// un solo GEMV y lee q/k/v (o gate/up) como trozos de su salida.
+//
+// - Las capas con KV compartido solo proyectan q: no se fusionan, o el GEMV
+//   calcularia k y v para nada.
+// - attention_k_eq_v (sin v_proj): V sale de la misma proyeccion que K, y hoy el
+//   grafo ya la calcula dos veces. Se pega q|k|k, que hace lo mismo en un GEMV;
+//   k ocupa dos veces, unos MB por capa global.
+// - Se recorren todas las capas del modelo y no se para en el primer hueco: con
+//   el texto repartido en dos GPU, el cargador de la segunda empieza a mitad.
+void HnfLoader::fuse_gemma4_weights(Engine& engine, BlockState& state) {
+    const char* qkv_env = getenv("HELIOS_FUSE_QKV");
+    const char* gate_up_env = getenv("HELIOS_FUSE_GATE_UP");
+    const bool fuse_qkv = qkv_env && qkv_env[0] == '1';
+    const bool fuse_gate_up = gate_up_env ? gate_up_env[0] == '1' : fuse_qkv;
+    const Gemma4Config& gemma = gemma4_config();
+    const uint32_t layers = static_cast<uint32_t>(gemma.layers.size());
+    const uint32_t first_shared = layers - std::min(gemma.num_kv_shared_layers, layers);
+
+    uint32_t qkv_fusionadas = 0, gate_up_fusionadas = 0;
+    for (uint32_t layer = 0; layer < layers; ++layer) {
+        const std::string b = "text.layer" + std::to_string(layer) + ".";
+        if (fuse_qkv && layer < first_shared && engine.tensors().exists(b + "attn.q_proj.weight")) {
+            const std::string k = b + "attn.k_proj.weight";
+            const std::string v = gemma.layers[layer].k_eq_v() ? k : b + "attn.v_proj.weight";
+            if (concat_tensors(engine, state, {b + "attn.q_proj.weight", k, v},
+                               b + "attn.qkv_proj.weight")) {
+                qkv_fusionadas++;
+            }
+        }
+        if (fuse_gate_up && engine.tensors().exists(b + "mlp.gate.weight") &&
+            concat_tensors(engine, state, {b + "mlp.gate.weight", b + "mlp.up.weight"},
+                           b + "mlp.gate_up.weight")) {
+            gate_up_fusionadas++;
+        }
+    }
+    if (qkv_fusionadas || gate_up_fusionadas) {
+        std::cout << "  [FUSE] Gemma 4 q/k/v=" << qkv_fusionadas
+                  << " capas, gate/up=" << gate_up_fusionadas << " capas" << std::endl;
+    }
+}
+
+
 bool HnfLoader::load_metadata(const std::string& path) {
     close();
     file_path_ = path;
@@ -957,11 +927,12 @@ bool HnfLoader::load_metadata(const std::string& path) {
     last_error_.clear();
     std::ifstream f(path, std::ios::binary);
     if (!f.is_open()) { file_path_.clear(); return false; }
-    if (!read_header(f) || !read_block_table(f) || !read_manifest(f) || !parse_manifest()) {
+    if (!hnf10::is_hnf10(f)) {
+        last_error_ = "no es un HNFv10: un HNFv9 se pasa con `hnf10 migrate` (helios_convert_v10)";
         file_path_.clear();
         return false;
     }
-    if (!read_execution_hints(f)) {
+    if (!open_hnf10(f)) {
         file_path_.clear();
         return false;
     }
@@ -972,94 +943,21 @@ bool HnfLoader::load_metadata(const std::string& path) {
 // HEADER / BLOCK TABLE / MANIFEST
 // ============================================================================
 
-bool HnfLoader::read_header(std::ifstream& f) {
-    f.seekg(0);
-    f.read(reinterpret_cast<char*>(&header_), sizeof(HnfHeader));
-    if (!f) return false;
-    if (memcmp(header_.magic, HNF_MAGIC, 8) != 0) return false;
-    if (header_.version_major != 9) return false;
-    if (header_.block_count != HNF_BLOCK_COUNT) return false;
-    if (header_.header_size != HNF_HEADER_SIZE) return false;
-    return true;
-}
-
-bool HnfLoader::read_block_table(std::ifstream& f) {
-    f.seekg(header_.block_table_offset);
-    f.read(reinterpret_cast<char*>(blocks_), sizeof(BlockEntry) * HNF_BLOCK_COUNT);
-    return f.good();
-}
-
-bool HnfLoader::read_manifest(std::ifstream& f) {
-    if (header_.manifest_size == 0) return false;
-    f.seekg(header_.manifest_offset);
-    manifest_json_.resize(header_.manifest_size);
-    f.read(&manifest_json_[0], header_.manifest_size);
-    return f.good();
-}
-
-bool HnfLoader::parse_manifest() {
-    tensors_.clear();
-    const char* p = find_key(manifest_json_.c_str(), "tensors");
-    if (!p || *p != '[') return false;
-    
-    p++;
-    while (*p) {
-        p = skip_ws(p);
-        if (*p == ']') break;
-        if (*p != '{') { if (*p == ',') { p++; continue; } break; }
-        
-        const char* obj_start = p;
-        int depth = 1; p++;
-        while (*p && depth > 0) { if (*p == '{') depth++; else if (*p == '}') depth--; p++; }
-        
-        std::string obj(obj_start, p - obj_start);
-        TensorEntry entry;
-        entry.name = get_string(obj.c_str(), "name");
-        entry.dtype = get_string(obj.c_str(), "dtype");
-        entry.block = get_string(obj.c_str(), "block");
-        const char* shape = find_key(obj.c_str(), "shape");
-        if (!shape || *shape != '[') {
-            last_error_ = "manifest tensor is missing its shape array";
-            return false;
-        }
-        entry.shape = get_int_array(obj.c_str(), "shape");
-        entry.offset = static_cast<uint64_t>(get_int(obj.c_str(), "offset"));
-        entry.size = static_cast<uint64_t>(get_int(obj.c_str(), "size"));
-        if (!entry.name.empty()) tensors_.push_back(entry);
-    }
-    return !tensors_.empty();
-}
-
 // ============================================================================
 // EXECUTION HINTS - PRIORIDAD: BINARIO [0xB] > JSON [0xA]
 // ============================================================================
 
 bool HnfLoader::read_execution_hints(std::ifstream& f) {
-    const bool binary_present = blocks_[BLOCK_EXEC_HINTS_BIN].size > 0;
-    const bool has_binary = read_execution_hints_binary(f);
-    if (binary_present && !has_binary) {
+    // La configuración binaria es obligatoria y la única fuente de configuración.
+    if (blocks_[BLOCK_EXEC_HINTS_BIN].size == 0) {
+        last_error_ = "HNFv10 sin componente de configuración";
+        return false;
+    }
+    if (!read_execution_hints_binary(f)) {
         if (last_error_.empty()) last_error_ = "invalid binary execution hints";
         std::cerr << "HnfLoader: " << last_error_ << std::endl;
         return false;
     }
-//    if (has_binary) std::cout << "HnfLoader: Binary hints loaded (O(1))" << std::endl;
-    
-    const BlockEntry& json_block = blocks_[BLOCK_EXEC_HINTS];
-    if (json_block.size > 0) {
-        f.clear(); f.seekg(json_block.offset);
-        std::string json; json.resize(json_block.size);
-        f.read(&json[0], json_block.size);
-        if (f.good()) {
-            if (!parse_execution_hints(json)) {
-                last_error_ = "invalid JSON execution hints";
-                return false;
-            }
-//            if (!has_binary) std::cout << "HnfLoader: JSON hints loaded (fallback)" << std::endl;
-        }
-    }
-    // Legacy HNF files may have no hint blocks at all. Preserve the historical
-    // fallback where graph detection derives the architecture from tensors.
-    // A present-but-invalid binary block is still rejected above.
     return true;
 }
 
@@ -1198,6 +1096,45 @@ bool HnfLoader::parse_execution_hints_binary(const uint8_t* data, size_t size) {
     return true;
 }
 
+static bool parse_gemma4_moe_matrix(const Gemma4MoeMatrixBin& bin, uint32_t role,
+                                    uint64_t rows, uint64_t cols, uint32_t experts,
+                                    Gemma4MoeMatrix& matrix) {
+    constexpr uint64_t limit = std::numeric_limits<uint64_t>::max();
+    const bool hq44 = bin.storage == GEMMA4_MOE_STORAGE_HQ44;
+    const bool hq8 = bin.storage == GEMMA4_MOE_STORAGE_HQ8;
+    if (bin.role != role || bin.storage > GEMMA4_MOE_STORAGE_HQ8 ||
+        (hq8 && role != GEMMA4_MOE_ROLE_SHARED_DOWN) ||
+        bin.layout != (hq44 ? 1u : hq8 ? 2u : 0u) || bin.rows != rows || bin.logical_cols != cols ||
+        bin.physical_rows != rows || bin.physical_cols != (cols + 255) / 256 * 256 ||
+        bin.experts != experts) {
+        return false;
+    }
+    if (role == GEMMA4_MOE_ROLE_GATE_UP && rows % 2 != 0) {
+        return false;
+    }
+
+    uint64_t row_bytes = 0;
+    switch (bin.storage) {
+        case GEMMA4_MOE_STORAGE_FP32: row_bytes = uint64_t{bin.physical_cols} * 4; break;
+        case GEMMA4_MOE_STORAGE_HQ44: row_bytes = uint64_t{bin.physical_cols} / 256 * 152; break;
+        case GEMMA4_MOE_STORAGE_HQ8:  row_bytes = uint64_t{bin.physical_cols} / 256 * 272; break;
+        default:                      row_bytes = uint64_t{bin.physical_cols} * 2; break;
+    }
+    if (bin.row_bytes != row_bytes || rows > limit / row_bytes ||
+        bin.expert_stride != row_bytes * rows || bin.expert_stride > limit / experts) {
+        return false;
+    }
+
+    matrix.storage = bin.storage;
+    matrix.rows = bin.rows;
+    matrix.logical_cols = bin.logical_cols;
+    matrix.physical_cols = bin.physical_cols;
+    matrix.experts = bin.experts;
+    matrix.row_bytes = bin.row_bytes;
+    matrix.expert_stride = bin.expert_stride;
+    return true;
+}
+
 bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
                                        const ExecutionHintsBin& hints,
                                        const TextModelConfigBin& text_config) {
@@ -1224,28 +1161,52 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
         last_error_ = "GM4X extension has invalid magic";
         return false;
     }
-    if (header.version != 1) {
+    if (header.version != 1 && header.version != 2) {
         last_error_ = "unsupported GM4X version";
         return false;
     }
-    if (header.layer_record_size != sizeof(Gemma4LayerConfigBin)) {
+    const bool has_moe = header.version == 2;
+    const size_t header_size =
+        has_moe ? sizeof(Gemma4ExtensionV2HeaderBin) : sizeof(header);
+    const size_t record_size =
+        has_moe ? sizeof(Gemma4LayerConfigV2Bin) : sizeof(Gemma4LayerConfigBin);
+    if (header.layer_record_size != record_size) {
         last_error_ = "unsupported GM4X layer record size";
+        return false;
+    }
+    if (((header.flags & GEMMA4_EXT_FLAG_MOE) != 0) != has_moe) {
+        last_error_ = "GM4X MoE flag does not match its version";
         return false;
     }
     if (header.layer_count == 0 || header.layer_count != text_config.num_hidden_layers) {
         last_error_ = "GM4X layer count does not match the text config";
         return false;
     }
+    if (bytes < header_size) {
+        last_error_ = "GM4X extension header is truncated";
+        return false;
+    }
 
     const size_t record_count = static_cast<size_t>(header.layer_count);
-    if (record_count > (bytes - sizeof(header)) / sizeof(Gemma4LayerConfigBin)) {
+    if (record_count > (bytes - header_size) / record_size) {
         last_error_ = "GM4X layer records are truncated";
         return false;
     }
-    const size_t required_size = sizeof(header) + record_count * sizeof(Gemma4LayerConfigBin);
+    const size_t required_size = header_size + record_count * record_size;
     if (required_size != bytes) {
         last_error_ = "GM4X extension size does not match its layer records";
         return false;
+    }
+    if (has_moe) {
+        Gemma4ExtensionV2HeaderBin v2{};
+        std::memcpy(&v2, data + start, sizeof(v2));
+        if (v2.base.reserved != sizeof(v2) ||
+            v2.descriptor_size != sizeof(Gemma4MoeMatrixBin) ||
+            v2.descriptors_per_layer != 3 || v2.extension_size != bytes ||
+            v2.expert_order != 1 || v2.gate_up_order != 1 || v2.reserved != 0) {
+            last_error_ = "GM4X v2 header has invalid fields";
+            return false;
+        }
     }
 
     Gemma4Config parsed{};
@@ -1258,7 +1219,7 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
 
     for (size_t i = 0; i < record_count; ++i) {
         Gemma4LayerConfigBin record{};
-        const size_t record_offset = start + sizeof(header) + i * sizeof(record);
+        const size_t record_offset = start + header_size + i * record_size;
         std::memcpy(&record, data + record_offset, sizeof(record));
 
         if (record.attention_kind > 1 || record.rope_type > ROPE_PROPORTIONAL ||
@@ -1281,6 +1242,39 @@ bool HnfLoader::parse_gemma4_extension(const uint8_t* data, size_t size,
         layer.partial_rotary_factor = record.partial_rotary_factor;
         layer.kv_share_group = record.kv_share_group;
         layer.num_kv_heads = record.num_kv_heads;
+
+        if (has_moe) {
+            Gemma4LayerConfigV2Bin moe{};
+            std::memcpy(&moe, data + record_offset, sizeof(moe));
+            if (i == 0) {
+                parsed.moe_experts = moe.experts;
+                parsed.moe_top_k = moe.top_k;
+                parsed.moe_intermediate_size = moe.intermediate_size;
+            }
+            const bool valid =
+                moe.experts != 0 && moe.top_k != 0 && moe.top_k <= moe.experts &&
+                moe.intermediate_size != 0 && moe.descriptor_mask == 7 &&
+                moe.descriptor_count == 3 && moe.reserved == 0 &&
+                moe.experts == parsed.moe_experts &&
+                moe.top_k == parsed.moe_top_k &&
+                moe.intermediate_size == parsed.moe_intermediate_size &&
+                parse_gemma4_moe_matrix(moe.gate_up, GEMMA4_MOE_ROLE_GATE_UP,
+                                        moe.intermediate_size * uint64_t{2},
+                                        text_config.hidden_size, moe.experts,
+                                        layer.moe_gate_up) &&
+                parse_gemma4_moe_matrix(moe.down, GEMMA4_MOE_ROLE_DOWN,
+                                        text_config.hidden_size,
+                                        moe.intermediate_size, moe.experts,
+                                        layer.moe_down) &&
+                parse_gemma4_moe_matrix(moe.shared_down, GEMMA4_MOE_ROLE_SHARED_DOWN,
+                                        text_config.hidden_size,
+                                        record.intermediate_size, 1,
+                                        layer.moe_shared_down);
+            if (!valid) {
+                last_error_ = "GM4X layer " + std::to_string(i) + " has invalid MoE fields";
+                return false;
+            }
+        }
         parsed.layers.push_back(layer);
     }
 
@@ -1343,8 +1337,9 @@ bool HnfLoader::parse_gemma4_vision_extension(
         return false;
     }
 
+    // Clamps aprendidos (E2B/E4B) y standardize (26B) dependen de la torre; el
+    // resto del contrato es común.
     constexpr uint32_t required_flags =
-        GEMMA4_VISION_FLAG_CLIPPED_LINEARS |
         GEMMA4_VISION_FLAG_DYNAMIC_TOKENS |
         GEMMA4_VISION_FLAG_LEARNED_XY_POS |
         GEMMA4_VISION_FLAG_ROPE_2D |
@@ -1359,11 +1354,9 @@ bool HnfLoader::parse_gemma4_vision_extension(
         GEMMA4_VISION_FLAG_POOL_FP32_SQRT_HIDDEN |
         GEMMA4_VISION_FLAG_INPUT_MINUS_ONE_ONE;
     constexpr uint32_t supported_flags = required_flags |
-        GEMMA4_VISION_FLAG_STANDARDIZE | GEMMA4_VISION_FLAG_NORMALIZE;
+        GEMMA4_VISION_FLAG_CLIPPED_LINEARS | GEMMA4_VISION_FLAG_STANDARDIZE;
     if ((extension.flags & required_flags) != required_flags ||
-        (extension.flags & ~supported_flags) != 0 ||
-        (extension.flags & GEMMA4_VISION_FLAG_STANDARDIZE) != 0 ||
-        (extension.flags & GEMMA4_VISION_FLAG_NORMALIZE) != 0) {
+        (extension.flags & ~supported_flags) != 0) {
         last_error_ = "GM4V flags request an unsupported vision contract";
         return false;
     }
@@ -1517,49 +1510,6 @@ void HnfLoader::apply_vision_config_bin(const VisionModelConfigBin& cfg) {
 // JSON EXECUTION HINTS — NOW PROCESSES ALL BLOCKS
 // ============================================================================
 
-bool HnfLoader::parse_execution_hints(const std::string& json) {
-    const char* j = json.c_str();
-    
-    // Global flags
-    if (get_bool(j, "text_enabled", false)) config_.set("text_enabled", true);
-    if (get_bool(j, "code_enabled", false)) config_.set("code_enabled", true);
-    if (get_bool(j, "vision_enabled", false)) config_.set("vision_enabled", true);
-    if (get_bool(j, "cortex_enabled", false)) config_.set("cortex_enabled", true);
-    if (get_bool(j, "audio_enabled", false)) config_.set("audio_enabled", true);
-    
-    // Structure: { "text": {...}, "vision": {...}, "cortex": {...}, "code": {...} }
-    // Parse each block into its respective config
-    
-    struct BlockMapping {
-        const char* json_key;
-        BlockID block_id;
-        bool is_default;  // Also write to config_ (text is default)
-    };
-    
-    static const BlockMapping mappings[] = {
-        {"text",   BLOCK_TEXT_MODEL, true},
-        {"vision", BLOCK_VISION,    false},
-        {"audio",  BLOCK_AUDIO,     false},
-        {"cortex", BLOCK_CORTEX,    false},
-        {"code",   BLOCK_CODE_EXEC, false},
-    };
-    
-    for (const auto& m : mappings) {
-        const char* obj = find_key(j, m.json_key);
-        if (!obj || *obj != '{') continue;
-        
-        // Parse into block-specific config
-        parse_json_object_to_map(obj, block_configs_[m.block_id].params);
-        
-        // Text is also the default config
-        if (m.is_default) {
-            parse_json_object_to_map(obj, config_.params);
-        }
-    }
-    
-    return true;
-}
-
 // ============================================================================
 // DTYPE CONVERSION
 // ============================================================================
@@ -1581,6 +1531,7 @@ DTypeID HnfLoader::dtype_from_string(const std::string& s) const {
     const auto candidate = DTypeRegistry::instance().get_id(s);
     if (dtype::hqs_v3(candidate)) return candidate;
     if (s == "hq44k_g16") return dtype::HQ44K();
+    if (s == "hq8k") return dtype::HQ8K();
     if (s == "int8") return dtype::INT8();
     if (s == "int32") return dtype::INT32();
     return DTYPE_INVALID;
@@ -1616,8 +1567,10 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
         }
         numel *= dim;
     }
-    if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K()) &&
-        (entry.shape.size() != 2 || entry.shape[1] % 256 != 0)) {
+    // Rango 3 solo para los expertos MoE HQ44 empaquetados: [E, filas, columnas].
+    const bool packed_experts = dtype == helios::dtype::HQ44K() && entry.shape.size() == 3;
+    if ((helios::dtype::hqs_v3(dtype) || dtype == helios::dtype::HQ44K() || dtype == helios::dtype::HQ8K()) &&
+        ((entry.shape.size() != 2 && !packed_experts) || entry.shape.back() % 256 != 0)) {
         std::cerr << "HnfLoader: x.3 requires a matrix with complete row blocks: " << entry.name << std::endl;
         return false;
     }
@@ -1805,9 +1758,8 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
 // ============================================================================
 
 void HnfLoader::print_info() const {
-    std::cout << "=== HNF v" << header_.version_major << "." << header_.version_minor << " ===" << std::endl;
-    std::cout << "File size: " << (header_.file_size / 1024 / 1024) << " MB" << std::endl;
-    std::cout << "Flags: 0x" << std::hex << header_.flags << std::dec << std::endl;
+    std::cout << "=== HNFv" << format_major_ << " ===" << std::endl;
+    std::cout << "File size: " << (file_size_ / 1024 / 1024) << " MB" << std::endl;
     std::cout << std::endl;
     
     std::cout << "=== Blocks ===" << std::endl;

@@ -78,6 +78,23 @@ void CommandBuffer::add_gelu(const std::string& dst, const std::string& src) {
     add_op(op::GELU(), dst).in({src});
 }
 
+void CommandBuffer::add_gelu_mul_rounded(const std::string& dst, const std::string& gate,
+                                         const std::string& up, uint32_t dim,
+                                         uint32_t layers, uint32_t layer) {
+    add_op(op::GELU_MUL_ROUNDED(), dst).in({gate, up})
+        .set("dim", dim).set("layers", layers).set("layer", layer);
+}
+
+void CommandBuffer::add_rmsnorm_residual(const std::string& hidden, const std::string& x,
+                                         const std::string& w1, float eps,
+                                         const std::string& scalar,
+                                         const std::string& normed,
+                                         const std::string& w2) {
+    auto& cmd = add_op(op::RMSNORM_RESIDUAL(), hidden).in({x, w1, hidden}).set("eps", eps);
+    if (!scalar.empty()) cmd.set("scalar", scalar);
+    if (!normed.empty()) cmd.set("normed", normed).set("norm2_weight", w2);
+}
+
 void CommandBuffer::add_softmax(const std::string& dst, const std::string& src, int32_t dim) {
     add_op(op::SOFTMAX(), dst).in({src}).set("dim", dim);
 }
@@ -197,6 +214,55 @@ void CommandBuffer::add_scatter_rows(const std::string& dst,
                                      const std::string& rows,
                                      const std::string& indices) {
     add_op(op::SCATTER_ROWS(), dst).in({rows, indices});
+}
+
+void CommandBuffer::add_moe_router_input(const std::string& dst,
+                                         const std::string& hidden,
+                                         const std::string& scale,
+                                         float eps, float factor) {
+    add_op(op::MOE_ROUTER_INPUT(), dst).in({hidden, scale}).set("eps", eps).set("factor", factor);
+}
+
+void CommandBuffer::add_moe_logits(const std::string& logits,
+                                   const std::string& input,
+                                   const std::string& router) {
+    add_op(op::MOE_LOGITS(), logits).in({input, router});
+}
+
+void CommandBuffer::add_moe_route(const std::string& indices,
+                                  const std::string& weights,
+                                  const std::string& logits,
+                                  const std::string& expert_scale,
+                                  uint32_t top_k) {
+    add_op(op::MOE_ROUTE(), indices)
+        .in({logits, expert_scale, weights}).set("top_k", top_k);
+}
+
+void CommandBuffer::add_moe_experts(const std::string& dst,
+                                    const std::string& input,
+                                    const std::string& indices,
+                                    const std::string& weights,
+                                    const std::string& gate_up,
+                                    const std::string& down) {
+    add_op(op::MOE_EXPERTS(), dst).in({input, indices, weights, gate_up, down});
+}
+
+void CommandBuffer::add_moe_experts_decode(const std::string& dst,
+                                           const std::string& input,
+                                           const std::string& indices,
+                                           const std::string& weights,
+                                           const std::string& gate_up,
+                                           const std::string& down,
+                                           const std::string& gate_up_scratch,
+                                           const std::string& hidden_scratch,
+                                           const std::string& rows_scratch) {
+    add_op(op::MOE_EXPERTS_DECODE(), dst)
+        .in({input, indices, weights, gate_up, down,
+             gate_up_scratch, hidden_scratch, rows_scratch});
+}
+
+void CommandBuffer::add_pad_columns(const std::string& dst, const std::string& input) {
+    add_op(op::PAD_COLUMNS(), dst).in({input});
 }
 
 void CommandBuffer::add_ple_slice(const std::string& dst,

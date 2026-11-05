@@ -108,7 +108,23 @@ static int check_shape(int K, int N, std::mt19937& rng) {
     // El prefill cuantizado usa cublasHgemm (acumulación fp16) a propósito, igual que
     // hq41k/hq42k: ver matmul_cublas.cu. Su error esperado es de orden 1e-3.
     failures += !(e1 < 1e-3) + !(em < 1e-2);
-    cudaFree(dw); cudaFree(dx); cudaFree(dy); cudaFree(dd);
+
+    // Embedding (tabla PLE compacta): cada fila buscada es la referencia en FP16; fuera de rango, ceros.
+    const int32_t ids_host[4] = {0, N - 1, N / 2, N};
+    int32_t* ids; ck(cudaMalloc(&ids, sizeof(ids_host)));
+    ck(cudaMemcpy(ids, ids_host, sizeof(ids_host), cudaMemcpyHostToDevice));
+    launch_embedding_hq44k(ids, dw, dd, 1, 4, N, K); ck(cudaDeviceSynchronize());
+    std::vector<half> rows(size_t(4) * K); ck(cudaMemcpy(rows.data(), dd, rows.size() * 2, cudaMemcpyDeviceToHost));
+    size_t bad = 0;
+    for (int t = 0; t < 4; ++t)
+        for (int k = 0; k < K; ++k) {
+            const float want = ids_host[t] < N ? __half2float(__float2half(w[size_t(ids_host[t]) * K + k])) : 0.f;
+            const float got = __half2float(rows[size_t(t) * K + k]);
+            if (std::fabs(got - want) > std::fabs(want) * 1e-3f + 6e-8f) ++bad;
+        }
+    printf("K=%d N=%d embedding: %zu values off\n", K, N, bad);
+    failures += bad != 0;
+    cudaFree(ids); cudaFree(dw); cudaFree(dx); cudaFree(dy); cudaFree(dd);
     return failures;
 }
 

@@ -4,6 +4,14 @@ Actualizado: **2026-09-19**, con descompresión vectorizada validada sobre `93af
 estado operativo. Los planes e informes fechados conservan sus resultados de
 entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 
+## Contenedor HNFv10 (2026-11-03)
+
+El motor solo carga HNFv10 (`src/hnf10.cpp`, especificación en
+`helios_convert_v10/docs/HNFV10.md`). Hoy solo el 26B MoE está en HNFv10. Las
+capacidades de la tabla siguiente se probaron con HNFv9; esos ficheros ya no cargan y
+cada modelo tiene que pasar antes por `hnf10 migrate`, que todavía no migra bloques de
+visión.
+
 ## Capacidades contrastadas
 
 | Área | Estado y evidencia |
@@ -11,6 +19,7 @@ entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 | Gemma 4 E2B/E4B texto | Implementado. [Campaña E2B](GEMMA4_PLAN.md); regresión E4B en [prefill](informes/OPTIMIZACION_PREFILL_E4B_2026-09-19.md) y [cancelación](informes/CANCELACION_RECURSOS_2026-09-19.md). |
 | Gemma 4 12B unified texto | Implementado, KV heads por capa, K=V y PLE opcional. [Integración inicial](GEMMA4_12B_UNIFIED.md) y campañas de septiembre. |
 | Visión E2B/E4B con torre | Runner y adaptador implementados; [campaña visual](GEMMA4_VISION_PLAN.md). E4B probado desde el adaptador Python con imagen y seguimiento textual el 19 de septiembre. |
+| Visión 26B MoE | Implementada el 2026-11-03 sobre HNFv10 (`hnf10 add-vision`): torre de 27 capas sin clamps y con `standardize` en FP32, en la GPU 1 cuando el texto se reparte, y bloque de imagen bidireccional en las capas deslizantes. Salida proyectada a 1,06 % de NRMSE del oráculo FP32 (`tools/gemma4_vision_oracle.py`). Probada en `helios_runtime` y en HEXOS con imágenes reales. Ver `helios_convert_v10/docs/HNFV10.md` §15. |
 | Visión 12B unified | Sigue pendiente: no hay runner encoder-free ni configuración/preprocesado completos. Un bloque visual convertido o el kernel `g4u_pos_add` no completan ese recorrido. |
 | Qwen3 | Ruta genérica Qwen/Qwen2 con Q/K norm; evidencia histórica de Qwen3-4B y sesiones Qwen8B. No se repitió esa certificación en la última campaña 12B/E4B. |
 | Phi / DeepSeek | Referencias y pruebas históricas; no se declaran recertificados por la batería reciente Gemma. |
@@ -38,11 +47,15 @@ Fuente: [src/dtype.cpp](src/dtype.cpp).
 | HQ51K | 200 | 6,25 |
 | HQ42K | 152 | 4,75 |
 | HQ52K | 184 | 5,75 |
-| HQ62K | 264 | 8,25 |
+| HQ62K (descartado) | 264 | 8,25 |
+| HQ44 (`hq44k_g16`) | 152 | 4,75 |
+| HQ8K | 272 | 8,50 |
 
 Incluyen metadatos del bloque; no incluyen otros tensores ni el contenedor.
-HQ62K es lookup de embeddings, no matmul general. Un archivo con ese sufijo
-puede mezclar tipos: no comparar su tamaño como si todos los pesos usaran HQ62K.
+HQ62K quedó descartado el 2026-11-02: tiene el doble de error que HQ8K con casi
+los mismos bits. Su lookup de embeddings se conserva para leer HNF antiguos.
+HQ8K es la parte densa del 26B MoE. Qué formatos valen:
+`helios_convert_v10/docs/HQS_FORMATOS.md`.
 
 ## Qué queda después del trabajo reciente
 

@@ -3,6 +3,7 @@
 #include "kernels.hpp"
 #include <cuda_fp16.h>
 #include <cstdint>
+#include <stdexcept>
 
 namespace helios { namespace kernels {
 void launch_attention_flash_decode_merge_dp(const float*, half*, const int32_t*, int, int, cudaStream_t);
@@ -25,12 +26,15 @@ __device__ __forceinline__ void ld2(uint32_t (&r)[2], const half* p) {
                  : "=r"(r[0]),"=r"(r[1]):"r"(a));
 }
 __device__ __forceinline__ void mma(float (&c)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
                  : "+f"(c[0]),"+f"(c[1]),"+f"(c[2]),"+f"(c[3])
                  : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]),"r"(b[0]),"r"(b[1]));
+#endif
 }
 __device__ __forceinline__ void load_kv(half* dst,const half* src,int n) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     for(int i=threadIdx.x;i<TILE*(HD/8);i+=THREADS) {
         int row=i/(HD/8),col=(i%(HD/8))*8;
         uint32_t a=static_cast<uint32_t>(__cvta_generic_to_shared(dst+row*STRIDE+col));
@@ -41,6 +45,7 @@ __device__ __forceinline__ void load_kv(half* dst,const half* src,int n) {
     asm volatile("cp.async.commit_group;");
     asm volatile("cp.async.wait_group 0;");
     __syncthreads();
+#endif
 }
 
 __global__ __launch_bounds__(THREADS,2) void attention_global_grouped_kernel(
@@ -130,6 +135,7 @@ __global__ __launch_bounds__(THREADS,2) void attention_global_grouped_kernel(
 } // namespace
 void launch_attention_global_grouped_dp(const half* q,const half* k,const half* v,half* out,float* partials,
                                         const int32_t* seq,float scale,int splits,int min_chunk,cudaStream_t stream) {
+    if(!device_has_m16n8k16()) throw std::runtime_error("global grouped attention needs sm_80");
     attention_global_grouped_kernel<<<dim3(splits,2),THREADS,0,stream>>>(q,k,v,partials,seq,scale,splits,min_chunk);
     launch_attention_flash_decode_merge_dp(partials,out,seq,splits,min_chunk,stream);
 }

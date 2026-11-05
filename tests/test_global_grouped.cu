@@ -135,6 +135,10 @@ static bool run(const Geometry& g, bool bench, bool check) {
 }
 
 int main(int argc, char** argv) {
+    if (!device_has_m16n8k16()) {
+        printf("SKIP: esta GPU no tiene mma m16n8k16\n");
+        return 0;
+    }
     const bool bench = argc > 1 && std::string(argv[1]).find("bench") != std::string::npos;
     const bool check = !(argc > 1 && std::string(argv[1]) == "bench-only");
     const Geometry geometries[] = {

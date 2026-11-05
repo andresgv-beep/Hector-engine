@@ -313,18 +313,28 @@ bool Gemma4VisionRunner::clipped_linear(
     uint32_t output_width,
     std::string* error) {
     const half* weight = fp16_tensor(prefix + "weight", error);
-    const half* input_min = fp16_tensor(prefix + "input_min", error);
-    const half* input_max = fp16_tensor(prefix + "input_max", error);
-    const half* output_min = fp16_tensor(prefix + "output_min", error);
-    const half* output_max = fp16_tensor(prefix + "output_max", error);
-    if (!weight || !input_min || !input_max || !output_min || !output_max) {
-        return false;
-    }
+    if (!weight) return false;
     const TensorInfo* weight_info = engine_.tensors().get(prefix + "weight");
     if (!shape_is(weight_info, {output_width, input_width})) {
         return fail(error, "visual linear shape mismatch: " + prefix + "weight");
     }
     const cudaStream_t stream = engine_.config().stream;
+    // La torre del 26B no tiene clamps aprendidos: el lineal es solo el GEMM.
+    if (!loader_.gemma4_vision_config().has_flag(
+            GEMMA4_VISION_FLAG_CLIPPED_LINEARS)) {
+        kernels::launch_matmul_fp16(
+            input, weight, output,
+            static_cast<int>(max_patches_), static_cast<int>(input_width),
+            static_cast<int>(output_width), stream);
+        return cuda_ok(cudaGetLastError(), "launch visual linear", error);
+    }
+    const half* input_min = fp16_tensor(prefix + "input_min", error);
+    const half* input_max = fp16_tensor(prefix + "input_max", error);
+    const half* output_min = fp16_tensor(prefix + "output_min", error);
+    const half* output_max = fp16_tensor(prefix + "output_max", error);
+    if (!input_min || !input_max || !output_min || !output_max) {
+        return false;
+    }
     kernels::launch_clamp_tensor_bounds_fp16(
         input, input_min, input_max, d_linear_input_,
         size_t(max_patches_) * input_width, stream);
@@ -515,10 +525,21 @@ bool Gemma4VisionRunner::run_projector(std::string* error) {
             return false;
         }
     }
-    // std_bias=0 and std_scale=1 are fixed non-persistent upstream buffers for
-    // this checkpoint. Casting after the FP32 pool therefore is sufficient.
-    kernels::launch_fp32_to_fp16(
-        d_pooled_fp32_, d_pooled_fp16_, pooled_elements, stream);
+    // E2B/E4B: std_bias=0 y std_scale=1 son buffers fijos no persistentes, así
+    // que basta pasar el pool FP32 a FP16. El 26B los trae en el checkpoint y el
+    // pool pasa del rango FP16 (±6,9e4 medido) hasta restar el bias: se
+    // estandariza en FP32, como upstream, antes de bajar a FP16.
+    if (loader_.gemma4_vision_config().has_flag(GEMMA4_VISION_FLAG_STANDARDIZE)) {
+        const half* bias = fp16_tensor("vision.projector.std_bias", error);
+        const half* scale = fp16_tensor("vision.projector.std_scale", error);
+        if (!bias || !scale) return false;
+        kernels::launch_gemma4_vision_standardize_fp16(
+            d_pooled_fp32_, bias, scale, d_pooled_fp16_, soft_token_count_,
+            hidden_size_, stream);
+    } else {
+        kernels::launch_fp32_to_fp16(
+            d_pooled_fp32_, d_pooled_fp16_, pooled_elements, stream);
+    }
     kernels::launch_rmsnorm_no_weight_fp16(
         d_pooled_fp16_, d_pooled_fp16_, soft_token_count_, hidden_size_,
         loader_.gemma4_vision_config().rms_norm_eps, stream);

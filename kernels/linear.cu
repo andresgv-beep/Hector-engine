@@ -7,6 +7,7 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 #include "hqs_common.cuh"
+#include "per_device.hpp"
 
 namespace helios {
 namespace kernels {
@@ -20,6 +21,19 @@ namespace kernels {
 
 // Forward declaration of cuBLAS version
 void launch_matmul_fp16_cublas(const half*, const half*, half*, int, int, int, cudaStream_t);
+
+bool device_has_m16n8k16() {
+    struct Query { bool known = false, supported = false; };
+    static PerDevice<Query> queries;
+    Query& query = queries.current();
+    if (!query.known) {
+        int major = 0;
+        cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, PerDevice<Query>::current_device());
+        query.known = true;
+        query.supported = major >= 8;
+    }
+    return query.supported;
+}
 
 void launch_matmul_fp16(
     const half* A, const half* B, half* C,

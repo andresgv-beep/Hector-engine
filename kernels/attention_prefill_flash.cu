@@ -36,10 +36,12 @@ __device__ __forceinline__ void ldmatrix_x4_trans(uint32_t (&r)[4], const half* 
 }
 
 __device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], uint32_t b0, uint32_t b1) {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
                  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
                  : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
                  : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#endif
 }
 
 __device__ __forceinline__ uint32_t pack_half2(float lo, float hi) {
@@ -198,6 +200,7 @@ bool launch_attention_prefill_flash_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
     int max_seq_len, float scale, int window_size, cudaStream_t stream, int cache_slots) {
+    if (!device_has_m16n8k16()) return false;
     if (cache_slots <= 0) cache_slots = max_seq_len;
     // Keys must sit at their own positions: full attention, no wrapped ring.
     if (head_dim != FA_HD || window_size > 0 || past_len + seq_new > cache_slots ||

@@ -6,6 +6,8 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
+#include <cstdint>
+#include "kernels.hpp"
 
 namespace helios {
 namespace kernels {
@@ -63,7 +65,173 @@ __global__ void rmsnorm_fp16_kernel(
     }
 }
 
-void launch_rmsnorm_fp16(
+// ============================================================================
+// RMSNORM VECTORIZADO
+// ============================================================================
+// En decode la fila es una sola (hidden = 2560 en el E4B) y el kernel de arriba
+// la recorre con un único bloque: diez lecturas escalares por hilo, otra pasada
+// entera para escribir y ocho __syncthreads de árbol. Medido: 9,9 µs por
+// llamada y ~211 llamadas por token, unos 2 ms de los 16. Esta versión lee cada
+// hilo 8 halves de una vez, los guarda en registros para no releer la fila, y
+// reduce por warp con shuffles. Sin __restrict__: el grafo normaliza V en sitio.
+//
+// VPT = vectores de 8 halves por hilo. Exige dim % 8 == 0 y punteros alineados a
+// 16 bytes; si no, se usa el kernel de arriba.
+
+// Las tres piezas del kernel vectorizado, compartidas con rmsnorm_residual para que
+// la norma fusionada dé los mismos bits que la suelta.
+__device__ __forceinline__ void accumulate_sum_sq(float& sum_sq, const uint4& v) {
+    const half2* h = reinterpret_cast<const half2*>(&v);
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const float2 f = __half22float2(h[j]);
+        sum_sq += f.x * f.x + f.y * f.y;
+    }
+}
+
+// Suma del bloque y rsqrt. `slot` separa usos sucesivos en el mismo kernel: cada
+// uno escribe su propia memoria compartida y no hace falta esperar a que todos
+// hayan leído el anterior.
+__device__ __forceinline__ float block_rms_inv(float sum_sq, int dim, float eps, int slot) {
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xffffffffu, sum_sq, off);
+
+    __shared__ float warp_sums[2][32];
+    __shared__ float rms_inv_shared[2];
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int nwarps = (blockDim.x + 31) / 32;
+    if (nwarps > 1) {
+        if (lane == 0) warp_sums[slot][warp] = sum_sq;
+        __syncthreads();
+        if (warp == 0) {
+            float s = lane < nwarps ? warp_sums[slot][lane] : 0.0f;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                s += __shfl_xor_sync(0xffffffffu, s, off);
+            if (lane == 0) rms_inv_shared[slot] = rsqrtf(s / float(dim) + eps);
+        }
+        __syncthreads();
+    } else if (lane == 0) {
+        rms_inv_shared[slot] = rsqrtf(sum_sq / float(dim) + eps);
+    }
+    __syncwarp();
+    return rms_inv_shared[slot];
+}
+
+__device__ __forceinline__ uint4 scale_vec(const uint4& v, const half* weight, int idx, float rms_inv) {
+    uint4 res;
+    const half2* h = reinterpret_cast<const half2*>(&v);
+    half2* r = reinterpret_cast<half2*>(&res);
+    if (weight) {
+        const uint4 wv = reinterpret_cast<const uint4*>(weight)[idx];
+        const half2* w = reinterpret_cast<const half2*>(&wv);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float2 f = __half22float2(h[j]);
+            const float2 g = __half22float2(w[j]);
+            r[j] = __floats2half2_rn(f.x * rms_inv * g.x, f.y * rms_inv * g.y);
+        }
+    } else {
+#pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const float2 f = __half22float2(h[j]);
+            r[j] = __floats2half2_rn(f.x * rms_inv, f.y * rms_inv);
+        }
+    }
+    return res;
+}
+
+template<int VPT>
+__global__ void rmsnorm_fp16_vec_kernel(
+    const half* input,
+    const half* weight,
+    half* output,
+    int dim,
+    float eps
+) {
+    const int nvec = dim / 8;
+    const uint4* row_in = reinterpret_cast<const uint4*>(input + size_t(blockIdx.x) * dim);
+    uint4* row_out = reinterpret_cast<uint4*>(output + size_t(blockIdx.x) * dim);
+
+    uint4 buf[VPT];
+    float sum_sq = 0.0f;
+#pragma unroll
+    for (int v = 0; v < VPT; ++v) {
+        const int idx = threadIdx.x + v * blockDim.x;
+        if (idx < nvec) {
+            buf[v] = row_in[idx];
+            accumulate_sum_sq(sum_sq, buf[v]);
+        }
+    }
+    const float rms_inv = block_rms_inv(sum_sq, dim, eps, 0);
+#pragma unroll
+    for (int v = 0; v < VPT; ++v) {
+        const int idx = threadIdx.x + v * blockDim.x;
+        if (idx < nvec) row_out[idx] = scale_vec(buf[v], weight, idx, rms_inv);
+    }
+}
+
+// Cierre de bloque de Gemma 4 en un kernel:
+//     x = rmsnorm(x) * w1;  hidden = hidden + x;  [hidden *= scalar];
+//     [normed = rmsnorm(hidden) * w2]
+// Con los mismos redondeos a fp16 que la secuencia rmsnorm + add (__hadd2) +
+// mul_scalar_tensor + rmsnorm, así que los bits coinciden con ella. x no se
+// escribe: en el grafo nadie lo vuelve a leer. Una fila por bloque, un vector de
+// 8 halves por hilo (dim <= 8192).
+__global__ void rmsnorm_residual_kernel(
+    const half* x,
+    const half* w1,
+    half* hidden,
+    const half* scalar,
+    const half* w2,
+    half* normed,
+    int dim,
+    float eps
+) {
+    const int nvec = dim / 8;
+    const int idx = threadIdx.x;
+    const bool active = idx < nvec;
+    const size_t row = size_t(blockIdx.x) * dim;
+    uint4 xv = make_uint4(0, 0, 0, 0);
+    float sum_sq = 0.0f;
+    if (active) {
+        xv = reinterpret_cast<const uint4*>(x + row)[idx];
+        accumulate_sum_sq(sum_sq, xv);
+    }
+    const float rms1 = block_rms_inv(sum_sq, dim, eps, 0);
+
+    uint4 hv = make_uint4(0, 0, 0, 0);
+    if (active) {
+        const uint4 xn = scale_vec(xv, w1, idx, rms1);
+        hv = reinterpret_cast<const uint4*>(hidden + row)[idx];
+        half2* h = reinterpret_cast<half2*>(&hv);
+        const half2* n = reinterpret_cast<const half2*>(&xn);
+#pragma unroll
+        for (int j = 0; j < 4; ++j) h[j] = __hadd2(h[j], n[j]);
+        if (scalar) {
+            const float value = __half2float(scalar[0]);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const float2 f = __half22float2(h[j]);
+                h[j] = __halves2half2(__float2half(f.x * value), __float2half(f.y * value));
+            }
+        }
+        reinterpret_cast<uint4*>(hidden + row)[idx] = hv;
+    }
+    if (!normed) return;  // igual en todo el bloque: no deja a nadie en un __syncthreads
+
+    float sum_sq2 = 0.0f;
+    if (active) accumulate_sum_sq(sum_sq2, hv);
+    const float rms2 = block_rms_inv(sum_sq2, dim, eps, 1);
+    if (active) reinterpret_cast<uint4*>(normed + row)[idx] = scale_vec(hv, w2, idx, rms2);
+}
+
+static bool aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
+static void launch_rmsnorm_any(
     const half* input,
     const half* weight,
     half* output,
@@ -73,15 +241,41 @@ void launch_rmsnorm_fp16(
     cudaStream_t stream
 ) {
     if (batch_size == 0 || dim == 0) return;
-    
-    int block_size = min(256, dim);
-    block_size = max(32, block_size);  // At least one warp
-    
+
+    const int nvec = dim / 8;
+    if (dim % 8 == 0 && nvec <= 4 * 1024 && aligned16(input) && aligned16(output) &&
+        (!weight || aligned16(weight))) {
+        const int vpt = (nvec + 1023) / 1024;
+        const int threads = ((nvec + vpt - 1) / vpt + 31) / 32 * 32;
+        switch (vpt) {
+            case 1: rmsnorm_fp16_vec_kernel<1><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+            case 2: rmsnorm_fp16_vec_kernel<2><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+            default: rmsnorm_fp16_vec_kernel<4><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+        }
+        return;
+    }
+
+    // Potencia de dos: la reducción en árbol pierde elementos con 100 hilos.
+    int block_size = 32;
+    while (block_size < dim && block_size < 256) block_size *= 2;
+
     size_t smem_size = block_size * sizeof(float);
-    
+
     rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
         input, weight, output, batch_size, dim, eps
     );
+}
+
+void launch_rmsnorm_fp16(
+    const half* input,
+    const half* weight,
+    half* output,
+    int batch_size,
+    int dim,
+    float eps,
+    cudaStream_t stream
+) {
+    launch_rmsnorm_any(input, weight, output, batch_size, dim, eps, stream);
 }
 
 void launch_rmsnorm_no_weight_fp16(
@@ -92,13 +286,34 @@ void launch_rmsnorm_no_weight_fp16(
     float eps,
     cudaStream_t stream
 ) {
-    if (batch_size == 0 || dim == 0) return;
-    int block_size = min(256, dim);
-    block_size = max(32, block_size);
-    size_t smem_size = block_size * sizeof(float);
-    rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
-        input, nullptr, output, batch_size, dim, eps
-    );
+    launch_rmsnorm_any(input, nullptr, output, batch_size, dim, eps, stream);
+}
+
+void launch_rmsnorm_residual_fp16(
+    half* x,
+    const half* w1,
+    half* hidden,
+    const half* scalar,
+    const half* w2,
+    half* normed,
+    int rows,
+    int dim,
+    float eps,
+    cudaStream_t stream
+) {
+    if (rows == 0 || dim == 0) return;
+    const int nvec = dim / 8;
+    if (dim % 8 == 0 && nvec <= 1024 && aligned16(x) && aligned16(w1) && aligned16(hidden) &&
+        (!normed || (aligned16(normed) && (!w2 || aligned16(w2))))) {
+        const int threads = (nvec + 31) / 32 * 32;
+        rmsnorm_residual_kernel<<<rows, threads, 0, stream>>>(x, w1, hidden, scalar, w2, normed, dim, eps);
+        return;
+    }
+    // La secuencia de siempre, que es la que el kernel fusionado reproduce.
+    launch_rmsnorm_any(x, w1, x, rows, dim, eps, stream);
+    launch_add_fp16(hidden, x, hidden, size_t(rows) * dim, stream);
+    if (scalar) launch_mul_scalar_tensor_fp16(hidden, scalar, hidden, size_t(rows) * dim, stream);
+    if (normed) launch_rmsnorm_any(hidden, w2, normed, rows, dim, eps, stream);
 }
 
 // ============================================================================

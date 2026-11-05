@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -90,6 +91,21 @@ public:
         std::string* error = nullptr) = 0;
 };
 
+// Decoder forward for a text model split across GPUs. `input` already writes
+// the scaled embeddings of the whole sequence on the primary engine; the
+// callee appends layers and head on each GPU, runs them and synchronizes.
+using MultimodalTextForward = std::function<void(
+    CommandBuffer& input, uint32_t seq_len, const KVCacheParams& cache,
+    Gemma4BidirectionalBlock bidirectional)>;
+
+// Where the decoder of a split model runs: the visual tower goes to
+// `vision_engine` (the GPU the split left room on) and the prefill through
+// `text_forward`. Empty for single-GPU sessions.
+struct MultimodalPlacement {
+    Engine* vision_engine = nullptr;
+    MultimodalTextForward text_forward;
+};
+
 // Factory boundary used by persistent sessions. Unknown or metadata-only
 // adapter ids fail visibly; callers never switch on model architecture.
 std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
@@ -99,7 +115,8 @@ std::unique_ptr<MultimodalAdapter> create_multimodal_adapter(
     GraphBuilder& graph,
     const ArchDescriptor& text_architecture,
     uint32_t max_prefill_tokens,
-    std::string* error = nullptr);
+    std::string* error = nullptr,
+    MultimodalPlacement placement = {});
 
 // Gemma 4 12B «unified»: image and audio embedders from a modality-only HNF
 // (`modality_loader`, blocks 0x1/0x2) feeding the text model of `text_loader`.

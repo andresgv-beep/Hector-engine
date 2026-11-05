@@ -82,6 +82,10 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "gelu_mul"; info.category = "activation";
     info.min_inputs = 2; info.max_inputs = 2;
     register_op(info);
+
+    info = OpTypeInfo{}; info.name = "gelu_mul_rounded"; info.category = "activation";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
     
     // Normalization
     info = OpTypeInfo{}; info.name = "rmsnorm"; info.category = "norm";
@@ -93,6 +97,12 @@ void OpTypeRegistry::register_builtins() {
     register_op(info);
 
     info = OpTypeInfo{}; info.name = "add_rmsnorm"; info.category = "norm";
+    info.min_inputs = 3; info.max_inputs = 3;
+    register_op(info);
+
+    // Inputs: x, w1, hidden (hidden is also the output). Optional "scalar",
+    // "norm2_weight" and "normed" name further tensors.
+    info = OpTypeInfo{}; info.name = "rmsnorm_residual"; info.category = "norm";
     info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
     
@@ -180,6 +190,36 @@ void OpTypeRegistry::register_builtins() {
     // Entradas: hidden (in-place), tabla de posiciones e ids [tokens,2].
     info = OpTypeInfo{}; info.name = "g4u_pos_add"; info.category = "memory";
     info.min_inputs = 3; info.max_inputs = 3; info.is_inplace = true;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "moe_router_input"; info.category = "moe";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "moe_logits"; info.category = "moe";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+
+    // Gemma 4 MoE. Salida: indices [tokens,K]. Entradas: logits, escala por
+    // experto y pesos [tokens,K], que el kernel tambien escribe.
+    info = OpTypeInfo{}; info.name = "moe_route"; info.category = "moe";
+    info.min_inputs = 3; info.max_inputs = 3;
+    register_op(info);
+
+    // Entradas: filas, indices, pesos, gate_up [E,2I,H] y down [E,H,P], con
+    // P las columnas fisicas de I. Sincroniza y lee indices en la CPU: no entra
+    // en un CUDA Graph.
+    info = OpTypeInfo{}; info.name = "moe_experts"; info.category = "moe";
+    info.min_inputs = 5; info.max_inputs = 5;
+    register_op(info);
+
+    // Las mismas entradas para un token, mas tres scratch: [K,2I], [K,P] y [K,H].
+    info = OpTypeInfo{}; info.name = "moe_experts_decode"; info.category = "moe";
+    info.min_inputs = 8; info.max_inputs = 8;
+    register_op(info);
+
+    info = OpTypeInfo{}; info.name = "pad_columns"; info.category = "moe";
+    info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
 }
 

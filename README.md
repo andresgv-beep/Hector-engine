@@ -9,7 +9,10 @@ capacidades implementadas, límites y resultados de campañas históricas.
 
 ## Qué funciona
 
-- Carga HNF v9, tokenizer HTF, detección de configuración y construcción del grafo.
+- Carga HNFv10 (contenedor de `helios_convert_v10`), tokenizer HTF, detección de
+  configuración y construcción del grafo. Solo el 26B MoE está ya en HNFv10. Los HNFv9
+  de los demás modelos no cargan: `hnf10 migrate` pasa texto, tokenizer y configuración,
+  pero todavía no bloques de visión.
   Hay rutas específicas por arquitectura; no se admite cualquier transformer
   únicamente por reconocer nombres de tensores.
 - Texto Gemma 4 E2B/E4B y 12B unified. Qwen3 utiliza la ruta Qwen con Q/K norm.
@@ -72,9 +75,11 @@ KV y cancelación. El lanzador del agente está en `hexos-core/runtime/run-helio
 
 Los tipos compactos registrados incluyen HQ31K, HQ41K, HQ51K, HQ42K, HQ52K y
 HQ62K. Las formas y bytes reales están en [dtype.cpp](src/dtype.cpp); el nombre
-no indica el tamaño completo del HNF ni todos sus metadatos. HQ62K tiene lookup
-de embeddings, **no un matmul general implementado**. HQ42K/HQ52K se usan en el
-12B probado. El conversor produce los pesos; Héctor los consume.
+no indica el tamaño completo del HNF ni todos sus metadatos. HQ62K está
+**descartado** desde el 2026-11-02 y solo se lee en HNF antiguos, como lookup de
+embeddings. Lo sustituye HQ8K, que es la parte densa del 26B MoE. HQ42K/HQ52K se
+usan en el 12B probado. Qué formatos valen: `helios_convert_v10/docs/HQS_FORMATOS.md`.
+El conversor produce los pesos; Héctor los consume.
 
 El prefill cuantizado puede descuantizar a FP16 y usar cuBLAS; no todas las
 rutas mantienen cada operación fusionada. El KV y el scratch se reservan según

@@ -81,6 +81,13 @@ void launch_dequant_hqs_v3(const uint8_t*, half*, int K, int N,
 // HQS v4 (hq44k_g16): affine 4-bit with 5-bit group scales and mins, 152 B per 256 weights.
 void launch_matmul_hq44k(const half*, const uint8_t*, half*, int M, int K, int N, cudaStream_t stream = nullptr);
 void launch_dequant_hq44k(const uint8_t*, half*, int K, int N, cudaStream_t stream = nullptr);
+void launch_embedding_hq44k(const int32_t* indices, const uint8_t* table, half* output,
+                            int batch_size, int seq_len, int vocab_size, int dim, cudaStream_t stream = nullptr);
+// HQ8K: symmetric 8-bit HQS (kernels/hq8_gemv.cuh).
+void launch_matmul_hq8k(const half*, const uint8_t*, half*, int M, int K, int N, cudaStream_t stream = nullptr);
+void launch_dequant_hq8k(const uint8_t*, half*, int K, int N, cudaStream_t stream = nullptr);
+void launch_embedding_hq8k(const int32_t* indices, const uint8_t* table, half* output,
+                           int batch_size, int seq_len, int vocab_size, int dim, cudaStream_t stream = nullptr);
 
 // FP16 x FP16 matmul (for activations, non-quantized weights)
 void launch_matmul_fp16(
@@ -185,6 +192,18 @@ void launch_gemma4_vision_pool3x3_fp32(
     cudaStream_t stream = nullptr
 );
 
+// Gemma 4 standardize (26B): output = fp16((input - bias) * scale), in FP32.
+// The pooled features pass the FP16 range before the bias subtraction cancels
+// them, so this replaces the plain FP32→FP16 cast when the tower declares it.
+void launch_gemma4_vision_standardize_fp16(
+    const float* input,
+    const half* bias,
+    const half* scale,
+    half* output,
+    uint32_t rows,
+    uint32_t hidden_size,
+    cudaStream_t stream);
+
 void launch_fp32_to_fp16(
     const float* input,
     half* output,
@@ -286,6 +305,13 @@ void launch_silu_mul_fp16(
     cudaStream_t stream = nullptr
 );
 
+// gelu(gate) redondeado a fp16 por up (fila r de up en r*up_stride + up_offset).
+void launch_gelu_mul_rounded_fp16(
+    const half* gate, const half* up, half* output,
+    int rows, int dim, int up_stride, int up_offset,
+    cudaStream_t stream = nullptr
+);
+
 void launch_gelu_mul_fp16(
     const half* gate, const half* up, half* output,
     size_t numel,
@@ -318,6 +344,15 @@ void launch_rmsnorm_no_weight_fp16(
     int batch_size,
     int dim,
     float eps,
+    cudaStream_t stream = nullptr
+);
+
+// x = rmsnorm(x)*w1; hidden += x; [hidden *= scalar]; [normed = rmsnorm(hidden)*w2].
+// Bits idénticos a la secuencia separada; scalar, w2 y normed pueden ser nulos.
+void launch_rmsnorm_residual_fp16(
+    half* x, const half* w1, half* hidden,
+    const half* scalar, const half* w2, half* normed,
+    int rows, int dim, float eps,
     cudaStream_t stream = nullptr
 );
 
@@ -544,6 +579,10 @@ bool launch_attention_prefill_gemm_fp16(
 
 // Fused causal prefill (FlashAttention-2 style, tensor cores) for head_dim 128
 // full-attention layers. Returns false for shapes it does not handle.
+// mma m16n8k16 con FP16 pide sm_80: en una Turing esos kernels compilan vacíos y
+// hay que ir por la ruta genérica. Mira la GPU activa del hilo.
+bool device_has_m16n8k16();
+
 bool launch_attention_prefill_flash_fp16(
     const half* q, const half* k_cache, const half* v_cache, half* output,
     int seq_new, int past_len, int num_heads, int num_kv_heads, int head_dim,
@@ -633,12 +672,32 @@ void launch_embedding_hq62k(
 
 // Gemma 4 MoE. indices y weights son [L, K]: expertos por probabilidad descendente
 // y, si empatan, por id ascendente.
-void launch_moe_route(const half* logits, const half* expert_scale, int32_t* indices, float* weights,
+void launch_moe_router_input(const half* hidden, const half* scale, float* output, int L, int H,
+                             float eps, float factor, cudaStream_t stream);
+void launch_moe_logits(const float* input, const half* weights, float* logits, int L, int E, int H,
+                       cudaStream_t stream);
+void launch_moe_route(const float* logits, const half* expert_scale, int32_t* indices, float* weights,
                       int L, int E, int K, cudaStream_t stream);
-// gate_up es [E, 2I, H] y down [E, H, I]. Sincroniza: no es capturable en un grafo.
+// Solo para comparar con el oráculo: las probabilidades que moe_route descarta.
+void launch_moe_probabilities(const float* logits, float* probabilities, int L, int E, cudaStream_t stream);
+// gelu(gate) * up de una salida [M, 2I] de gate_up. Escribe [M, P]: P >= I son las
+// columnas físicas de down, y las que sobran quedan a cero.
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream);
+// Rellena con ceros cada fila de [M, logical] hasta [M, physical].
+void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
+                             cudaStream_t stream);
+// Un solo token sin pasar por la CPU, capturable en un CUDA Graph: lee `indices` y
+// `weights` al ejecutarse, así que pueden cambiar entre repeticiones del grafo.
+// gate_up y down son FP16 o HQ44, cada uno por su lado.
+void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
+                               const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
+                               half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
+                               int K, int H, int I, int P, cudaStream_t stream);
+// gate_up es [E, 2I, H] y down [E, H, P]. Sincroniza: no es capturable en un grafo.
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
-                               const half* gate_up, const half* down, half* output,
-                               int L, int E, int K, int H, int I, cudaStream_t stream);
+                               const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
+                               half* output,
+                               int L, int E, int K, int H, int I, int P, cudaStream_t stream);
 
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,
