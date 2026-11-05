@@ -6,6 +6,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cmath>
+#include <cstdint>
 
 namespace helios {
 namespace kernels {
@@ -63,7 +64,106 @@ __global__ void rmsnorm_fp16_kernel(
     }
 }
 
-void launch_rmsnorm_fp16(
+// ============================================================================
+// RMSNORM VECTORIZADO
+// ============================================================================
+// En decode la fila es una sola (hidden = 2560 en el E4B) y el kernel de arriba
+// la recorre con un único bloque: diez lecturas escalares por hilo, otra pasada
+// entera para escribir y ocho __syncthreads de árbol. Medido: 9,9 µs por
+// llamada y ~211 llamadas por token, unos 2 ms de los 16. Esta versión lee cada
+// hilo 8 halves de una vez, los guarda en registros para no releer la fila, y
+// reduce por warp con shuffles. Sin __restrict__: el grafo normaliza V en sitio.
+//
+// VPT = vectores de 8 halves por hilo. Exige dim % 8 == 0 y punteros alineados a
+// 16 bytes; si no, se usa el kernel de arriba.
+
+template<int VPT>
+__global__ void rmsnorm_fp16_vec_kernel(
+    const half* input,
+    const half* weight,
+    half* output,
+    int dim,
+    float eps
+) {
+    const int nvec = dim / 8;
+    const uint4* row_in = reinterpret_cast<const uint4*>(input + size_t(blockIdx.x) * dim);
+    uint4* row_out = reinterpret_cast<uint4*>(output + size_t(blockIdx.x) * dim);
+
+    uint4 buf[VPT];
+    float sum_sq = 0.0f;
+#pragma unroll
+    for (int v = 0; v < VPT; ++v) {
+        const int idx = threadIdx.x + v * blockDim.x;
+        if (idx < nvec) {
+            buf[v] = row_in[idx];
+            const half2* h = reinterpret_cast<const half2*>(&buf[v]);
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const float2 f = __half22float2(h[j]);
+                sum_sq += f.x * f.x + f.y * f.y;
+            }
+        }
+    }
+
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1)
+        sum_sq += __shfl_xor_sync(0xffffffffu, sum_sq, off);
+
+    __shared__ float warp_sums[32];
+    __shared__ float rms_inv_shared;
+    const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+    const int nwarps = (blockDim.x + 31) / 32;
+    if (nwarps > 1) {
+        if (lane == 0) warp_sums[warp] = sum_sq;
+        __syncthreads();
+        if (warp == 0) {
+            float s = lane < nwarps ? warp_sums[lane] : 0.0f;
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1)
+                s += __shfl_xor_sync(0xffffffffu, s, off);
+            if (lane == 0) rms_inv_shared = rsqrtf(s / float(dim) + eps);
+        }
+        __syncthreads();
+    } else if (lane == 0) {
+        rms_inv_shared = rsqrtf(sum_sq / float(dim) + eps);
+    }
+    __syncwarp();
+    const float rms_inv = rms_inv_shared;
+
+    const uint4* w4 = reinterpret_cast<const uint4*>(weight);
+#pragma unroll
+    for (int v = 0; v < VPT; ++v) {
+        const int idx = threadIdx.x + v * blockDim.x;
+        if (idx < nvec) {
+            uint4 res;
+            const half2* h = reinterpret_cast<const half2*>(&buf[v]);
+            half2* r = reinterpret_cast<half2*>(&res);
+            if (weight) {
+                const uint4 wv = w4[idx];
+                const half2* w = reinterpret_cast<const half2*>(&wv);
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const float2 f = __half22float2(h[j]);
+                    const float2 g = __half22float2(w[j]);
+                    r[j] = __floats2half2_rn(f.x * rms_inv * g.x, f.y * rms_inv * g.y);
+                }
+            } else {
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const float2 f = __half22float2(h[j]);
+                    r[j] = __floats2half2_rn(f.x * rms_inv, f.y * rms_inv);
+                }
+            }
+            row_out[idx] = res;
+        }
+    }
+}
+
+static bool aligned16(const void* p) {
+    return (reinterpret_cast<uintptr_t>(p) & 15u) == 0;
+}
+
+static void launch_rmsnorm_any(
     const half* input,
     const half* weight,
     half* output,
@@ -73,15 +173,41 @@ void launch_rmsnorm_fp16(
     cudaStream_t stream
 ) {
     if (batch_size == 0 || dim == 0) return;
-    
-    int block_size = min(256, dim);
-    block_size = max(32, block_size);  // At least one warp
-    
+
+    const int nvec = dim / 8;
+    if (dim % 8 == 0 && nvec <= 4 * 1024 && aligned16(input) && aligned16(output) &&
+        (!weight || aligned16(weight))) {
+        const int vpt = (nvec + 1023) / 1024;
+        const int threads = ((nvec + vpt - 1) / vpt + 31) / 32 * 32;
+        switch (vpt) {
+            case 1: rmsnorm_fp16_vec_kernel<1><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+            case 2: rmsnorm_fp16_vec_kernel<2><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+            default: rmsnorm_fp16_vec_kernel<4><<<batch_size, threads, 0, stream>>>(input, weight, output, dim, eps); break;
+        }
+        return;
+    }
+
+    // Potencia de dos: la reducción en árbol pierde elementos con 100 hilos.
+    int block_size = 32;
+    while (block_size < dim && block_size < 256) block_size *= 2;
+
     size_t smem_size = block_size * sizeof(float);
-    
+
     rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
         input, weight, output, batch_size, dim, eps
     );
+}
+
+void launch_rmsnorm_fp16(
+    const half* input,
+    const half* weight,
+    half* output,
+    int batch_size,
+    int dim,
+    float eps,
+    cudaStream_t stream
+) {
+    launch_rmsnorm_any(input, weight, output, batch_size, dim, eps, stream);
 }
 
 void launch_rmsnorm_no_weight_fp16(
@@ -92,13 +218,7 @@ void launch_rmsnorm_no_weight_fp16(
     float eps,
     cudaStream_t stream
 ) {
-    if (batch_size == 0 || dim == 0) return;
-    int block_size = min(256, dim);
-    block_size = max(32, block_size);
-    size_t smem_size = block_size * sizeof(float);
-    rmsnorm_fp16_kernel<<<batch_size, block_size, smem_size, stream>>>(
-        input, nullptr, output, batch_size, dim, eps
-    );
+    launch_rmsnorm_any(input, nullptr, output, batch_size, dim, eps, stream);
 }
 
 // ============================================================================

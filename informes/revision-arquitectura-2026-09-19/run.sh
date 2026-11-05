@@ -36,6 +36,7 @@ fi
     -I "$audit_cuda/include" "$audit_dir/probe.cpp" \
     "$repo_dir/build/libhelios-engine.a" -L "$audit_cuda/lib64" \
     -Wl,-rpath,"$audit_cuda/lib64" -lcudart -lcublas -lcublasLt -lpthread -ldl \
+    -lz /usr/lib/x86_64-linux-gnu/libxxhash.so.0 \
     -o "$audit_out/probe"
 
 if [[ "$audit_mode" == sampling ]]; then

@@ -165,6 +165,57 @@ void test_gemma_rmsnorm() {
     std::cout << "PASS: Gemma 4 direct-weight and weightless RMSNorm" << std::endl;
 }
 
+// Las formas que pide el grafo: la fila de hidden en decode, el QK-norm por head,
+// V sin peso en sitio, prefill con muchas filas, la PLE de 256, y dims que no
+// caben en el camino vectorizado (no múltiplo de 8, o más de 32.768).
+void test_rmsnorm_shapes() {
+    struct Shape { int rows, dim; bool weight, in_place; };
+    const Shape shapes[] = {
+        {1, 2560, true, false}, {8, 256, true, false}, {2, 256, false, true},
+        {37, 2560, true, false}, {1, 3840, true, false}, {4, 1152, true, false},
+        {1, 16384, true, false}, {1, 24576, false, false}, {3, 40000, true, false},
+        {5, 100, true, false}, {1, 8, true, true},
+    };
+    for (const Shape& s : shapes) {
+        const size_t n = size_t(s.rows) * s.dim;
+        std::vector<float> input(n), weights(s.dim);
+        for (size_t i = 0; i < n; ++i)
+            input[i] = std::sin(0.37f * float(i) + 0.1f * float(i % 7)) * (1.0f + float(i % 13));
+        for (int i = 0; i < s.dim; ++i) weights[i] = 0.5f + 0.01f * float(i % 97);
+        const std::vector<half> x = halves(input), w = halves(weights);
+        half *dx = nullptr, *dw = nullptr, *dy = nullptr;
+        cuda_require(cudaMalloc(&dx, n * sizeof(half)), "rms shapes x");
+        cuda_require(cudaMalloc(&dw, s.dim * sizeof(half)), "rms shapes w");
+        cuda_require(cudaMalloc(&dy, n * sizeof(half)), "rms shapes y");
+        cudaMemcpy(dx, x.data(), n * sizeof(half), cudaMemcpyHostToDevice);
+        cudaMemcpy(dw, w.data(), s.dim * sizeof(half), cudaMemcpyHostToDevice);
+        half* out = s.in_place ? dx : dy;
+        if (s.weight) launch_rmsnorm_fp16(dx, dw, out, s.rows, s.dim, 1.0e-6f);
+        else launch_rmsnorm_no_weight_fp16(dx, out, s.rows, s.dim, 1.0e-6f);
+        cuda_require(cudaDeviceSynchronize(), "rms shapes synchronize");
+        std::vector<half> output(n);
+        cudaMemcpy(output.data(), out, n * sizeof(half), cudaMemcpyDeviceToHost);
+        for (int r = 0; r < s.rows; ++r) {
+            double sum_sq = 0.0;
+            for (int i = 0; i < s.dim; ++i) {
+                const double v = __half2float(x[size_t(r) * s.dim + i]);
+                sum_sq += v * v;
+            }
+            const double inv = 1.0 / std::sqrt(sum_sq / s.dim + 1.0e-6);
+            for (int i = 0; i < s.dim; ++i) {
+                const size_t k = size_t(r) * s.dim + i;
+                const double expected = __half2float(x[k]) * inv * (s.weight ? __half2float(w[i]) : 1.0f);
+                const double got = __half2float(output[k]);
+                require(std::fabs(got - expected) <= 1.0e-3 + 1.0e-3 * std::fabs(expected),
+                        "RMSNorm rows=" + std::to_string(s.rows) + " dim=" + std::to_string(s.dim) +
+                        " mismatch at " + std::to_string(k));
+            }
+        }
+        cudaFree(dx); cudaFree(dw); cudaFree(dy);
+    }
+    std::cout << "PASS: RMSNorm across graph shapes, in place and fallback" << std::endl;
+}
+
 void test_embedding_scale_and_gelu() {
     const float scale = std::sqrt(1536.0f);
     const auto scaled = run_unary({0.25f, -0.5f, 1.0f},
@@ -318,6 +369,7 @@ int main(int argc, char** argv) {
     cuda_require(cudaGetDeviceCount(&devices), "cudaGetDeviceCount");
     require(devices > 0, "CUDA device required");
     test_gemma_rmsnorm();
+    test_rmsnorm_shapes();
     test_embedding_scale_and_gelu();
     test_layer_scalar_and_softcap();
     test_proportional_rope();
