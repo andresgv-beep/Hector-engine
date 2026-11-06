@@ -1229,9 +1229,17 @@ void register_attention_kernels(Engine& engine) {
                 throw std::runtime_error(
                     "ATTENTION_PREFILL_CACHED: unsupported head geometry");
             }
-            // Only the GEMM path knows the image block; falling back to a
-            // causal kernel would silently change what the model sees.
+            // Only the fused and GEMM paths know the image block; falling back
+            // to a causal kernel would silently change what the model sees.
             if (bidir_end > bidir_begin) {
+                if (engine.config().use_flash_prefill &&
+                    launch_attention_prefill_flash_fp16(
+                        as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache), as_fp16(output),
+                        (int)seq_new, (int)past_len, (int)num_heads, (int)num_kv_heads, (int)head_dim,
+                        (int)max_seq_len, scale, (int)window_size, ctx.stream, (int)cache_slots,
+                        (int)bidir_begin, (int)bidir_end)) {
+                    return;
+                }
                 if (!launch_attention_prefill_gemm_fp16(
                         as_fp16_const(q), as_fp16_const(k_cache), as_fp16_const(v_cache), as_fp16(output),
                         (int)seq_new, (int)past_len, (int)num_heads, (int)num_kv_heads, (int)head_dim,
