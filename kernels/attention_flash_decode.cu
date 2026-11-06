@@ -54,8 +54,10 @@ __global__ __launch_bounds__(FD_THREADS) void flash_decode_partial_kernel(
     float* __restrict__ partials, const int32_t* __restrict__ d_seq_len,
     int num_heads, int num_kv_heads, int head_dim, float scale, int window,
     int cache_slots, int splits, int min_chunk) {
-    const int split = blockIdx.x;
-    const int h = blockIdx.y;
+    // Heads vary fastest: the Q heads that share a KV head run side by side on the
+    // same keys, and all but the first find them in L2 instead of DRAM.
+    const int h = blockIdx.x;
+    const int split = blockIdx.y;
     int first, chunk, active_splits;
     fd_split_range(*d_seq_len, window, splits, min_chunk, first, chunk, active_splits);
     if (split >= active_splits) return;
@@ -255,7 +257,7 @@ void launch_attention_flash_decode_dp(
     float* partials, const int32_t* d_seq_len, int num_heads, int num_kv_heads,
     int head_dim, float scale, int window_size, int cache_slots, int splits,
     int min_chunk, cudaStream_t stream) {
-    flash_decode_partial_kernel<<<dim3(splits, num_heads), FD_THREADS, 0, stream>>>(
+    flash_decode_partial_kernel<<<dim3(num_heads, splits), FD_THREADS, 0, stream>>>(
         q, k_cache, v_cache, partials, d_seq_len, num_heads, num_kv_heads, head_dim,
         scale, window_size, cache_slots, splits, min_chunk);
     flash_decode_merge_kernel<<<num_heads, FD_THREADS, 0, stream>>>(
