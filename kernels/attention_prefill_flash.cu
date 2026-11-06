@@ -220,11 +220,21 @@ __device__ __forceinline__ int fw_swz(int row, int chunk) { return row * HD + ((
 
 __device__ __forceinline__ void cp_async16(half* smem, const half* gmem, bool valid) {
     const uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(s), "l"(gmem), "r"(valid ? 16 : 0));
+#endif
 }
-__device__ __forceinline__ void cp_async_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+__device__ __forceinline__ void cp_async_commit() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.commit_group;\n" ::);
+#endif
+}
 template <int N>
-__device__ __forceinline__ void cp_async_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+__device__ __forceinline__ void cp_async_wait() {
+#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group %0;\n" :: "n"(N));
+#endif
+}
 
 template <int HD, int BM, int BN>
 struct FwShape {
