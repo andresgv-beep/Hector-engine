@@ -20,6 +20,7 @@ namespace {
 constexpr int FD_THREADS = 128;
 constexpr int FD_WARPS = FD_THREADS / 32;
 constexpr int FD_ILP = 4;            // keys per warp in flight during QK
+constexpr int FD_VILP = 8;           // V rows per thread in flight during PV
 constexpr int FD_TILE = 256;         // keys per shared-memory tile
 constexpr int FD_MAX_HD2 = 256;      // head_dim 512 in half2 units
 constexpr int FD_MAX_DPT = (FD_MAX_HD2 + FD_THREADS - 1) / FD_THREADS;
@@ -144,7 +145,35 @@ __global__ __launch_bounds__(FD_THREADS) void flash_decode_partial_kernel(
         if (v_active) {
             #pragma unroll
             for (int i = 0; i < FD_MAX_DPT; ++i) { acc[i].x *= corr; acc[i].y *= corr; }
-            for (int p = group; p < n; p += groups) {
+            // FD_VILP rows of V are loaded before any of them is used. One load at a
+            // time left each warp waiting on memory for every key: a sliding layer
+            // (8 splits x 64 keys at window 512) took ~30 us on the E4B instead of a
+            // few. The fmaf order per accumulator is unchanged, so are the bits.
+            int p = group;
+            for (; p + (FD_VILP - 1) * groups < n; p += FD_VILP * groups) {
+                float2 vv[FD_VILP][FD_MAX_DPT];
+                #pragma unroll
+                for (int j = 0; j < FD_VILP; ++j) {
+                    const half2* row = V2 + size_t((tile + p + j * groups) % cache_slots) * slot_stride2;
+                    #pragma unroll
+                    for (int i = 0; i < FD_MAX_DPT; ++i) {
+                        const int d = d_first + i * FD_THREADS;
+                        vv[j][i] = d < hd2 ? __half22float2(row[d]) : make_float2(0.0f, 0.0f);
+                    }
+                }
+                #pragma unroll
+                for (int j = 0; j < FD_VILP; ++j) {
+                    const float w = s_p[p + j * groups];
+                    #pragma unroll
+                    for (int i = 0; i < FD_MAX_DPT; ++i) {
+                        if (d_first + i * FD_THREADS < hd2) {
+                            acc[i].x = fmaf(w, vv[j][i].x, acc[i].x);
+                            acc[i].y = fmaf(w, vv[j][i].y, acc[i].y);
+                        }
+                    }
+                }
+            }
+            for (; p < n; p += groups) {
                 const float w = s_p[p];
                 const half2* row = V2 + size_t((tile + p) % cache_slots) * slot_stride2;
                 #pragma unroll
