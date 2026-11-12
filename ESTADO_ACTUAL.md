@@ -69,13 +69,21 @@ HQ8K es la parte densa del 26B MoE. Qué formatos valen:
 - GEMV cuantizado para decode y descuantización integrada con GEMM por tiles.
   Las escrituras vectorizadas HQ4.2/HQ5.2 **ya están hechas**; seguimos
   expandiendo la matriz a FP16 y el umbral M=9 sigue siendo fijo.
-- Decode con contexto largo. El 30/09, con el **12B HQS v4**, a 20k tokens Héctor pagaba +3,48 ms por token
-  frente a +1,55 ms de llama.cpp (44,3 frente a 53,0 tok/s): [velocidad por contexto](informes/VELOCIDAD_CONTEXTO_2026-09-30.md),
-  con protocolo e hipótesis. **Esas cifras describen el motor de septiembre, no el de hoy.** Después llegaron el
-  GEMV simétrico leyendo de L1, la RMSNorm en registros, la fusión de q|k|v y gate|up, y el flash decode del
-  06/11 (rama `contexto-largo`, ya en `main`), que atacan justo la parte que crece con el contexto. Nadie ha
-  repetido la comparación, así que no se sabe cuánta brecha queda: antes de citar el −16,4 % como vigente, hay
-  que volver a medir con el protocolo del informe, en el sobremesa y con el 12B.
+- Decode con contexto largo, en el **12B HQS v4**. La cifra que se cita suelta suele ser la del 30/09
+  —44,32 tok/s a 20k, +3,48 ms de coste del contexto frente a +1,55 ms de llama.cpp, −16,4 %— pero **el
+  propio informe ya la supera**: con el kernel agrupado integrado el 01/10 salen 52,32 / 48,47 / 47,89 /
+  47,12 tok/s en los cuatro contextos. Sobre esas cifras, el coste del contexto baja a ≈+2,11 ms (de 2,2
+  veces lo de llama.cpp a ≈1,4) y la diferencia a 20k queda en ≈−11 %. Es **una muestra por contexto**, no
+  la mediana de tres del protocolo, y el informe lo advierte. Después llegaron el GEMV simétrico leyendo de
+  L1, la RMSNorm en registros, la fusión de q|k|v y gate|up y el flash decode del 06/11 (rama
+  `contexto-largo`, ya en `main`), que atacan justo la parte que crece con el contexto: **sin medir**.
+  Pendiente: repetir el protocolo completo de
+  [velocidad por contexto](informes/VELOCIDAD_CONTEXTO_2026-09-30.md) en el sobremesa, con el 12B.
+- Al comparar velocidad contra llama.cpp, no olvidar que **en Gemma 4 no es un árbitro válido**: su bf16
+  *sin cuantizar* acuerda el 87,6 % de las posiciones con la implementación oficial (`transformers` fp32) y
+  su Q4_K_M el 68,9 %, frente al 85,4 % de HELIOS compacto; en Qwen3 sí es exacto (100 %). Medido el
+  2026-08-02 en el [banco de cuantización](tools/quant_bench/README.md). Va más rápido en Gemma 4
+  calculando algo que se desvía del oficial, así que el hueco de tok/s no compara iguales.
 - Visión encoder-free del 12B y audio/vídeo: trabajo distinto del streaming.
 - Tensor parallelism y continuous batching: no implementados. El reparto en dos GPUs por capas enteras sí
   existe (fila «Dos GPUs»): es otra cosa y no acelera un token.

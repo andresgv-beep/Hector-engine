@@ -3,6 +3,15 @@
 Referencia para afinar la atención de contexto largo **sin volver a medir desde cero**.
 Medido el 30/09/2026 en la RTX 4070 Ti de 12 GB (60 SM, límite 285 W).
 
+> **Dos avisos antes de citar las tablas de abajo (añadidos el 2026-11-12).**
+> 1. Las cifras de la cabecera son las del 30/09. La sección «Integración en main, 01/10» del final ya las
+>    mejora: 47,12 tok/s a 20k en vez de 44,32, con lo que el coste del contexto cae a ≈+2,11 ms y la
+>    diferencia a ≈−11 %. Es una muestra por contexto, no la mediana de tres.
+> 2. Esto mide **velocidad, no equivalencia**. Según el [banco de cuantización](../tools/quant_bench/README.md)
+>    (02/08), en Gemma 4 el bf16 sin cuantizar de llama.cpp/Ollama solo acuerda el 87,6 % de las posiciones
+>    con la implementación oficial, y su Q4_K_M el 68,9 %, frente al 85,4 % de HELIOS compacto. En Qwen3 sí
+>    es exacto. Los dos motores no están calculando lo mismo aquí.
+
 ## Protocolo
 
 - **Script:** `hqs_v4/lab/engine/velocidad_contexto.py`. **Resultados** (JSON, monitor de GPU y cachés de
