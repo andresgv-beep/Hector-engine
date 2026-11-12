@@ -119,6 +119,7 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
     uint64_t common_bytes = 0;
     for (const TensorEntry& tensor : loader.tensors()) {
         if (tensor.block != "text_model") continue;   // vision.layerN no es la capa N
+        if (loader.tensor_lives_in_host_ram(tensor)) continue;   // en RAM mapeada: no gasta VRAM
         const int layer = layer_index(tensor.name);
         if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
         (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;

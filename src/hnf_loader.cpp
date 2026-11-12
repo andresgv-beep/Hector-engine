@@ -1601,10 +1601,9 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     // ~0.3 µs sobre los ~18.000 µs que dura un token (0.002% de coste).
     // Los pesos que SÍ se leen enteros cada token (capas, lm_head) jamás:
     // PCIe es 15× más lento que la VRAM.
-    const char* off = getenv("HELIOS_EMBED_IN_RAM");
     const char* mmap_env = getenv("HELIOS_EMBED_MMAP");
     const bool mmap_requested = mmap_env && *mmap_env == '1';
-    const bool offload_requested = (off && *off == '1') || mmap_requested;
+    const bool offload_requested = embed_offload_requested();
     const bool embedding_candidate =
         entry.name.find("token_embedding") != std::string::npos;
     // Verifier-only escape hatch: the all-FP16 Gemma 4 control otherwise
@@ -1615,9 +1614,7 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
     const bool verify_head_mmap = mmap_requested && verify_head_env &&
         *verify_head_env == '1' && entry.name.size() >= 14 &&
         entry.name.compare(entry.name.size() - 14, 14, "lm_head.weight") == 0;
-    bool to_host = verify_head_mmap ||
-        (offload_requested && embedding_candidate &&
-         detail::embedding_is_lookup_only(entry, tensors_));
+    bool to_host = verify_head_mmap || tensor_lives_in_host_ram(entry);
     if (offload_requested && embedding_candidate && !to_host &&
         entry.name.find(".ple.") == std::string::npos) {
         std::cout << "  [VRAM] " << entry.name

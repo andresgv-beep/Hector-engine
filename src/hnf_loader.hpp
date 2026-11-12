@@ -671,6 +671,20 @@ public:
     uint64_t block_vram_bytes(BlockID block) const {
         return block < HNF_BLOCK_COUNT ? block_vram_[block] : 0;
     }
+    // ¿Este tensor se queda en RAM en vez de subir a la gráfica? Es la misma regla que
+    // aplica la carga (tabla de embeddings de solo consulta, con HELIOS_EMBED_MMAP o
+    // HELIOS_EMBED_IN_RAM). Quien reparte VRAM antes de cargar tiene que preguntarlo:
+    // contarla como VRAM dejaba fuera la torre visual del E4B por 1,6 GB que no ocupa.
+    static bool embed_offload_requested() {
+        const char* off = getenv("HELIOS_EMBED_IN_RAM");
+        const char* mmap_env = getenv("HELIOS_EMBED_MMAP");
+        return (off && *off == '1') || (mmap_env && *mmap_env == '1');
+    }
+    bool tensor_lives_in_host_ram(const TensorEntry& entry) const {
+        return embed_offload_requested() &&
+               entry.name.find("token_embedding") != std::string::npos &&
+               detail::embedding_is_lookup_only(entry, tensors_);
+    }
     uint64_t file_size() const { return file_size_; }
     // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
     const std::string& chat_template() const { return chat_template_; }
