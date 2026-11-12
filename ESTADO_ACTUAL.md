@@ -4,6 +4,10 @@ Actualizado: **2026-09-19**, con descompresión vectorizada validada sobre `93af
 estado operativo. Los planes e informes fechados conservan sus resultados de
 entonces; sus «falta», «siguiente paso» y cifras no son un backlog actual.
 
+Corrección acotada del **2026-11-12**: la fila «Dos GPUs», que faltaba, y el pendiente
+de contexto largo, que presentaba cifras de septiembre como si fueran de hoy. Nada más
+se ha reauditado en esa fecha.
+
 ## Contenedor HNFv10 (2026-11-03)
 
 El motor solo carga HNFv10 (`src/hnf10.cpp`, especificación en
@@ -25,6 +29,7 @@ visión.
 | Phi / DeepSeek | Referencias y pruebas históricas; no se declaran recertificados por la batería reciente Gemma. |
 | Falcon / LLaMA y otras familias | No elevar detección/configuración a soporte end-to-end certificado sin prueba específica con pesos. |
 | Sesiones | `Model` comparte pesos; `InferenceSession` tiene KV y sampler propios. Ejecución serializada, no batching concurrente. |
+| Dos GPUs | Implementado para Gemma 4 (`src/gemma4_split.*`): capas enteras en cada tarjeta, embedding y cabeza en la principal, y el plan decidido antes de cargar pesos con estados `Single`/`Split`/`NoFit` y la torre en `None`/`Primary`/`Secondary` (auditoría del 2026-11-03). Dos cruces por token en vez de dos por capa, y cada tarjeta conserva su CUDA Graph. **La segunda tarjeta da memoria, no velocidad**: el token avanza en serie. El E2B/E4B no reparte texto, porque sus últimas capas leen el KV de capas anteriores; su torre sí puede ir a la secundaria. No es tensor parallelism. Uso local continuado con el 26B MoE en noviembre de 2026, sin campaña de medición propia. |
 | Prefill local HD256 | Acumuladores compactos integrados para las dos geometrías Gemma 12B/E4B validadas. Prefill largo 14–15 % / 10–11 % más corto frente al coalescido previo; decode sin cambios. [Pruebas y medidas](informes/PREFILL_COMPACTO_HD256_2026-09-19.md). |
 | Prefill HQ4.2/HQ5.2 | Escrituras de descompresión vectorizadas para K múltiplo de ocho; resto escalar. Misma reserva FP16, cuBLAS y GEMV. [Medidas y validación 12B](informes/MATMUL_CUANTIZADO_2026-09-19.md). |
 | Prefijo y CUDA Graphs | Implementados con límites del anillo y reconstrucción cuando corresponde. [KV/grafos](informes/OPTIMIZACION_KV_GRAFOS_2026-09-19.md). |
@@ -64,11 +69,16 @@ HQ8K es la parte densa del 26B MoE. Qué formatos valen:
 - GEMV cuantizado para decode y descuantización integrada con GEMM por tiles.
   Las escrituras vectorizadas HQ4.2/HQ5.2 **ya están hechas**; seguimos
   expandiendo la matriz a FP16 y el umbral M=9 sigue siendo fijo.
-- Decode con contexto largo: a 20k tokens Héctor paga +3,48 ms por token frente a +1,55 ms de llama.cpp
-  (44,3 frente a 53,0 tok/s). La medición de referencia, el protocolo y las hipótesis están en
-  [velocidad por contexto](informes/VELOCIDAD_CONTEXTO_2026-09-30.md) (30/09); no hace falta volver a medir la base.
+- Decode con contexto largo. El 30/09, con el **12B HQS v4**, a 20k tokens Héctor pagaba +3,48 ms por token
+  frente a +1,55 ms de llama.cpp (44,3 frente a 53,0 tok/s): [velocidad por contexto](informes/VELOCIDAD_CONTEXTO_2026-09-30.md),
+  con protocolo e hipótesis. **Esas cifras describen el motor de septiembre, no el de hoy.** Después llegaron el
+  GEMV simétrico leyendo de L1, la RMSNorm en registros, la fusión de q|k|v y gate|up, y el flash decode del
+  06/11 (rama `contexto-largo`, ya en `main`), que atacan justo la parte que crece con el contexto. Nadie ha
+  repetido la comparación, así que no se sabe cuánta brecha queda: antes de citar el −16,4 % como vigente, hay
+  que volver a medir con el protocolo del informe, en el sobremesa y con el 12B.
 - Visión encoder-free del 12B y audio/vídeo: trabajo distinto del streaming.
-- Multi-GPU y continuous batching: no implementados.
+- Tensor parallelism y continuous batching: no implementados. El reparto en dos GPUs por capas enteras sí
+  existe (fila «Dos GPUs»): es otra cosa y no acelera un token.
 - Comprobar nuevas familias con pesos reales antes de generalizar resultados.
 
 Cancelación temprana, progreso, sesión auxiliar diferida y conexión de la UI

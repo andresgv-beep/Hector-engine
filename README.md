@@ -4,6 +4,8 @@ Motor de inferencia local C++/CUDA para modelos HNF. El agente, las herramientas
 el historial y la interfaz React viven en el repositorio `hexos-core`.
 
 **Estado revisado el 2026-09-19; descompresión HQ4.2/HQ5.2 vectorizada validada sobre `93afc47`.**
+**Corregidos el 2026-11-12 dos límites caducados: el reparto en dos GPUs y la
+comparación de contexto largo.** El resto del documento no se ha vuelto a auditar.
 Consulta [estado actual e índice documental](ESTADO_ACTUAL.md) para distinguir
 capacidades implementadas, límites y resultados de campañas históricas.
 
@@ -21,6 +23,10 @@ capacidades implementadas, límites y resultados de campañas históricas.
   persistente. La visión encoder-free del **12B unified sigue sin estar integrada**.
 - Pesos compartidos entre sesiones, KV separado, anillo local Gemma 4,
   reutilización de prefijo textual y decode con CUDA Graphs.
+- Reparto de Gemma 4 entre dos GPUs por capas enteras (`src/gemma4_split.*`), con
+  el plan decidido antes de cargar pesos y la torre visual en la secundaria cuando
+  cabe ahí. Cada tarjeta conserva su CUDA Graph. La segunda da memoria, no
+  velocidad: el token avanza en serie.
 - Runtime NDJSON con fragmentos `text_delta`, progreso opcional de prefill,
   cancelación dirigida, métricas y capacidad de contexto por sesión.
 - Puente `helios_formatted` compatible con clientes antiguos, sin entrega
@@ -102,7 +108,10 @@ las familias.
 
 ## Límites vigentes
 
-Sin multi-GPU/tensor parallelism ni continuous batching. Sin importación directa
+Sin tensor parallelism ni continuous batching: el reparto entre dos GPUs existe,
+pero es por capas enteras y no acelera un token. El E2B/E4B no reparte texto
+—sus últimas capas leen el KV de capas anteriores—, aunque su torre visual sí
+puede ir a la secundaria. Sin importación directa
 de GGUF/safetensors: se requiere conversión a HNF. Audio y vídeo no tienen un
 adaptador de inferencia operativo documentado. No hay soporte Windows certificado.
 Cancelar no interrumpe un kernel CUDA a mitad de ejecución ni el interior del
