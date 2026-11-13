@@ -30,7 +30,8 @@ struct Gemma4SplitPlan {
     bool split(size_t layers) const { return boundary < layers; }
 };
 
-// Llena primero la principal, que es la rápida. Sin sitio en las dos, no hay plan.
+// El corte que deja más margen libre en la tarjeta que menos tiene; a igualdad, más capas en
+// la principal, que es la rápida. Sin sitio en las dos, no hay plan.
 std::optional<Gemma4SplitPlan> plan_gemma4_split(
     const std::vector<uint64_t>& layer_bytes, uint64_t common_bytes,
     uint64_t primary_free, uint64_t secondary_free);

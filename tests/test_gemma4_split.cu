@@ -298,7 +298,21 @@ void test_plan() {
     require(all && !all->split(10) && all->boundary == 10, "todo cabe en la principal");
     auto half_way = plan_gemma4_split(layers, 50, 450, 600);
     require(half_way && half_way->boundary == 4 && half_way->primary_bytes == 450 &&
-            half_way->secondary_bytes == 600, "la principal se llena primero");
+            half_way->secondary_bytes == 600, "justo de sitio: el único corte que cabe");
+    // Con holgura, el margen se reparte en vez de llenar la principal hasta el tope: el corte
+    // 9 dejaría 50 libres en la principal y 800 en la otra; el 5 deja 450 y 400.
+    auto balanced = plan_gemma4_split(layers, 50, 1000, 900);
+    require(balanced && balanced->boundary == 5 && balanced->primary_bytes == 550 &&
+            balanced->secondary_bytes == 500, "el margen se reparte entre las dos tarjetas");
+    // A igualdad de margen, más capas en la principal: con 1050 y 1000 los cortes 5 y 6
+    // empatan a 500 de margen.
+    auto tie = plan_gemma4_split(layers, 50, 1150, 1000);
+    require(tie && tie->boundary == 6, "a igualdad gana la principal");
+    // El caso medido: 26B a 32.768 en una 4070 Ti y una 2080 Ti (MiB). Antes cortaba en 17.
+    std::vector<uint64_t> real(30, 514);
+    for (size_t i = 5; i < 30; i += 6) real[i] = 641;
+    auto medido = plan_gemma4_split(real, 748, 9798, 9255 - 1407);
+    require(medido && medido->boundary == 16, "el 26B a 32k corta en 16 y no llena la principal");
     require(!plan_gemma4_split(layers, 50, 450, 500), "sin sitio no hay plan");
     require(!plan_gemma4_split(layers, 500, 450, 2000), "lo común debe caber en la principal");
     std::cout << "PASS: plan de reparto" << std::endl;
@@ -321,9 +335,10 @@ void test_placement() {
     p = plan_gemma4_placement(layers, 50, 200, 1100, 250);
     require(p.fit == Gemma4Fit::Single && p.vision == Gemma4VisionPlace::Secondary && !p.vision_dropped,
             "texto entero en la principal y torre sola en la secundaria");
-    // Reparto normal con la torre en la secundaria.
+    // Reparto normal con la torre en la secundaria. Corta en 3 y no en 4: con 4 la principal
+    // quedaría sin margen (450 de 450) y la secundaria con 200; con 3 quedan 100 y 100.
     p = plan_gemma4_placement(layers, 50, 200, 450, 1000);
-    require(p.fit == Gemma4Fit::Split && p.boundary == 4 && p.vision == Gemma4VisionPlace::Secondary,
+    require(p.fit == Gemma4Fit::Split && p.boundary == 3 && p.vision == Gemma4VisionPlace::Secondary,
             "reparto con torre en la secundaria");
     // Todas las capas en la secundaria (boundary 0) es un reparto válido, no «no repartir».
     p = plan_gemma4_placement(layers, 50, 0, 120, 1200);

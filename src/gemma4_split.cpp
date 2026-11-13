@@ -1,6 +1,7 @@
 // src/gemma4_split.cpp
 #include "gemma4_split.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
@@ -40,19 +41,31 @@ std::optional<Gemma4SplitPlan> plan_gemma4_split(
     uint64_t primary_free, uint64_t secondary_free) {
     if (layer_bytes.empty() || common_bytes > primary_free) return std::nullopt;
 
-    Gemma4SplitPlan plan;
-    plan.primary_bytes = common_bytes;
-    size_t layer = 0;
-    while (layer < layer_bytes.size() &&
-           layer_bytes[layer] <= primary_free - plan.primary_bytes) {
-        plan.primary_bytes += layer_bytes[layer++];
+    uint64_t total = 0;
+    for (uint64_t bytes : layer_bytes) total += bytes;
+
+    // Entre los cortes que caben, el que deja más margen en la tarjeta que menos tiene.
+    // Antes se llenaba la principal hasta el tope y la secundaria se quedaba con lo que
+    // sobrara: con el 26B en una 4070 Ti y una 2080 Ti, la principal acababa con unos
+    // 600 MiB libres y la otra con más de 3 GB. Lo que el plan no cuenta (scratch del
+    // prefill, la sesión auxiliar, el escritorio, que vive en la principal) sale de ese
+    // margen, y un prefill algo largo dejaba el turno sin memoria (2026-11-13).
+    // A igualdad de margen gana el corte con más capas en la principal, que es la rápida.
+    std::optional<Gemma4SplitPlan> best;
+    uint64_t best_margin = 0;
+    uint64_t primary = common_bytes;
+    for (size_t boundary = 0; boundary <= layer_bytes.size(); ++boundary) {
+        if (boundary > 0) primary += layer_bytes[boundary - 1];
+        if (primary > primary_free) break;                    // de aquí en adelante ya no cabe
+        const uint64_t secondary = total - (primary - common_bytes);
+        if (secondary > secondary_free) continue;
+        const uint64_t margin = std::min(primary_free - primary, secondary_free - secondary);
+        if (!best || margin >= best_margin) {
+            best_margin = margin;
+            best = Gemma4SplitPlan{static_cast<uint32_t>(boundary), primary, secondary};
+        }
     }
-    plan.boundary = static_cast<uint32_t>(layer);
-    for (; layer < layer_bytes.size(); ++layer) {
-        if (layer_bytes[layer] > secondary_free - plan.secondary_bytes) return std::nullopt;
-        plan.secondary_bytes += layer_bytes[layer];
-    }
-    return plan;
+    return best;
 }
 
 Gemma4Placement plan_gemma4_placement(
