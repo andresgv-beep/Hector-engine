@@ -43,6 +43,25 @@ constexpr uint32_t kMultimodalPrefill = 6144;
 constexpr uint32_t kScratchTokens =
     kPrefillChunk > kMultimodalPrefill ? kPrefillChunk : kMultimodalPrefill;
 
+// La tanda más grande que un prefill de este modelo empuja de una vez. La usan dos
+// reservas que tienen que coincidir: la memoria de trabajo del modelo y el anillo de las
+// capas deslizantes de cada sesión, que guarda ventana + tanda.
+//
+// Gemma de solo texto nunca pasa de kPrefillChunk. Tampoco el adaptador unificado, que
+// solo prefillea el adjunto (<= 752 tokens) y deja el texto de alrededor a las tandas
+// normales, ni una torre con bloque de imagen bidireccional (26B, ~282 tokens). Solo la
+// torre que mete la imagen entera de un golpe (E2B/E4B) necesita el techo multimodal.
+//
+// Hasta el 2026-11-13 el anillo miraba solo si el HNF traía visión y reservaba 6144 huecos
+// de tanda también en el 26B, cuya memoria de trabajo es de 1024: sitio que ningún prefill
+// podía llegar a usar, en cada capa deslizante y en cada sesión, la auxiliar incluida.
+uint32_t max_prefill_tanda(const HnfLoader& loader, bool is_gemma4) {
+    const bool image_block_only = loader.config().get<std::string>(
+        "use_bidirectional_attention", "") == "vision";
+    return is_gemma4 && (!loader.has_gemma4_vision_config() || image_block_only)
+               ? kPrefillChunk : kScratchTokens;
+}
+
 // Un fragmento solo se emite cuando es UTF-8 completo. El protocolo lo mete
 // en una cadena JSON, y un multibyte partido la invalida — ya nos mordió una
 // vez en la UI con "cr??ticas".
@@ -621,14 +640,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         // Gemma de solo texto nunca prefillea más de kPrefillChunk.
         // Conservar el techo multimodal para los demás caminos.
         const bool multimodal_file = !config.multimodal_hnf_path.empty();
-        // The unified adapter only prefills the attachment itself (<= 752
-        // tokens); the surrounding text goes through the normal chunks. So does
-        // a tower whose image block is bidirectional (26B, ~282 tokens).
-        const bool image_block_only = s.loader.config().get<std::string>(
-            "use_bidirectional_attention", "") == "vision";
-        const uint32_t scratch_tokens =
-            s.is_gemma4 && (!s.loader.has_gemma4_vision_config() || image_block_only)
-                ? kPrefillChunk : kScratchTokens;
+        const uint32_t scratch_tokens = max_prefill_tanda(s.loader, s.is_gemma4);
         s.engine->tensors().allocate_and_register(
             "input_tokens", {1, scratch_tokens}, dtype::INT32());
         if (s.is_gemma4) {
@@ -791,12 +803,10 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                                               : M.max_seq_len;
 
         if (s.is_gemma4) {
-            // La tanda más grande que esta sesión va a empujar de una vez. Es lo
-            // que decide el anillo de las capas deslizantes: sin visión el prefill
-            // va troceado a kPrefillChunk, y con ella el adaptador mete la imagen
-            // entera de un golpe y hay que dejarle sitio.
-            const uint32_t tanda = s.loader.has_gemma4_vision_config()
-                                       ? kScratchTokens : kPrefillChunk;
+            // La tanda más grande que esta sesión va a empujar de una vez: es lo que
+            // decide el anillo de las capas deslizantes. La misma que dimensionó la
+            // memoria de trabajo del modelo; más sitio no se puede llegar a usar.
+            const uint32_t tanda = max_prefill_tanda(s.loader, true);
             if (!s.gemma_kv_cache.allocate(s.loader.gemma4_config(),
                                            M.model_config.num_key_value_heads(),
                                            1, s.kv_config.max_seq_len, tanda,
