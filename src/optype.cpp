@@ -111,10 +111,6 @@ void OpTypeRegistry::register_builtins() {
     info.min_inputs = 2; info.max_inputs = 2;
     register_op(info);
     
-    info = OpTypeInfo{}; info.name = "matmul_t"; info.category = "linear";
-    info.min_inputs = 2; info.max_inputs = 2;
-    register_op(info);
-    
     // Position encoding
     info = OpTypeInfo{}; info.name = "rope"; info.category = "position";
     info.min_inputs = 1; info.max_inputs = 2;
@@ -186,11 +182,6 @@ void OpTypeRegistry::register_builtins() {
     info.min_inputs = 1; info.max_inputs = 1;
     register_op(info);
 
-    // Gemma 4 «unified»: hidden += pos_embedding[x,0] + pos_embedding[y,1].
-    // Entradas: hidden (in-place), tabla de posiciones e ids [tokens,2].
-    info = OpTypeInfo{}; info.name = "g4u_pos_add"; info.category = "memory";
-    info.min_inputs = 3; info.max_inputs = 3; info.is_inplace = true;
-    register_op(info);
 
     info = OpTypeInfo{}; info.name = "moe_router_input"; info.category = "moe";
     info.min_inputs = 2; info.max_inputs = 2;

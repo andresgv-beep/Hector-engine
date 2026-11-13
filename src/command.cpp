@@ -56,12 +56,6 @@ void CommandBuffer::add_mul(const std::string& dst, const std::string& a, const 
     add_op(op::MUL(), dst).in({a, b});
 }
 
-void CommandBuffer::add_mul_scalar_tensor(const std::string& dst,
-                                           const std::string& input,
-                                           const std::string& scalar) {
-    add_op(op::MUL_SCALAR_TENSOR(), dst).in({input, scalar});
-}
-
 void CommandBuffer::add_bias(const std::string& dst, const std::string& input, const std::string& bias) {
     add_op(op::ADD_BIAS(), dst).in({input, bias});
 }
@@ -131,10 +125,6 @@ void CommandBuffer::add_layernorm(const std::string& dst, const std::string& src
 
 void CommandBuffer::add_matmul(const std::string& dst, const std::string& a, const std::string& b) {
     add_op(op::MATMUL(), dst).in({a, b});
-}
-
-void CommandBuffer::add_matmul_t(const std::string& dst, const std::string& a, const std::string& b) {
-    add_op(op::MATMUL_T(), dst).in({a, b});
 }
 
 void CommandBuffer::add_rope(const std::string& dst, const std::string& src,

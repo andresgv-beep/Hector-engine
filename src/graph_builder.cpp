@@ -1424,26 +1424,6 @@ const CommandBuffer& GraphBuilder::build_forward_reuse(
     return cached_decode_.cb;
 }
 
-CommandBuffer GraphBuilder::build_single_layer(
-    Engine& engine,
-    const ModelConfig& config,
-    const ArchDescriptor& arch,
-    uint32_t layer_idx,
-    uint32_t batch_size,
-    uint32_t seq_len,
-    uint32_t position_offset,
-    const KVCacheParams* cache
-) {
-    CommandBuffer cb;
-    cb.reserve(20);
-    
-    build_attention_block(cb, config, arch, layer_idx, batch_size, seq_len,
-                        position_offset, cache);
-    build_mlp_block(cb, config, arch, layer_idx, batch_size, seq_len);
-    
-    return cb;
-}
-
 // ============================================================================
 // ATTENTION BLOCK (unificado: con y sin cache)
 // ============================================================================
@@ -1765,10 +1745,6 @@ void GraphBuilder::build_mlp_block(
 
 TensorInfo* GraphBuilder::get_logits(Engine& engine) const {
     return engine.tensors().get("_s.logits");
-}
-
-TensorInfo* GraphBuilder::get_hidden(Engine& engine) const {
-    return engine.tensors().get("_s.hidden");
 }
 
 // ============================================================================

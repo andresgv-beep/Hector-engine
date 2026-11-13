@@ -360,14 +360,6 @@ add_test(NAME Gemma4TokenizerTest COMMAND test_gemma4_tokenizer)
 add_test(NAME ChatTemplateTest COMMAND test_chat_template)
 add_test(NAME CkPolicyTest COMMAND test_ck_policy)
 
-# GraphBuilder test
-add_executable(test_graph_builder test_graph_builder.cpp)
-target_link_libraries(test_graph_builder PRIVATE helios-engine)
-
-# Generation test
-add_executable(test_generate test_generate.cpp)
-target_link_libraries(test_generate PRIVATE helios-engine)
-
 # Generation test with KV cache
 add_executable(test_generate_kv test_generate_kv.cpp)
 target_link_libraries(test_generate_kv PRIVATE helios-engine)
@@ -375,10 +367,6 @@ target_link_libraries(test_generate_kv PRIVATE helios-engine)
 # Tokenizer test
 add_executable(test_tokenizer test_tokenizer.cpp)
 target_link_libraries(test_tokenizer PRIVATE helios-engine)
-
-# Full generation test (tokenizer + forward + sampling + decode)
-add_executable(test_generate_full test_generate_full.cpp)
-target_link_libraries(test_generate_full PRIVATE helios-engine)
 
 # Gemma 4 complete greedy/sampled generation through heterogeneous/shared KV
 add_executable(test_gemma4_generate tests/test_gemma4_generate.cu)
@@ -404,27 +392,6 @@ endif()
 # Gemma 4 token-by-token quality calibration (NLL/entropy/top-1)
 add_executable(gemma4_calibrate tools/gemma4_calibrate.cu)
 target_link_libraries(gemma4_calibrate PRIVATE helios-engine)
-
-# Multimodal test (CORTEX, CODE)
-add_executable(test_multimodal test_multimodal.cpp)
-target_link_libraries(test_multimodal PRIVATE helios-engine)
-
-# Modal generation test (any modal)
-add_executable(test_generate_modal test_generate_modal.cpp)
-target_link_libraries(test_generate_modal PRIVATE helios-engine)
-
-# Prueba manual de relevo secuencial entre los bloques TEXT y CODE_EXEC de un
-# mismo HNF. Conserva el KV de TEXT mientras CODE ocupa la GPU.
-add_executable(text_code_relay tools/text_code_relay.cpp)
-target_link_libraries(text_code_relay PRIVATE helios-engine)
-
-# ========== SMOKE TEST (progresivo, 4 fases) ==========
-add_executable(test_smoke test_smoke.cpp)
-target_link_libraries(test_smoke PRIVATE helios-engine)
-
-# ========== CHAT TEST (interactive with templates) ==========
-add_executable(test_chat test_chat.cpp)
-target_link_libraries(test_chat PRIVATE helios-engine)
 
 # ========== HELIOS CHAT (multi-turn, KV continuity, dynamic output) ==========
 add_executable(helios_chat helios_chat.cpp)

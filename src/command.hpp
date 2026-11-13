@@ -158,8 +158,6 @@ public:
     void add_add(const std::string& dst, const std::string& a, const std::string& b);
     void add_bias(const std::string& dst, const std::string& input, const std::string& bias);
     void add_mul(const std::string& dst, const std::string& a, const std::string& b);
-    void add_mul_scalar_tensor(const std::string& dst, const std::string& input,
-                               const std::string& scalar);
     void add_scale(const std::string& dst, const std::string& src, float scalar);
     
     // Activations
@@ -194,7 +192,6 @@ public:
     
     // Linear algebra
     void add_matmul(const std::string& dst, const std::string& a, const std::string& b);
-    void add_matmul_t(const std::string& dst, const std::string& a, const std::string& b);
     
     // Position encoding
     void add_rope(const std::string& dst, const std::string& src,

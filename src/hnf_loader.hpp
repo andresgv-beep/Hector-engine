@@ -644,12 +644,6 @@ public:
     size_t block_vram_usage(BlockID block_id) const;
     size_t block_tensor_count(BlockID block_id) const;
     
-    // Get total VRAM used by loaded blocks
-    size_t total_vram_usage() const;
-    
-    // List currently loaded blocks
-    std::vector<BlockID> loaded_blocks() const;
-    
     // ========================================
     // LEGACY LOADING (load all at once)
     // ========================================

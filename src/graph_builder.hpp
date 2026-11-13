@@ -259,18 +259,6 @@ public:
     // Invalidar cache de decode (llamar si cambia modelo, config, o prefill)
     void invalidate_decode_cache() { cached_decode_.invalidate(); }
     
-    // Una sola capa (para testing)
-    CommandBuffer build_single_layer(
-        Engine& engine,
-        const ModelConfig& config,
-        const ArchDescriptor& arch,
-        uint32_t layer_idx,
-        uint32_t batch_size,
-        uint32_t seq_len,
-        uint32_t position_offset = 0,
-        const KVCacheParams* cache = nullptr
-    );
-
     // Gemma 4 input path: scaled main embedding plus complete packed PLE.
     CommandBuffer build_gemma4_input(
         Engine& engine,
@@ -417,7 +405,6 @@ public:
     uint32_t flash_decode_min_seq_ = 0;
 
     TensorInfo* get_logits(Engine& engine) const;
-    TensorInfo* get_hidden(Engine& engine) const;
     
     // ========================================================================
     // VALIDATION

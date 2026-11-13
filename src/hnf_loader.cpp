@@ -441,16 +441,6 @@ bool HnfLoader::is_block_loaded(BlockID id) const { return id < HNF_BLOCK_COUNT 
 size_t HnfLoader::block_vram_usage(BlockID id) const { return id < HNF_BLOCK_COUNT ? block_states_[id].vram_bytes : 0; }
 size_t HnfLoader::block_tensor_count(BlockID id) const { return id < HNF_BLOCK_COUNT ? block_states_[id].tensor_count : 0; }
 
-size_t HnfLoader::total_vram_usage() const {
-    size_t t = 0; for (int i = 0; i < HNF_BLOCK_COUNT; i++) t += block_states_[i].vram_bytes; return t;
-}
-
-std::vector<BlockID> HnfLoader::loaded_blocks() const {
-    std::vector<BlockID> r;
-    for (int i = 0; i < HNF_BLOCK_COUNT; i++) if (block_states_[i].loaded) r.push_back(static_cast<BlockID>(i));
-    return r;
-}
-
 std::vector<const TensorEntry*> HnfLoader::tensors_for_block(BlockID id) const {
     std::vector<const TensorEntry*> r;
     std::string target = block_name(id);

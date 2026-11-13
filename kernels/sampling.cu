@@ -81,42 +81,6 @@ void launch_argmax_fp16(
 }
 
 // ============================================================================
-// TEMPERATURE SCALING - Divide logits by temperature
-// ============================================================================
-// logits = logits / temperature
-// In-place operation
-
-__global__ void temperature_scale_kernel(
-    half* __restrict__ logits,
-    int vocab_size,
-    float inv_temperature  // 1.0 / temperature for efficiency
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int stride = blockDim.x * gridDim.x;
-    
-    for (int i = idx; i < vocab_size; i += stride) {
-        float val = __half2float(logits[i]);
-        logits[i] = __float2half(val * inv_temperature);
-    }
-}
-
-void launch_temperature_scale(
-    half* logits,
-    int vocab_size,
-    float temperature,
-    cudaStream_t stream
-) {
-    if (temperature == 1.0f) return;  // No-op
-    
-    int block_size = 256;
-    int grid_size = (vocab_size + block_size - 1) / block_size;
-    
-    temperature_scale_kernel<<<grid_size, block_size, 0, stream>>>(
-        logits, vocab_size, 1.0f / temperature
-    );
-}
-
-// ============================================================================
 // SOFTMAX - Convert logits to probabilities
 // ============================================================================
 // Numerically stable: subtract max first
@@ -326,81 +290,6 @@ void launch_top_k(
 }
 
 // ============================================================================
-// TOP-P (NUCLEUS) CUMULATIVE SUM
-// ============================================================================
-// Given sorted probabilities, find cutoff index where cumsum >= p
-
-__global__ void top_p_cutoff_kernel(
-    const float* __restrict__ sorted_probs,  // [k] sorted descending
-    int32_t* __restrict__ cutoff_idx,
-    int k,
-    float p
-) {
-    if (threadIdx.x != 0) return;
-    
-    float cumsum = 0.0f;
-    for (int i = 0; i < k; i++) {
-        cumsum += sorted_probs[i];
-        if (cumsum >= p) {
-            cutoff_idx[0] = i + 1;  // Number of tokens to keep
-            return;
-        }
-    }
-    cutoff_idx[0] = k;  // Keep all
-}
-
-void launch_top_p_cutoff(
-    const float* sorted_probs,
-    int32_t* cutoff_idx,
-    int k,
-    float p,
-    cudaStream_t stream
-) {
-    top_p_cutoff_kernel<<<1, 1, 0, stream>>>(
-        sorted_probs, cutoff_idx, k, p
-    );
-}
-
-// ============================================================================
-// CATEGORICAL SAMPLE - Sample from probability distribution
-// ============================================================================
-// Given probabilities and a random value [0,1), return sampled index
-
-__global__ void categorical_sample_kernel(
-    const float* __restrict__ probs,  // [n] probabilities (normalized)
-    const int32_t* __restrict__ indices,  // [n] token indices
-    int32_t* __restrict__ output,
-    int n,
-    float random_val  // Uniform [0, 1)
-) {
-    if (threadIdx.x != 0) return;
-    
-    float cumsum = 0.0f;
-    for (int i = 0; i < n; i++) {
-        cumsum += probs[i];
-        if (random_val < cumsum) {
-            output[0] = indices[i];
-            return;
-        }
-    }
-    // Fallback to last (shouldn't happen with proper normalization)
-    output[0] = indices[n-1];
-}
-
-void launch_categorical_sample(
-    const float* probs,
-    const int32_t* indices,
-    int32_t* output,
-    int n,
-    float random_val,
-    cudaStream_t stream
-) {
-    categorical_sample_kernel<<<1, 1, 0, stream>>>(
-        probs, indices, output, n, random_val
-    );
-}
-
-// ============================================================================
 // SAMPLE TOP-K GPU — softmax + top-p + muestreo categórico en UN kernel
 // ============================================================================
 // Trabaja sobre los k candidatos ya ordenados del top-k (k ≤ 64): el trabajo
@@ -462,71 +351,6 @@ void launch_sample_topk_gpu(
 ) {
     sample_topk_gpu_kernel<<<1, 1, 0, stream>>>(
         top_values, top_indices, output, k, inv_temp, top_p, random_val
-    );
-}
-
-// ============================================================================
-// REPETITION PENALTY - Penalize tokens that appeared in context
-// ============================================================================
-// For each token in context_ids, apply:
-//   if logit > 0: logit /= rep_penalty
-//   if logit < 0: logit *= rep_penalty
-//   logit -= frequency_penalty * count(token)
-//   logit -= presence_penalty * (count(token) > 0 ? 1 : 0)
-//
-// This matches the HuggingFace / llama.cpp convention.
-// The kernel works on the full vocab — context tokens are scattered.
-
-__global__ void apply_repetition_penalty_kernel(
-    half* __restrict__ logits,             // [vocab_size] — modified in place
-    const int32_t* __restrict__ context,   // [context_len] — token IDs
-    const int32_t* __restrict__ counts,    // [vocab_size] — occurrence counts
-    int vocab_size,
-    float rep_penalty,                     // multiplicative (1.0 = disabled)
-    float freq_penalty,                    // additive per-occurrence (0.0 = disabled)
-    float pres_penalty                     // additive per-presence (0.0 = disabled)
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= vocab_size) return;
-    
-    int count = counts[idx];
-    if (count == 0) return;  // Token not in context — no penalty
-    
-    float logit = __half2float(logits[idx]);
-    
-    // Multiplicative repetition penalty (à la Keskar et al.)
-    if (rep_penalty != 1.0f) {
-        if (logit > 0.0f) {
-            logit /= rep_penalty;
-        } else {
-            logit *= rep_penalty;
-        }
-    }
-    
-    // Additive frequency penalty (linear in count)
-    logit -= freq_penalty * (float)count;
-    
-    // Additive presence penalty (binary)
-    logit -= pres_penalty;
-    
-    logits[idx] = __float2half(logit);
-}
-
-void launch_repetition_penalty(
-    half* logits,
-    const int32_t* context,
-    const int32_t* counts,
-    int vocab_size,
-    float rep_penalty,
-    float freq_penalty,
-    float pres_penalty,
-    cudaStream_t stream
-) {
-    int block = 256;
-    int grid = (vocab_size + block - 1) / block;
-    apply_repetition_penalty_kernel<<<grid, block, 0, stream>>>(
-        logits, context, counts, vocab_size,
-        rep_penalty, freq_penalty, pres_penalty
     );
 }
 

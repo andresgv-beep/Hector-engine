@@ -416,10 +416,6 @@ std::vector<KernelProfile> Engine::get_profiles() const {
     return result;
 }
 
-void Engine::clear_profiles() {
-    profiles_.clear();
-}
-
 void Engine::print_profile_summary() const {
     auto profiles = get_profiles();
     if (profiles.empty()) {

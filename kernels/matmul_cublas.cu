@@ -370,23 +370,5 @@ void launch_matmul_fp16_cublas(
     );
 }
 
-
-// ============================================================================
-// CLEANUP
-// ============================================================================
-
-void cleanup_cublas() {
-    const int active = PerDevice<CublasState>::current_device();
-    for (int device = 0; device < PerDevice<CublasState>::MAX_DEVICES; ++device) {
-        CublasState& state = g_cublas.at(device);
-        if (!state.handle && !state.dequant_buffer) continue;
-        cudaSetDevice(device);
-        if (state.dequant_buffer) cudaFree(state.dequant_buffer);
-        if (state.handle) cublasDestroy(state.handle);
-        state = CublasState{};
-    }
-    cudaSetDevice(active);
-}
-
 } // namespace kernels
 } // namespace helios

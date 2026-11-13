@@ -97,19 +97,6 @@ public:
     void set_penalty_window(int window) { penalty_window_ = window; }
     
     // ========================================
-    // BATCH API (for parallel generation)
-    // ========================================
-    
-    void sample_batch(
-        const half* logits,     // [batch, vocab_size]
-        int32_t* output_tokens, // [batch]
-        int batch_size,
-        int vocab_size,
-        const SamplingConfig& config,
-        cudaStream_t stream = nullptr
-    );
-    
-    // ========================================
     // STATE
     // ========================================
     

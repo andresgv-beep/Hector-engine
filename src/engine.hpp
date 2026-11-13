@@ -185,9 +185,6 @@ public:
     // Get profiling results (if enabled)
     std::vector<KernelProfile> get_profiles() const;
     
-    // Clear profiling data
-    void clear_profiles();
-    
     // Print profiling summary
     void print_profile_summary() const;
     

@@ -149,7 +149,6 @@ namespace op {
     inline OpTypeID RMSNORM_RESIDUAL() { return OpTypeRegistry::instance().get_id("rmsnorm_residual"); }
     
     inline OpTypeID MATMUL() { return OpTypeRegistry::instance().get_id("matmul"); }
-    inline OpTypeID MATMUL_T() { return OpTypeRegistry::instance().get_id("matmul_t"); }
     
     inline OpTypeID ROPE() { return OpTypeRegistry::instance().get_id("rope"); }
     
@@ -170,8 +169,6 @@ namespace op {
     inline OpTypeID EMBEDDING() { return OpTypeRegistry::instance().get_id("embedding"); }
     inline OpTypeID SCATTER_ROWS() { return OpTypeRegistry::instance().get_id("scatter_rows"); }
     inline OpTypeID PLE_SLICE() { return OpTypeRegistry::instance().get_id("ple_slice"); }
-    /// Gemma 4 «unified»: suma la posicion factorizada (X+Y) a cada parche.
-    inline OpTypeID G4U_POS_ADD() { return OpTypeRegistry::instance().get_id("g4u_pos_add"); }
     /// Gemma 4 MoE: entrada del router en FP32.
     inline OpTypeID MOE_ROUTER_INPUT() { return OpTypeRegistry::instance().get_id("moe_router_input"); }
     /// Gemma 4 MoE: logits del router en FP32.

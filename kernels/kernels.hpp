@@ -706,9 +706,6 @@ void launch_matmul_fp16_cublas(
     int M, int K, int N, cudaStream_t stream = nullptr
 );
 
-// Call on shutdown to free cuBLAS handle and dequant buffer
-void cleanup_cublas();
-
 // ============================================================================
 // SAMPLING KERNELS
 // ============================================================================
@@ -720,54 +717,12 @@ void launch_argmax_fp16(
     cudaStream_t stream = nullptr
 );
 
-void launch_temperature_scale(
-    half* logits,           // [vocab_size] - modified in place
-    int vocab_size,
-    float temperature,
-    cudaStream_t stream = nullptr
-);
-
-void launch_softmax_sampling_fp16(
-    const half* input,
-    half* output,
-    int vocab_size,
-    cudaStream_t stream = nullptr
-);
-
 void launch_top_k(
     const half* input,              // [vocab_size]
     float* top_values,              // [k]
     int32_t* top_indices,           // [k]
     int vocab_size,
     int k,
-    cudaStream_t stream = nullptr
-);
-
-void launch_top_p_cutoff(
-    const float* sorted_probs,      // [k] sorted descending
-    int32_t* cutoff_idx,            // [1]
-    int k,
-    float p,
-    cudaStream_t stream = nullptr
-);
-
-void launch_categorical_sample(
-    const float* probs,             // [n]
-    const int32_t* indices,         // [n]
-    int32_t* output,                // [1]
-    int n,
-    float random_val,
-    cudaStream_t stream = nullptr
-);
-
-void launch_repetition_penalty(
-    half* logits,                   // [vocab_size] — modified in place
-    const int32_t* context,         // [context_len] — token IDs
-    const int32_t* counts,          // [vocab_size] — occurrence counts
-    int vocab_size,
-    float rep_penalty,
-    float freq_penalty,
-    float pres_penalty,
     cudaStream_t stream = nullptr
 );
 

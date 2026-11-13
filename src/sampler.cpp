@@ -23,12 +23,8 @@ namespace helios {
 
 namespace kernels {
     void launch_argmax_fp16(const half*, int32_t*, int, cudaStream_t);
-    void launch_temperature_scale(half*, int, float, cudaStream_t);
     void launch_top_k(const half*, float*, int32_t*, int, int, cudaStream_t);
-    void launch_top_p_cutoff(const float*, int32_t*, int, float, cudaStream_t);
-    void launch_categorical_sample(const float*, const int32_t*, int32_t*, int, float, cudaStream_t);
     void launch_sample_topk_gpu(const float*, const int32_t*, int32_t*, int, float, float, float, cudaStream_t);
-    void launch_repetition_penalty(half*, const int32_t*, const int32_t*, int, float, float, float, cudaStream_t);
     void launch_window_penalty(half*, const int32_t*, const int32_t*, int, float, float, float, cudaStream_t);
 }
 
@@ -192,25 +188,6 @@ int32_t Sampler::sample_with_temperature(
                     cudaMemcpyDeviceToHost, stream);
     cudaStreamSynchronize(stream);
     return *result_cpu_;
-}
-
-// ============================================================================
-// BATCH SAMPLING
-// ============================================================================
-
-void Sampler::sample_batch(
-    const half* logits,
-    int32_t* output_tokens,
-    int batch_size,
-    int vocab_size,
-    const SamplingConfig& config,
-    cudaStream_t stream
-) {
-    for (int b = 0; b < batch_size; b++) {
-        const half* batch_logits = logits + b * vocab_size;
-        int32_t token = sample(batch_logits, vocab_size, config, stream);
-        output_tokens[b] = token;
-    }
 }
 
 } // namespace helios
