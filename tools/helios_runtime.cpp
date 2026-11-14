@@ -502,6 +502,8 @@ int main(int argc, char** argv) {
                 gen.close_turn = v->boo(true);
             if (const auto* arr = g->get("stop_tokens"); arr && arr->is_array())
                 for (const auto& v : *arr->array) gen.stop_tokens.push_back(v.str());
+            if (const auto* arr = g->get("greedy_after_tokens"); arr && arr->is_array())
+                for (const auto& v : *arr->array) gen.greedy_after_tokens.push_back(v.str());
         }
 
         {

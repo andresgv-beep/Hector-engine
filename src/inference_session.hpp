@@ -107,6 +107,10 @@ public:
         // los cinco mil tokens que acaba de leer para añadir mil.
         bool reuse_prefix = false;
         std::vector<std::string> stop_tokens;
+        // Tokens que, al emitirse, dejan el resto del turno en greedy. El adaptador
+        // pone aquí el que abre una llamada a herramienta: la conversación puede
+        // muestrearse con temperatura y los argumentos de la llamada salen exactos.
+        std::vector<std::string> greedy_after_tokens;
     };
 
     // Adjunto prestado: el motor recibe píxeles RGB8 ya decodificados o audio

@@ -40,6 +40,11 @@ Los estados de sesión informan su capacidad real, no siempre la global.
 ```
 
 Normalmente `messages` contiene mensajes nuevos y el motor aplica la plantilla.
+`generation.greedy_after_tokens` es una lista de tokens: en cuanto la generación emite
+uno, el resto del turno se muestrea a temperatura 0. Sirve para conversar con temperatura
+y que una llamada a herramienta salga exacta. Un token que el modelo no tiene es un error
+`invalid_greedy_token`.
+
 Con `generation.preformatted=true` se exige un único mensaje cuyo contenido ya
 es el prompt formateado. El cliente puede reenviar su prompt completo con
 `reuse_prefix=true`; se reutiliza solo la parte válida que coincide con el KV.

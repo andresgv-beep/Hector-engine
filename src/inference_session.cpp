@@ -947,6 +947,15 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         }
         stops.push_back(*id);
     }
+    std::vector<int32_t> greedy_after;
+    for (const auto& token : gen.greedy_after_tokens) {
+        auto id = s.tokenizer->token_to_id(token);
+        if (!id) {
+            *error_code = "invalid_greedy_token"; *error = "token de greedy inexistente";
+            return false;
+        }
+        greedy_after.push_back(*id);
+    }
     if (gen.preformatted && messages.size() != 1) {
         *error_code = "invalid_preformatted";
         *error = "prompt preformateado requiere exactamente un mensaje";
@@ -1179,6 +1188,12 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             if (s.position() + 4 >= s.kv_config.max_seq_len) {
                 *reason = FinishReason::ContextFull;
                 break;
+            }
+            // Desde aquí el turno es una llamada: lo que sigue (nombre y argumentos)
+            // se elige sin azar. La config se reconstruye entera en el turno siguiente.
+            if (!greedy_after.empty() && s.sample_config.temperature >= 0.01f &&
+                std::find(greedy_after.begin(), greedy_after.end(), next) != greedy_after.end()) {
+                s.sample_config = s.build_sampling(0.0f);
             }
 
             if (s.think_open && next == *s.think_open) in_think = true;
