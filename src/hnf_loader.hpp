@@ -665,6 +665,21 @@ public:
     uint64_t block_vram_bytes(BlockID block) const {
         return block < HNF_BLOCK_COUNT ? block_vram_[block] : 0;
     }
+    // Lo que la torre visual gasta de VRAM de verdad. Con HELIOS_VISION_MMAP=1 sus pesos se
+    // quedan en el HNF mapeado y a la gráfica solo sube una fase cada vez, a una ventana
+    // pequeña: lo que ocupa es su memoria de trabajo más esa ventana. El reparto contaba
+    // también los pesos, y con el 26B a 40.960 dejaba fuera la visión por 1 GB que no gasta
+    // en cuanto el escritorio pedía unos cientos de megas (2026-11-14).
+    static constexpr uint64_t kVisionStageBytes = 64ull << 20;
+    static bool vision_mmap_requested() {
+        const char* value = getenv("HELIOS_VISION_MMAP");
+        return value && value[0] == '1';
+    }
+    uint64_t vision_vram_bytes() const {
+        const uint64_t total = block_vram_[BLOCK_VISION];
+        if (total == 0 || !vision_mmap_requested() || !has_gemma4_vision_config_) return total;
+        return total - block_weight_[BLOCK_VISION] + kVisionStageBytes;
+    }
     // ¿Este tensor se queda en RAM en vez de subir a la gráfica? Es la misma regla que
     // aplica la carga (tabla de embeddings de solo consulta, con HELIOS_EMBED_MMAP o
     // HELIOS_EMBED_IN_RAM). Quien reparte VRAM antes de cargar tiene que preguntarlo:
@@ -758,6 +773,7 @@ private:
     BlockEntry blocks_[HNF_BLOCK_COUNT];
     uint32_t format_major_ = 0;
     uint64_t block_vram_[HNF_BLOCK_COUNT] = {};
+    uint64_t block_weight_[HNF_BLOCK_COUNT] = {};
     uint64_t file_size_ = 0;
     std::string chat_template_;
     ModelConfig config_;                                    // Default/text config

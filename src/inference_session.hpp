@@ -61,6 +61,7 @@ public:
         uint32_t max_seq_len = 0;
         bool multimodal = false;
         std::string vision_adapter;   // vacío si no hay
+        bool vision_dropped = false;  // el HNF trae visión, pero en esta carga no cupo en la VRAM
     };
 
     // Carga los pesos. Devuelve nullptr y llena `error` si no puede.

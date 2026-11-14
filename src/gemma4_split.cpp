@@ -148,7 +148,7 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
     const uint64_t primary_free = usable_vram(0);
     const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
     check(cudaSetDevice(0), "elegir GPU");
-    return plan_gemma4_placement(layer_bytes, common_bytes, loader.block_vram_bytes(BLOCK_VISION),
+    return plan_gemma4_placement(layer_bytes, common_bytes, loader.vision_vram_bytes(),
                                  primary_free, secondary_free, gemma.num_kv_shared_layers == 0);
 }
 

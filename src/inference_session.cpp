@@ -732,6 +732,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         // Solo se anuncia lo que el ejecutable puede cumplir de verdad.
         if (s.multimodal) s.info.vision_adapter = s.multimodal->id();
         s.info.multimodal = (s.multimodal != nullptr);
+        s.info.vision_dropped = s.placement.vision_dropped;
         return m;
     } catch (const std::exception& e) {
         *error = e.what();

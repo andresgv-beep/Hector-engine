@@ -107,7 +107,7 @@ bool HnfLoader::open_hnf10(std::ifstream& f) {
     hnf10::Contents contents;
     if (!hnf10::read(f, contents, last_error_)) return false;
     file_size_ = contents.file_size;
-    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) { blocks_[i] = BlockEntry{i, i, 0, 0, 0}; block_vram_[i] = 0; }
+    for (uint32_t i = 0; i < HNF_BLOCK_COUNT; ++i) { blocks_[i] = BlockEntry{i, i, 0, 0, 0}; block_vram_[i] = 0; block_weight_[i] = 0; }
     const hnf10::Component* text = nullptr;
     std::map<uint32_t, std::string> block_of;   // id de componente -> nombre de bloque de sus tensores
     for (const auto& c : contents.components) {
@@ -132,6 +132,7 @@ bool HnfLoader::open_hnf10(std::ifstream& f) {
         if (blocks_[block].size != 0) { last_error_ = "HNFv10: dos componentes del mismo tipo: " + c.name; return false; }
         blocks_[block] = BlockEntry{block, block, c.offset, c.size, 0};
         block_vram_[block] = c.weight_bytes + c.working_bytes;
+        block_weight_[block] = c.weight_bytes;
     }
     // Puede no haber texto: un HNF solo de visión acompaña a otro de texto (--multimodal).
     (void)text;

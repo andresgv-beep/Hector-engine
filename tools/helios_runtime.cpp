@@ -346,6 +346,7 @@ int main(int argc, char** argv) {
          // Capacidad EFECTIVA: la sesión solo declara visión si logró crear
          // el adaptador, así que anunciarla ya no es una promesa vacía.
          ",\"multimodal\":" + (info.multimodal ? "true" : "false") +
+         ",\"vision_dropped\":" + (info.vision_dropped ? "true" : "false") +
          ",\"vision_adapter\":" +
          (info.vision_adapter.empty()
               ? std::string("null")

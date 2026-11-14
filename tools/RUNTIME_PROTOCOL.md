@@ -14,6 +14,8 @@ otras peticiones. Un salto de línea tras el payload es opcional: el runtime ya
 no lo espera (antes se quedaba esperándolo y el adjunto no se confirmaba).
 
 `ready` anuncia arquitectura, `max_seq_len`, `multimodal` y `vision_adapter`.
+`vision_dropped: true` dice que el HNF trae visión pero en esta carga no cupo en la VRAM:
+no es que el modelo no vea, es que hay que liberar memoria y volver a cargarlo.
 La sesión predeterminada es `"0"`. Se pueden abrir otras sesiones sobre los
 mismos pesos; solo una genera a la vez. Hay eventos de sesión sin `request_id`
 (`session_opened`, `session_closed`, `session_paused`), distintos de los terminales.
