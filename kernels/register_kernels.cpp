@@ -688,7 +688,7 @@ void register_memory_kernels(Engine& engine) {
             static_cast<int>(experts), static_cast<int>(top_k), ctx.stream);
     });
 
-    engine.register_kernel(op::MOE_EXPERTS(), [](ExecContext& ctx, const Command&) {
+    engine.register_kernel(op::MOE_EXPERTS(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* input = ctx.in(0);
         TensorInfo* indices = ctx.in(1);
         TensorInfo* weights = ctx.in(2);
@@ -713,10 +713,11 @@ void register_memory_kernels(Engine& engine) {
             gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
             as_fp16(output), static_cast<int>(tokens), static_cast<int>(shape.experts),
             static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
-            static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream);
+            static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream,
+            cmd.get<uint32_t>("silu", 0) != 0);
     });
 
-    engine.register_kernel(op::MOE_EXPERTS_DECODE(), [](ExecContext& ctx, const Command&) {
+    engine.register_kernel(op::MOE_EXPERTS_DECODE(), [](ExecContext& ctx, const Command& cmd) {
         TensorInfo* input = ctx.in(0);
         TensorInfo* indices = ctx.in(1);
         TensorInfo* weights = ctx.in(2);
@@ -748,7 +749,7 @@ void register_memory_kernels(Engine& engine) {
             gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
             as_fp16(gate_up_scratch), as_fp16(hidden_scratch), as_fp16(rows_scratch), as_fp16(output),
             static_cast<int>(top_k), static_cast<int>(shape.hidden), static_cast<int>(shape.inner),
-            static_cast<int>(shape.physical), ctx.stream);
+            static_cast<int>(shape.physical), ctx.stream, cmd.get<uint32_t>("silu", 0) != 0);
     });
 
     engine.register_kernel(op::PAD_COLUMNS(), [](ExecContext& ctx, const Command&) {
@@ -1321,6 +1322,82 @@ void register_attention_kernels(Engine& engine) {
 // REGISTER ALL
 // ============================================================================
 
+// Qwen3.5: la capa Gated DeltaNet y la puerta de la atención. Las formas salen de los tensores;
+// el comando solo trae lo que no se puede deducir de ellas.
+void register_qwen35_kernels(Engine& engine) {
+    const auto id = [](const char* name) { return OpTypeRegistry::instance().get_id(name); };
+
+    engine.register_kernel(id("causal_conv_silu"), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* x = ctx.in(0); TensorInfo* weight = ctx.in(1); TensorInfo* state = ctx.in(2);
+        TensorInfo* out = ctx.output;
+        if (!x || !weight || !state || !out) throw std::runtime_error("CAUSAL_CONV_SILU: missing tensors");
+        if (weight->shape.size() != 2 || state->dtype != dtype::FP32()) {
+            throw std::runtime_error("CAUSAL_CONV_SILU: weight must be [C, K] and the state FP32");
+        }
+        const int C = static_cast<int>(weight->shape[0]), K = static_cast<int>(weight->shape[1]);
+        const int L = static_cast<int>(cmd.get<uint32_t>("seq_len", 1));
+        if (state->numel() != size_t(C) * (K - 1)) throw std::runtime_error("CAUSAL_CONV_SILU: state must be [C, K-1]");
+        launch_causal_conv_silu(as_fp16_const(x), as_fp16_const(weight), static_cast<float*>(state->ptr),
+                                as_fp16(out), L, C, K, ctx.stream);
+    });
+
+    engine.register_kernel(id("gated_delta_rule"), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* in[8];
+        for (int i = 0; i < 8; ++i) { in[i] = ctx.in(i); if (!in[i]) throw std::runtime_error("GATED_DELTA_RULE: missing tensors"); }
+        TensorInfo* out = ctx.output;
+        if (!out) throw std::runtime_error("GATED_DELTA_RULE: missing output");
+        TensorInfo* state = in[7];
+        const int nk = static_cast<int>(cmd.get<uint32_t>("num_key_heads", 0));
+        const int nv = static_cast<int>(cmd.get<uint32_t>("num_value_heads", 0));
+        const int dk = static_cast<int>(cmd.get<uint32_t>("key_head_dim", 0));
+        const int dv = static_cast<int>(cmd.get<uint32_t>("value_head_dim", 0));
+        const int L = static_cast<int>(cmd.get<uint32_t>("seq_len", 1));
+        if (state->dtype != dtype::FP32() || state->numel() != size_t(nv) * dk * dv) {
+            throw std::runtime_error("GATED_DELTA_RULE: state must be FP32 [value heads, key dim, value dim]");
+        }
+        launch_gated_delta_rule(as_fp16_const(in[0]), as_fp16_const(in[1]), as_fp16_const(in[2]), as_fp16_const(in[3]),
+                                as_fp16_const(in[4]), as_fp16_const(in[5]), as_fp16_const(in[6]),
+                                static_cast<float*>(state->ptr), as_fp16(out),
+                                L, nk, nv, dk, dv, cmd.get<float>("eps", 1e-6f), ctx.stream);
+    });
+
+    engine.register_kernel(id("split_query_gate"), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* doubled = ctx.in(0); TensorInfo* gate = ctx.in(1); TensorInfo* query = ctx.output;
+        if (!doubled || !gate || !query) throw std::runtime_error("SPLIT_QUERY_GATE: missing tensors");
+        launch_split_query_gate(as_fp16_const(doubled), as_fp16(query), as_fp16(gate),
+                                static_cast<int>(cmd.get<uint32_t>("seq_len", 1)),
+                                static_cast<int>(cmd.get<uint32_t>("num_heads", 0)),
+                                static_cast<int>(cmd.get<uint32_t>("head_dim", 0)), ctx.stream);
+    });
+
+    engine.register_kernel(id("moe_widen"), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0); TensorInfo* output = ctx.output;
+        if (!input || !output || output->dtype != dtype::FP32() || output->numel() != input->numel()) {
+            throw std::runtime_error("MOE_WIDEN: needs an FP16 input and an FP32 output of the same size");
+        }
+        launch_moe_widen(as_fp16_const(input), static_cast<float*>(output->ptr), input->numel(), ctx.stream);
+    });
+
+    engine.register_kernel(id("moe_add_gated_shared"), [](ExecContext& ctx, const Command&) {
+        TensorInfo* input = ctx.in(0); TensorInfo* gate = ctx.in(1); TensorInfo* experts = ctx.in(2);
+        TensorInfo* dense = ctx.output;
+        if (!input || !gate || !experts || !dense) throw std::runtime_error("MOE_ADD_GATED_SHARED: missing tensors");
+        const size_t width = gate->numel();
+        if (width == 0 || input->numel() % width != 0 || experts->numel() != input->numel() ||
+            dense->numel() != input->numel()) {
+            throw std::runtime_error("MOE_ADD_GATED_SHARED: incompatible shapes");
+        }
+        launch_moe_add_gated_shared(as_fp16_const(input), as_fp16_const(gate), as_fp16_const(experts), as_fp16(dense),
+                                    static_cast<int>(input->numel() / width), static_cast<int>(width), ctx.stream);
+    });
+
+    engine.register_kernel(id("sigmoid_mul"), [](ExecContext& ctx, const Command& cmd) {
+        TensorInfo* x = ctx.in(0); TensorInfo* gate = ctx.in(1);
+        if (!x || !gate) throw std::runtime_error("SIGMOID_MUL: missing tensors");
+        launch_sigmoid_mul(as_fp16(x), as_fp16_const(gate), cmd.get<uint32_t>("count", 0), ctx.stream);
+    });
+}
+
 void register_all_kernels(Engine& engine) {
     register_elementwise_kernels(engine);
     register_activation_kernels(engine);
@@ -1328,6 +1405,7 @@ void register_all_kernels(Engine& engine) {
     register_linear_kernels(engine);
     register_memory_kernels(engine);
     register_attention_kernels(engine);
+    register_qwen35_kernels(engine);
 }
 
 } // namespace kernels

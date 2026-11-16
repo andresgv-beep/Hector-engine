@@ -148,6 +148,23 @@ __global__ void gated_delta_rule_kernel(
     }
 }
 
+// q_proj saca, por cabeza, la consulta y después una puerta del mismo tamaño.
+__global__ void split_query_gate_kernel(
+    const half* __restrict__ doubled, half* __restrict__ query, half* __restrict__ gate, size_t count, int head_dim
+) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    const size_t head = i / head_dim, d = i % head_dim;
+    query[i] = doubled[head * 2 * head_dim + d];
+    gate[i] = doubled[head * 2 * head_dim + head_dim + d];
+}
+
+__global__ void sigmoid_mul_kernel(half* __restrict__ x, const half* __restrict__ gate, size_t count) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    x[i] = __float2half(__half2float(x[i]) / (1.0f + expf(-__half2float(gate[i]))));
+}
+
 void check(cudaError_t error, const char* where) {
     if (error != cudaSuccess) throw std::runtime_error(std::string(where) + ": " + cudaGetErrorString(error));
 }
@@ -177,6 +194,21 @@ void launch_gated_delta_rule(const half* mixed, const half* z, const half* a, co
     gated_delta_rule_kernel<<<nv, dv, 0, stream>>>(mixed, z, a, b, a_log, dt_bias, norm_w, state, out,
                                                   L, nk, nv, dk, dv, eps);
     check(cudaGetLastError(), "gated_delta_rule");
+}
+
+void launch_split_query_gate(const half* doubled, half* query, half* gate,
+                             int rows, int num_heads, int head_dim, cudaStream_t stream) {
+    if (rows <= 0 || num_heads <= 0 || head_dim <= 0) throw std::invalid_argument("split_query_gate: dimensiones inválidas");
+    const size_t count = size_t(rows) * num_heads * head_dim;
+    split_query_gate_kernel<<<unsigned((count + CONV_BLOCK - 1) / CONV_BLOCK), CONV_BLOCK, 0, stream>>>(
+        doubled, query, gate, count, head_dim);
+    check(cudaGetLastError(), "split_query_gate");
+}
+
+void launch_sigmoid_mul(half* x, const half* gate, size_t count, cudaStream_t stream) {
+    if (count == 0) return;
+    sigmoid_mul_kernel<<<unsigned((count + CONV_BLOCK - 1) / CONV_BLOCK), CONV_BLOCK, 0, stream>>>(x, gate, count);
+    check(cudaGetLastError(), "sigmoid_mul");
 }
 
 } // namespace kernels

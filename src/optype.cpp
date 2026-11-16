@@ -136,6 +136,27 @@ void OpTypeRegistry::register_builtins() {
     info = OpTypeInfo{}; info.name = "attention_prefill_cached"; info.category = "attention";
     info.min_inputs = 3; info.max_inputs = 3;
     register_op(info);
+
+    // Qwen3.5: capa Gated DeltaNet y atención con puerta (kernels/delta_net.cu).
+    info = OpTypeInfo{}; info.name = "causal_conv_silu"; info.category = "attention";
+    info.min_inputs = 3; info.max_inputs = 3;      // entrada, pesos, estado
+    register_op(info);
+    info = OpTypeInfo{}; info.name = "gated_delta_rule"; info.category = "attention";
+    info.min_inputs = 8; info.max_inputs = 8;      // mixed, z, a, b, a_log, dt_bias, norma, estado
+    register_op(info);
+    info = OpTypeInfo{}; info.name = "split_query_gate"; info.category = "attention";
+    info.min_inputs = 2; info.max_inputs = 2;      // q_proj doble, y la puerta (se escribe)
+    register_op(info);
+    info = OpTypeInfo{}; info.name = "sigmoid_mul"; info.category = "attention";
+    info.min_inputs = 2; info.max_inputs = 2;
+    register_op(info);
+    // MoE de Qwen: entrada del enrutador sin escalar, y la suma del experto compartido.
+    info = OpTypeInfo{}; info.name = "moe_widen"; info.category = "moe";
+    info.min_inputs = 1; info.max_inputs = 1;
+    register_op(info);
+    info = OpTypeInfo{}; info.name = "moe_add_gated_shared"; info.category = "moe";
+    info.min_inputs = 3; info.max_inputs = 3;      // entrada de la MLP, puerta, salida de los expertos
+    register_op(info);
     
     // Quantization
     info = OpTypeInfo{}; info.name = "dequant"; info.category = "quantization";

@@ -684,7 +684,14 @@ void launch_moe_route(const float* logits, const half* expert_scale, int32_t* in
 void launch_moe_probabilities(const float* logits, float* probabilities, int L, int E, cudaStream_t stream);
 // gelu(gate) * up de una salida [M, 2I] de gate_up. Escribe [M, P]: P >= I son las
 // columnas físicas de down, y las que sobran quedan a cero.
-void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream);
+// Con `silu`, la activación es SiLU (Qwen) en vez de GELU (Gemma).
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream,
+                            bool silu = false);
+// Qwen: la entrada del enrutador es la salida de la norma, solo pasada a FP32.
+void launch_moe_widen(const half* input, float* output, size_t count, cudaStream_t stream);
+// Qwen3.5 MoE: dense <- experts + sigmoide(gate · input) · dense, token a token.
+void launch_moe_add_gated_shared(const half* input, const half* gate, const half* experts, half* dense,
+                                 int L, int H, cudaStream_t stream);
 // Rellena con ceros cada fila de [M, logical] hasta [M, physical].
 void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
                              cudaStream_t stream);
@@ -694,12 +701,12 @@ void launch_pad_columns_fp16(const half* input, half* output, int M, int logical
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, int P, cudaStream_t stream);
+                               int K, int H, int I, int P, cudaStream_t stream, bool silu = false);
 // gate_up es [E, 2I, H] y down [E, H, P]. Sincroniza: no es capturable en un grafo.
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* output,
-                               int L, int E, int K, int H, int I, int P, cudaStream_t stream);
+                               int L, int E, int K, int H, int I, int P, cudaStream_t stream, bool silu = false);
 
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,
@@ -738,6 +745,11 @@ void launch_gated_delta_rule(const half* mixed, const half* z, const half* a, co
                              const half* a_log, const half* dt_bias, const half* norm_w,
                              float* state, half* out,
                              int L, int nk, int nv, int dk, int dv, float eps, cudaStream_t stream);
+// Atención con puerta (Qwen3.5): `doubled` es [rows, heads, 2·head_dim]; la primera mitad de
+// cada cabeza es la consulta y la segunda la puerta. Y x <- x · sigmoide(gate).
+void launch_split_query_gate(const half* doubled, half* query, half* gate,
+                             int rows, int num_heads, int head_dim, cudaStream_t stream);
+void launch_sigmoid_mul(half* x, const half* gate, size_t count, cudaStream_t stream);
 
 } // namespace kernels
 } // namespace helios

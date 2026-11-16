@@ -73,8 +73,8 @@ class Modelo:
         carpeta = Path(carpeta)
         self.config = json.loads((carpeta / 'config.json').read_text())
         t = self.t = self.config.get('text_config', self.config)
-        if 'num_experts' in t:
-            raise SystemExit('Este es un modelo MoE: la referencia solo cubre los densos.')
+        self.expertos = t.get('num_experts', 0)
+        self.elegidos = t.get('num_experts_per_tok', 0)
         pesos = sorted(carpeta.glob('*.safetensors'))
         if len(pesos) != 1:
             raise SystemExit('Se espera un único fichero .safetensors en ' + str(carpeta))
@@ -103,8 +103,17 @@ class Modelo:
     def _capa(self, i):
         p = '%slayers.%d.' % (self.raiz, i)
         w = self.w
-        capa = dict(tipo=self.tipos[i], ln1=w(p + 'input_layernorm.weight'), ln2=w(p + 'post_attention_layernorm.weight'),
-                    gate=w(p + 'mlp.gate_proj.weight'), up=w(p + 'mlp.up_proj.weight'), down=w(p + 'mlp.down_proj.weight'))
+        capa = dict(tipo=self.tipos[i], ln1=w(p + 'input_layernorm.weight'), ln2=w(p + 'post_attention_layernorm.weight'))
+        if self.expertos:
+            # El MoE es la MLP de la capa: enrutador, expertos empaquetados y un experto
+            # compartido, que es una MLP densa con su puerta.
+            m = p + 'mlp.'
+            capa.update(enrutador=w(m + 'gate.weight'), exp_gate_up=w(m + 'experts.gate_up_proj'),
+                        exp_down=w(m + 'experts.down_proj'), puerta_comun=w(m + 'shared_expert_gate.weight')[0],
+                        gate=w(m + 'shared_expert.gate_proj.weight'), up=w(m + 'shared_expert.up_proj.weight'),
+                        down=w(m + 'shared_expert.down_proj.weight'))
+        else:
+            capa.update(gate=w(p + 'mlp.gate_proj.weight'), up=w(p + 'mlp.up_proj.weight'), down=w(p + 'mlp.down_proj.weight'))
         if capa['tipo'] == 'linear_attention':
             a = p + 'linear_attn.'
             capa.update(qkv=w(a + 'in_proj_qkv.weight'), z=w(a + 'in_proj_z.weight'), a=w(a + 'in_proj_a.weight'),
@@ -189,6 +198,25 @@ class Modelo:
             salida[h] = (puntos / puntos.sum()) @ V[kv]
         return capa['o'] @ (salida * sigmoide(puerta)).reshape(-1)
 
+    def _mlp(self, capa, x, volcar=None, i=0):
+        densa = capa['down'] @ (silu(capa['gate'] @ x) * (capa['up'] @ x))
+        if not self.expertos:
+            return densa
+        # Softmax sobre todos, los K mayores y renormalizar entre ellos.
+        logits = (capa['enrutador'] @ x).astype(np.float32)
+        probs = np.exp(logits - logits.max())
+        probs /= probs.sum()
+        elegidos = np.argsort(-probs, kind='stable')[:self.elegidos]
+        pesos = probs[elegidos] / probs[elegidos].sum()
+        if volcar is not None:
+            volcar['ruta%02d' % i].append(np.sort(elegidos).astype(np.float32))
+        intermedio = capa['exp_down'].shape[2]
+        salida = np.zeros_like(x)
+        for e, peso in zip(elegidos, pesos):
+            gate_up = capa['exp_gate_up'][e] @ x
+            salida += peso * (capa['exp_down'][e] @ (silu(gate_up[:intermedio]) * gate_up[intermedio:]))
+        return salida + sigmoide(capa['puerta_comun'] @ x) * densa
+
     # --- un token ----------------------------------------------------------------------
 
     def paso(self, token, volcar=None):
@@ -203,7 +231,7 @@ class Modelo:
             if volcar is not None:
                 volcar['attn%02d' % i].append(mezcla.copy())
             x = rms_centrada(h, capa['ln2'], self.eps)
-            h = h + capa['down'] @ (silu(capa['gate'] @ x) * (capa['up'] @ x))
+            h = h + self._mlp(capa, x, volcar, i)
             if volcar is not None:
                 volcar['capa%02d' % i].append(h.copy())
         self.pos += 1
@@ -224,7 +252,9 @@ def main():
     ap.add_argument('--dump', help='carpeta donde dejar la salida de cada capa')
     args = ap.parse_args()
 
-    vocab = json.loads((Path(args.modelo) / 'vocab.json').read_text())
+    # Un modelo sintético no trae vocabulario: se le habla con --ids.
+    fichero_vocab = Path(args.modelo) / 'vocab.json'
+    vocab = json.loads(fichero_vocab.read_text()) if fichero_vocab.exists() else {}
     por_id = {v: k for k, v in vocab.items()}
     if args.ids:
         ids = list(args.ids)

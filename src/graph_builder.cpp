@@ -164,20 +164,52 @@ ArchDescriptor GraphBuilder::detect_architecture(
     
     // Detect from layer 0
     std::string L0 = prefix + ".layer0.";
+
+    // Qwen3.5: capas de dos tipos. La atención se mira en la primera capa que lo sea; en esta
+    // familia la capa 0 es lineal y no trae ningún tensor de atención.
+    arch.layer_types = config.get<std::string>("layer_types", "");
+    if (!arch.layer_types.empty()) {
+        if (arch.layer_types.size() != arch.num_layers ||
+            arch.layer_types.find_first_not_of("la") != std::string::npos ||
+            arch.layer_types.find('a') == std::string::npos) {
+            throw std::runtime_error("layer_types no cuadra con las capas del modelo: " + arch.layer_types);
+        }
+        arch.lin_key_heads = (uint32_t)config.get<int64_t>("linear_num_key_heads", 0);
+        arch.lin_value_heads = (uint32_t)config.get<int64_t>("linear_num_value_heads", 0);
+        arch.lin_key_dim = (uint32_t)config.get<int64_t>("linear_key_head_dim", 0);
+        arch.lin_value_dim = (uint32_t)config.get<int64_t>("linear_value_head_dim", 0);
+        arch.lin_kernel = (uint32_t)config.get<int64_t>("linear_conv_kernel", 0);
+        arch.attn_output_gate = config.get<bool>("attn_output_gate", false);
+        if (arch.has_linear() && (arch.lin_key_heads == 0 || arch.lin_value_heads == 0 || arch.lin_key_dim == 0 ||
+                                  arch.lin_value_dim == 0 || arch.lin_kernel < 2 ||
+                                  arch.lin_value_heads % arch.lin_key_heads != 0)) {
+            throw std::runtime_error("faltan las dimensiones de la atención lineal en la configuración");
+        }
+    }
+    arch.moe_experts = (uint32_t)config.get<int64_t>("moe_experts", 0);
+    if (arch.has_moe()) {
+        arch.moe_top_k = (uint32_t)config.get<int64_t>("moe_top_k", 0);
+        arch.moe_intermediate = (uint32_t)config.get<int64_t>("moe_intermediate", 0);
+        if (arch.moe_top_k == 0 || arch.moe_top_k > arch.moe_experts || arch.moe_intermediate == 0) {
+            throw std::runtime_error("las dimensiones del MoE en la configuración no son válidas");
+        }
+    }
+    const std::string LA = prefix + ".layer" + std::to_string(
+        arch.layer_types.empty() ? size_t(0) : arch.layer_types.find('a')) + ".";
     
     // Attention: fused or separate QKV?
-    arch.has_fused_qkv = engine.tensors().exists(L0 + "attn.qkv_proj.weight");
+    arch.has_fused_qkv = engine.tensors().exists(LA + "attn.qkv_proj.weight");
     
     // Attention bias
     arch.has_qkv_bias = arch.has_fused_qkv
-        ? engine.tensors().exists(L0 + "attn.qkv_proj.bias")
-        : engine.tensors().exists(L0 + "attn.q_proj.bias");
+        ? engine.tensors().exists(LA + "attn.qkv_proj.bias")
+        : engine.tensors().exists(LA + "attn.q_proj.bias");
     
     // O projection bias
-    arch.has_o_proj_bias = engine.tensors().exists(L0 + "attn.o_proj.bias");
+    arch.has_o_proj_bias = engine.tensors().exists(LA + "attn.o_proj.bias");
 
     // QK-norm (Qwen3): RMSNorm por-head sobre Q y K antes de RoPE
-    arch.use_qk_norm = engine.tensors().exists(L0 + "attn.q_norm.weight");
+    arch.use_qk_norm = engine.tensors().exists(LA + "attn.q_norm.weight");
     
     // Norm names
     if (engine.tensors().exists(L0 + "ln_attn_in.weight")) {
@@ -370,6 +402,45 @@ void GraphBuilder::allocate_scratch(
         alloc("qkv_fused", {B, L, H * HD + 2 * KVH * HD});
     }
     
+    // Qwen3.5: la consulta doble y su puerta, y lo que mueve la capa lineal.
+    if (arch.attn_output_gate) {
+        alloc("q_doubled", {B, L, 2 * H * HD});
+        alloc("attn_gate", {B, L, H * HD});
+    }
+    if (arch.has_linear()) {
+        const uint32_t VD = arch.lin_value_heads * arch.lin_value_dim;
+        alloc("lin_qkv",   {B, L, arch.lin_channels()});
+        alloc("lin_mixed", {B, L, arch.lin_channels()});
+        alloc("lin_z",     {B, L, VD});
+        alloc("lin_a",     {B, L, arch.lin_value_heads});
+        alloc("lin_b",     {B, L, arch.lin_value_heads});
+        alloc("lin_out",   {B, L, VD});
+    }
+    if (arch.has_moe()) {
+        const uint32_t E = arch.moe_experts, K = arch.moe_top_k, I = arch.moe_intermediate;
+        const uint32_t P = (I + 255) / 256 * 256;      // columnas físicas de down si va en HQ44
+        const auto other = [&](const std::string& name, const std::vector<uint32_t>& shape, DTypeID type) {
+            engine.tensors().allocate_and_register(S(name), shape, type);
+            scratch_names_.push_back(S(name));
+        };
+        other("moe_router", {B, L, D}, dtype::FP32());
+        other("moe_logits", {B, L, E}, dtype::FP32());
+        other("moe_indices", {B, L, K}, dtype::INT32());
+        other("moe_weights", {B, L, K}, dtype::FP32());
+        alloc("moe_out", {B, L, D});
+        // Rango 2: un token de decode, no siguen la forma activa del lote.
+        other("moe_gate_up", {K, 2 * I}, dtype::FP16());
+        other("moe_hidden", {K, P}, dtype::FP16());
+        other("moe_rows", {K, D}, dtype::FP16());
+        // moe_route multiplica por una escala por experto que Qwen no tiene: unos.
+        other("moe_ones", {E}, dtype::FP16());
+        const std::vector<uint16_t> ones(E, 0x3C00);
+        if (cudaMemcpy(engine.tensors().get(S("moe_ones"))->ptr, ones.data(), E * sizeof(uint16_t),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            throw std::runtime_error("GraphBuilder: no pude inicializar la escala del MoE");
+        }
+    }
+
     // MLP
     alloc("gate",     {B, L, I});
     alloc("up",       {B, L, I});
@@ -1312,8 +1383,12 @@ CommandBuffer GraphBuilder::build_forward(
     
     // 2. Transformer layers
     for (uint32_t i = 0; i < arch.num_layers; i++) {
-        build_attention_block(cb, config, arch, i, batch_size, seq_len,
-                            position_offset, cache);
+        if (arch.is_linear(i)) {
+            build_linear_block(cb, config, arch, i, seq_len, cache);
+        } else {
+            build_attention_block(cb, config, arch, i, batch_size, seq_len,
+                                position_offset, cache);
+        }
         build_mlp_block(cb, config, arch, i, batch_size, seq_len);
     }
     
@@ -1503,8 +1578,17 @@ void GraphBuilder::build_attention_block(
                              q_size, kv_size, kv_size);
             cb.commands().back().set("seq_len", seq_len);
         } else {
-            cb.add_matmul(S("q"), S("normed"), W(arch, layer_idx, "attn.q_proj.weight"));
+            // Con puerta, q_proj saca el doble: por cabeza, la consulta y después la puerta.
+            cb.add_matmul(arch.attn_output_gate ? S("q_doubled") : S("q"), S("normed"),
+                          W(arch, layer_idx, "attn.q_proj.weight"));
         cb.commands().back().set("seq_len", seq_len);
+            if (arch.attn_output_gate) {
+                auto& split = cb.add_op(OpTypeRegistry::instance().get_id("split_query_gate"), S("q"));
+                split.in({S("q_doubled"), S("attn_gate")});
+                split.set("seq_len", seq_len);
+                split.set("num_heads", H);
+                split.set("head_dim", HD);
+            }
             cb.add_matmul(S("k"), S("normed"), W(arch, layer_idx, "attn.k_proj.weight"));
         cb.commands().back().set("seq_len", seq_len);
             cb.add_matmul(S("v"), S("normed"), W(arch, layer_idx, "attn.v_proj.weight"));
@@ -1658,7 +1742,12 @@ void GraphBuilder::build_attention_block(
                         seq_len, seq_len);
     }
     
-    // 5. Output projection
+    // 5. Output projection. Con puerta (Qwen3.5), la salida pasa antes por su sigmoide.
+    if (arch.attn_output_gate) {
+        auto& gate = cb.add_op(OpTypeRegistry::instance().get_id("sigmoid_mul"), S("attn_out"));
+        gate.in({S("attn_out"), S("attn_gate")});
+        gate.set("count", batch_size * seq_len * H * HD);
+    }
     cb.add_matmul(S("attn_proj"), S("attn_out"), W(arch, layer_idx, "attn.o_proj.weight"));
     cb.commands().back().set("seq_len", seq_len);
     
@@ -1668,6 +1757,59 @@ void GraphBuilder::build_attention_block(
     
     // 6. Residual (deferred to fused add_rmsnorm in mlp_block)
     // cb.add_add(S("residual"), S("hidden"), S("attn_proj")); // FUSED into mlp_block
+}
+
+// ============================================================================
+// LINEAR ATTENTION BLOCK (Gated DeltaNet, familia Qwen3.5)
+// ============================================================================
+
+// Los nombres del estado de una capa lineal, junto a los de la caché de su sesión.
+std::string GraphBuilder::linear_state_name(const std::string& kv_prefix, uint32_t layer) {
+    return kv_prefix + ".layer" + std::to_string(layer) + ".lin_state";
+}
+std::string GraphBuilder::linear_conv_name(const std::string& kv_prefix, uint32_t layer) {
+    return kv_prefix + ".layer" + std::to_string(layer) + ".lin_conv";
+}
+
+void GraphBuilder::build_linear_block(
+    CommandBuffer& cb,
+    const ModelConfig& config,
+    const ArchDescriptor& arch,
+    uint32_t layer_idx,
+    uint32_t seq_len,
+    const KVCacheParams* cache
+) {
+    if (!cache) {
+        throw std::runtime_error("GraphBuilder: una capa de atención lineal necesita el estado de una sesión");
+    }
+    const float eps = config.rms_norm_eps();
+    cb.add_rmsnorm(S("normed"), S("hidden"), W(arch, layer_idx, arch.pre_attn_norm + ".weight"), eps);
+    const auto project = [&](const char* dst, const char* weight) {
+        cb.add_matmul(S(dst), S("normed"), W(arch, layer_idx, weight));
+        cb.commands().back().set("seq_len", seq_len);
+    };
+    project("lin_qkv", "lin.qkv.weight");
+    project("lin_z", "lin.z.weight");
+    project("lin_a", "lin.a.weight");
+    project("lin_b", "lin.b.weight");
+
+    auto& conv = cb.add_op(OpTypeRegistry::instance().get_id("causal_conv_silu"), S("lin_mixed"));
+    conv.in({S("lin_qkv"), W(arch, layer_idx, "lin.conv.weight"), linear_conv_name(cache->kv_prefix, layer_idx)});
+    conv.set("seq_len", seq_len);
+
+    auto& rule = cb.add_op(OpTypeRegistry::instance().get_id("gated_delta_rule"), S("lin_out"));
+    rule.in({S("lin_mixed"), S("lin_z"), S("lin_a"), S("lin_b"),
+             W(arch, layer_idx, "lin.a_log"), W(arch, layer_idx, "lin.dt_bias"),
+             W(arch, layer_idx, "lin.norm.weight"), linear_state_name(cache->kv_prefix, layer_idx)});
+    rule.set("seq_len", seq_len);
+    rule.set("num_key_heads", arch.lin_key_heads);
+    rule.set("num_value_heads", arch.lin_value_heads);
+    rule.set("key_head_dim", arch.lin_key_dim);
+    rule.set("value_head_dim", arch.lin_value_dim);
+    rule.set("eps", eps);
+
+    cb.add_matmul(S("attn_proj"), S("lin_out"), W(arch, layer_idx, "lin.out.weight"));
+    cb.commands().back().set("seq_len", seq_len);
 }
 
 // ============================================================================
@@ -1734,7 +1876,30 @@ void GraphBuilder::build_mlp_block(
                       W(arch, layer_idx, "mlp." + arch.mlp_down_name + ".weight"));
     cb.commands().back().set("seq_len", seq_len);
     }
-    
+
+    // MoE de Qwen: lo anterior ha sido el experto compartido. Se le suman los expertos
+    // elegidos y él entra por su puerta. Enrutador y expertos leen la misma `normed`.
+    if (arch.has_moe()) {
+        const auto& ops = OpTypeRegistry::instance();
+        const uint32_t silu = arch.activation == ActivationType::SILU ? 1 : 0;
+        cb.add_op(ops.get_id("moe_widen"), S("moe_router")).in({S("normed")});
+        cb.add_moe_logits(S("moe_logits"), S("moe_router"), W(arch, layer_idx, "moe.router.weight"));
+        cb.add_moe_route(S("moe_indices"), S("moe_weights"), S("moe_logits"), S("moe_ones"), arch.moe_top_k);
+        if (batch_size * seq_len == 1) {
+            cb.add_moe_experts_decode(S("moe_out"), S("normed"), S("moe_indices"), S("moe_weights"),
+                                      W(arch, layer_idx, "moe.experts.gate_up.weight"),
+                                      W(arch, layer_idx, "moe.experts.down.weight"),
+                                      S("moe_gate_up"), S("moe_hidden"), S("moe_rows"));
+        } else {
+            cb.add_moe_experts(S("moe_out"), S("normed"), S("moe_indices"), S("moe_weights"),
+                               W(arch, layer_idx, "moe.experts.gate_up.weight"),
+                               W(arch, layer_idx, "moe.experts.down.weight"));
+        }
+        cb.commands().back().set("silu", silu);
+        cb.add_op(ops.get_id("moe_add_gated_shared"), S("mlp_out"))
+            .in({S("normed"), W(arch, layer_idx, "moe.shared_gate.weight"), S("moe_out")});
+    }
+
     // 3. Residual
     cb.add_add(S("hidden"), S("residual"), S("mlp_out"));
 }

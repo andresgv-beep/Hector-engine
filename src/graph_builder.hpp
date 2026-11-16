@@ -139,6 +139,18 @@ struct ArchDescriptor {
     
     // DType para scratch tensors (match modelo)
     DTypeID compute_dtype = 0;       // 0 = auto-detect from weights
+
+    // Familia Qwen3.5: capas de dos tipos. `layer_types` trae una letra por capa, `l` para
+    // Gated DeltaNet (atención lineal con estado) y `a` para atención. Vacía = todas atención.
+    std::string layer_types;
+    uint32_t lin_key_heads = 0, lin_value_heads = 0, lin_key_dim = 0, lin_value_dim = 0, lin_kernel = 0;
+    bool attn_output_gate = false;   // q_proj saca consulta y puerta; la salida va por su sigmoide
+    bool is_linear(uint32_t layer) const { return layer < layer_types.size() && layer_types[layer] == 'l'; }
+    bool has_linear() const { return layer_types.find('l') != std::string::npos; }
+    // MoE por el camino general (Qwen): la MLP densa de la capa es el experto compartido.
+    uint32_t moe_experts = 0, moe_top_k = 0, moe_intermediate = 0;
+    bool has_moe() const { return moe_experts != 0; }
+    uint32_t lin_channels() const { return 2 * lin_key_heads * lin_key_dim + lin_value_heads * lin_value_dim; }
 };
 
 // ============================================================================
@@ -370,6 +382,36 @@ public:
         uint32_t seq_len
     );
     
+    // El forward por piezas, para quien necesite mirar entre capas (herramientas de volcado):
+    // el embedding, una capa con su residual ya sumado en `hidden`, y la norma final con la
+    // cabeza. Encadenadas dan lo mismo que build_forward.
+    CommandBuffer build_embedding_only(const ArchDescriptor& arch, const std::string& input_tokens) {
+        CommandBuffer cb;
+        cb.add_embedding(S("hidden"), input_tokens, WG(arch, arch.embedding_name));
+        return cb;
+    }
+    CommandBuffer build_layer_only(const ModelConfig& config, const ArchDescriptor& arch, uint32_t layer,
+                                   uint32_t batch_size, uint32_t seq_len, const KVCacheParams& cache) {
+        CommandBuffer cb;
+        if (arch.is_linear(layer)) build_linear_block(cb, config, arch, layer, seq_len, &cache);
+        else build_attention_block(cb, config, arch, layer, batch_size, seq_len, cache.cache_position, &cache);
+        build_mlp_block(cb, config, arch, layer, batch_size, seq_len);
+        return cb;
+    }
+    CommandBuffer build_head_only(const ModelConfig& config, const ArchDescriptor& arch, uint32_t seq_len) {
+        CommandBuffer cb;
+        cb.add_rmsnorm(S("normed"), S("hidden"), WG(arch, arch.final_norm_name), config.rms_norm_eps());
+        cb.add_matmul(S("logits"), S("normed"), WG(arch, arch.lm_head_name.empty() ? arch.embedding_name : arch.lm_head_name));
+        cb.commands().back().set("seq_len", (uint32_t)1);
+        if (seq_len > 1) cb.commands().back().set("row_offset", seq_len - 1);
+        return cb;
+    }
+
+    // Qwen3.5: cómo se llaman, en el registro de tensores, el estado recurrente y el de la
+    // convolución de una capa lineal. Los reserva quien sea dueño de la sesión, como la caché.
+    static std::string linear_state_name(const std::string& kv_prefix, uint32_t layer);
+    static std::string linear_conv_name(const std::string& kv_prefix, uint32_t layer);
+
     // ========================================================================
     // BACKWARD COMPAT WRAPPER
     // ========================================================================
@@ -440,6 +482,17 @@ private:
         const KVCacheParams* cache
     );
     
+    // Capa Gated DeltaNet (Qwen3.5): norm → proyecciones → convolución → regla delta → out.
+    // Deja `attn_proj`, como la de atención. Necesita `cache`: el estado es de la sesión.
+    void build_linear_block(
+        CommandBuffer& cb,
+        const ModelConfig& config,
+        const ArchDescriptor& arch,
+        uint32_t layer_idx,
+        uint32_t seq_len,
+        const KVCacheParams* cache
+    );
+
     // MLP block: norm → MLP variant → residual
     void build_mlp_block(
         CommandBuffer& cb,

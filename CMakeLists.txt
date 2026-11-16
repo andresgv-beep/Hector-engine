@@ -240,6 +240,11 @@ target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 add_executable(test_delta_net tests/test_delta_net.cu)
 target_link_libraries(test_delta_net PRIVATE helios-engine)
 
+# Qwen3.5 capa a capa: vuelca cada salida para compararla con tools/reference/qwen35_ref.py.
+# No es un add_test: necesita un HNF que no vive en el repositorio.
+add_executable(qwen35_dump tools/qwen35_dump.cu)
+target_link_libraries(qwen35_dump PRIVATE helios-engine)
+
 # Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
 # un add_test porque esos datos no viven en el repositorio.
 add_executable(gemma4_moe_generate tools/gemma4_moe_generate.cu)

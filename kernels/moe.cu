@@ -142,7 +142,7 @@ __global__ void moe_gather_rows_kernel(
 // gate_up trae gate en la primera mitad de cada fila y up en la segunda. La salida
 // tiene P columnas: las que pasan de I son el relleno de down y van a cero.
 __global__ void moe_gate_up_mul_kernel(
-    const half* __restrict__ gate_up, half* __restrict__ output, int M, int I, int P
+    const half* __restrict__ gate_up, half* __restrict__ output, int M, int I, int P, int silu
 ) {
     const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i >= size_t(M) * P) return;
@@ -153,9 +153,44 @@ __global__ void moe_gate_up_mul_kernel(
     }
     const float x = __half2float(gate_up[size_t(row) * 2 * I + column]);
     const float up = __half2float(gate_up[size_t(row) * 2 * I + I + column]);
+    if (silu) {
+        output[i] = __float2half(x / (1.0f + expf(-x)) * up);
+        return;
+    }
     const float x3 = x * x * x;
     const float gelu = 0.5f * x * (1.0f + tanhf(0.79788456f * (x + 0.044715f * x3)));
     output[i] = __float2half(gelu * up);
+}
+
+// Qwen: el enrutador lee la salida de la norma tal cual. Solo se pasa a FP32, que es donde
+// trabaja moe_logits_kernel.
+__global__ void moe_widen_kernel(const half* __restrict__ input, float* __restrict__ output, size_t count) {
+    const size_t i = size_t(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (i < count) output[i] = __half2float(input[i]);
+}
+
+// Qwen3.5 MoE: dense trae la salida del experto compartido y sale con
+// expertos + sigmoide(puerta · x) · compartido. Un bloque por token.
+__global__ void moe_add_gated_shared_kernel(
+    const half* __restrict__ input, const half* __restrict__ gate, const half* __restrict__ experts,
+    half* __restrict__ dense, int H
+) {
+    extern __shared__ float partial[];
+    const half* x = input + size_t(blockIdx.x) * H;
+    const half* e = experts + size_t(blockIdx.x) * H;
+    half* d = dense + size_t(blockIdx.x) * H;
+    float sum = 0.0f;
+    for (int c = threadIdx.x; c < H; c += blockDim.x) sum += __half2float(x[c]) * __half2float(gate[c]);
+    partial[threadIdx.x] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) partial[threadIdx.x] += partial[threadIdx.x + s];
+        __syncthreads();
+    }
+    const float open = 1.0f / (1.0f + expf(-partial[0]));
+    for (int c = threadIdx.x; c < H; c += blockDim.x) {
+        d[c] = __float2half(__half2float(e[c]) + open * __half2float(d[c]));
+    }
 }
 
 __global__ void moe_scatter_add_kernel(
@@ -284,11 +319,11 @@ void launch_moe_route(const float* logits, const half* expert_scale, int32_t* in
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, int P, cudaStream_t stream) {
+                               int K, int H, int I, int P, cudaStream_t stream, bool silu) {
     if (K <= 0 || H <= 0 || I <= 0 || P < I) throw std::invalid_argument("MoE decode: dimensiones inválidas");
     indexed_gemv(input, indices, gate_up, gate_up_hq44, gate_up_scratch, 0, K, 2 * I, H, stream);
     moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * P), MOE_BLOCK, 0, stream>>>(
-        gate_up_scratch, hidden_scratch, K, I, P);
+        gate_up_scratch, hidden_scratch, K, I, P, silu ? 1 : 0);
     indexed_gemv(hidden_scratch, indices, down, down_hq44, rows_scratch, P, K, H, P, stream);
     moe_weighted_sum_kernel<<<blocks_for(H), MOE_BLOCK, 0, stream>>>(rows_scratch, weights, output, K, H);
 }
@@ -323,9 +358,21 @@ void launch_moe_probabilities(const float* logits, float* probabilities, int L, 
     moe_probabilities_kernel<<<L, 1, 0, stream>>>(logits, probabilities, L, E);
 }
 
-void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream) {
+void launch_moe_gate_up_mul(const half* gate_up, half* output, int M, int I, int P, cudaStream_t stream, bool silu) {
     if (M <= 0 || I <= 0 || P < I) throw std::invalid_argument("MoE gate_up: dimensiones inválidas");
-    moe_gate_up_mul_kernel<<<blocks_for(size_t(M) * P), MOE_BLOCK, 0, stream>>>(gate_up, output, M, I, P);
+    moe_gate_up_mul_kernel<<<blocks_for(size_t(M) * P), MOE_BLOCK, 0, stream>>>(gate_up, output, M, I, P, silu ? 1 : 0);
+}
+
+void launch_moe_widen(const half* input, float* output, size_t count, cudaStream_t stream) {
+    if (count == 0) return;
+    moe_widen_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(input, output, count);
+}
+
+void launch_moe_add_gated_shared(const half* input, const half* gate, const half* experts, half* dense,
+                                 int L, int H, cudaStream_t stream) {
+    if (L <= 0 || H <= 0) throw std::invalid_argument("MoE experto compartido: dimensiones inválidas");
+    const int threads = 128;
+    moe_add_gated_shared_kernel<<<L, threads, threads * sizeof(float), stream>>>(input, gate, experts, dense, H);
 }
 
 void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
@@ -339,7 +386,8 @@ void launch_pad_columns_fp16(const half* input, half* output, int M, int logical
 
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
-                               half* output, int L, int E, int K, int H, int I, int P, cudaStream_t stream) {
+                               half* output, int L, int E, int K, int H, int I, int P, cudaStream_t stream,
+                               bool silu) {
     if (L <= 0 || E <= 0 || K <= 0 || H <= 0 || I <= 0 || P < I) {
         throw std::invalid_argument("MoE expertos: dimensiones inválidas");
     }
@@ -386,7 +434,8 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
             input, device_tokens.data, gathered.data, M, H);
         expert_matmul(gathered.data, gate_up, gate_up_hq44, expert, gate_up_stride, dequant.data,
                       gate_up_out.data, M, H, 2 * I, stream);
-        moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I, P);
+        moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I, P,
+                                                                            silu ? 1 : 0);
         expert_matmul(hidden.data, down, down_hq44, expert, down_stride, dequant.data, rows.data,
                       M, P, H, stream);
         moe_scatter_add_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
