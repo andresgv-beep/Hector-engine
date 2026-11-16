@@ -260,6 +260,8 @@ add_executable(test_gptq tests/test_gptq.cu)
 target_link_libraries(test_gptq PRIVATE helios-gptq)
 add_executable(hnf_refine tools/hnf_refine.cu)
 target_link_libraries(hnf_refine PRIVATE helios-gptq)
+add_executable(qwen35_refine tools/qwen35_refine.cu)
+target_link_libraries(qwen35_refine PRIVATE helios-gptq)
 
 add_executable(test_gemma4_split tests/test_gemma4_split.cu)
 target_link_libraries(test_gemma4_split PRIVATE helios-engine)
