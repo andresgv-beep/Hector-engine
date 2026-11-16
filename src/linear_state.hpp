@@ -9,9 +9,14 @@
 // el grafo (GraphBuilder::linear_state_name y linear_conv_name).
 //
 // Una caché se rebobina moviendo la posición; un estado recurrente no se puede deshacer.
-// Por eso se guardan copias en RAM en los puntos a los que una sesión vuelve (el principio
-// de un turno, el final de su prefill). Rebobinar a una posición restaura la copia más
-// cercana por debajo, y quien llama vuelve a procesar lo que falte desde ahí.
+// Por eso se guardan copias en RAM. Rebobinar a una posición restaura la copia más cercana
+// por debajo, y quien llama vuelve a procesar lo que falte desde ahí. Hay dos clases:
+//
+//   - anclas: los puntos a los que una sesión vuelve de verdad, el principio de un turno y
+//     el final de su prompt. Se conservan las de los últimos turnos.
+//   - de paso: cada tanda de prefill y cada kEvery tokens generados. Acotan cuánto hay que
+//     volver a procesar si el turno siguiente se aparta a mitad de una respuesta. Solo se
+//     conservan las más recientes, y nunca desalojan a un ancla.
 #pragma once
 
 #include "engine.hpp"
@@ -90,13 +95,26 @@ public:
         }
     }
 
+    // Cada cuántos tokens generados se deja una copia de paso.
+    static constexpr uint32_t kEvery = 256;
+
     // Guarda el estado tal como está, que corresponde a `position` tokens procesados. El
     // llamante ha sincronizado ya el flujo de cómputo.
-    void save(uint32_t position) {
+    void save(uint32_t position, bool anchor) {
         if (!data_) return;
-        while (!snapshots_.empty() && snapshots_.back().position >= position) snapshots_.pop_back();
-        if (snapshots_.size() >= kMaxSnapshots) snapshots_.pop_front();
-        Snapshot snapshot{position, std::vector<char>(bytes_)};
+        while (!snapshots_.empty() && snapshots_.back().position >= position) {
+            anchor = anchor || (snapshots_.back().position == position && snapshots_.back().anchor);
+            snapshots_.pop_back();
+        }
+        // La más antigua de su clase deja sitio.
+        size_t same = 0;
+        for (const Snapshot& s : snapshots_) same += s.anchor == anchor ? 1 : 0;
+        if (same >= (anchor ? kMaxAnchors : kMaxPassing)) {
+            for (auto it = snapshots_.begin(); it != snapshots_.end(); ++it) {
+                if (it->anchor == anchor) { snapshots_.erase(it); break; }
+            }
+        }
+        Snapshot snapshot{position, anchor, std::vector<char>(bytes_)};
         if (cudaMemcpy(snapshot.bytes.data(), data_, bytes_, cudaMemcpyDeviceToHost) != cudaSuccess) {
             throw std::runtime_error("no pude copiar el estado de las capas lineales");
         }
@@ -116,9 +134,10 @@ public:
     }
 
 private:
-    struct Snapshot { uint32_t position; std::vector<char> bytes; };
-    // 63 MB cada una en el 35B. Bastan los últimos turnos: más atrás se vuelve a procesar.
-    static constexpr size_t kMaxSnapshots = 6;
+    struct Snapshot { uint32_t position; bool anchor; std::vector<char> bytes; };
+    // 63 MB cada una en el 35B: 1 GB de RAM como mucho. Más atrás se vuelve a procesar.
+    static constexpr size_t kMaxAnchors = 8;
+    static constexpr size_t kMaxPassing = 8;
 
     float* data_ = nullptr;
     size_t bytes_ = 0;

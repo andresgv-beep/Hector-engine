@@ -306,10 +306,10 @@ struct InferenceSession::Impl {
     // renuncia en vez de llevar una cuenta que ya no cuadra.
     void untrack() { kv_tracked = false; kv_tokens.clear(); }
     // Un punto al que se podrá volver. Sin capas lineales no hace nada.
-    void snapshot() {
+    void snapshot(bool anchor) {
         if (!linear.active()) return;
         engine->sync();
-        linear.save(position());
+        linear.save(position(), anchor);
     }
     bool prefix_usable() const {
         return kv_tracked && kv_tokens.size() == position();
@@ -459,6 +459,7 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
         engine->execute(decode_cb);
     }
     advance(1);
+    if (position() % LinearState::kEvery == 0) snapshot(false);
     if (kv_tracked) kv_tokens.push_back(token);
     auto* logits = gb.get_logits(*engine);
     return sampler.sample((const half*)logits->ptr, model_config.vocab_size(),
@@ -514,6 +515,7 @@ std::optional<int32_t> InferenceSession::Impl::forward_batch(
         if (!M.split) engine->execute(pcb);
         engine->sync();
         advance(static_cast<uint32_t>(n));
+        snapshot(false);
         if (kv_tracked) kv_tokens.insert(kv_tokens.end(), ids.begin() + done,
                                          ids.begin() + done + n);
         auto* logits = gb.get_logits(*engine);
@@ -1074,7 +1076,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     stats->prefill_reused = reutilizados;
     const uint32_t base = s.position();
     // El principio del turno es a donde se vuelve si se cancela o falla.
-    s.snapshot();
+    s.snapshot(true);
     stats->cache_position_before = base;
     stats->cache_position = base;
     if (base + ids.size() + 8 >= s.kv_config.max_seq_len) {
@@ -1196,7 +1198,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             if (result) next = *result;
             // El final del prompt: a donde vuelve el turno siguiente si la respuesta que
             // viene ahora no se reenvía igual (pensamiento recortado, otra generación).
-            if (result) s.snapshot();
+            if (result) s.snapshot(true);
         }
         auto t1 = clock::now();
         stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();

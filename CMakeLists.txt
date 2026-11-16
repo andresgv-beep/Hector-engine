@@ -436,6 +436,9 @@ target_link_libraries(test_inference_session_gemma4 PRIVATE helios-engine)
 
 add_executable(test_inference_cancellation tests/test_inference_cancellation.cpp)
 target_link_libraries(test_inference_cancellation PRIVATE helios-engine)
+# Tampoco es un add_test: necesita un HNF de la familia Qwen3.5.
+add_executable(test_qwen35_session tests/test_qwen35_session.cpp)
+target_link_libraries(test_qwen35_session PRIVATE helios-engine)
 
 # ============================================================================
 # Info
