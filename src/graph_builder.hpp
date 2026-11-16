@@ -191,10 +191,13 @@ public:
     
     // Detectar arquitectura desde tensores cargados + enriquecer con config
     // Llamar DESPUÉS de load_block()
+    // Con el modelo repartido entre GPUs el motor solo tiene las primeras capas: se le
+    // dice cuántas son en total con `known_layers`, en vez de contarlas.
     ArchDescriptor detect_architecture(
         const Engine& engine,
         const std::string& prefix,
-        const ModelConfig& config = ModelConfig{}
+        const ModelConfig& config = ModelConfig{},
+        uint32_t known_layers = 0
     ) const;
     
     // ========================================================================
@@ -396,6 +399,26 @@ public:
         if (arch.is_linear(layer)) build_linear_block(cb, config, arch, layer, seq_len, &cache);
         else build_attention_block(cb, config, arch, layer, batch_size, seq_len, cache.cache_position, &cache);
         build_mlp_block(cb, config, arch, layer, batch_size, seq_len);
+        return cb;
+    }
+    // Lo mismo por tramos y con caché, para repartir un modelo entre dos GPUs: la entrada
+    // y las capas [first, end) de cada motor, y la cabeza. Ajustan la forma activa de sus
+    // scratch, como build_forward. Encadenados dan build_forward_cached.
+    CommandBuffer build_span_input(Engine& engine, const ArchDescriptor& arch, const std::string& input_tokens,
+                                   uint32_t batch_size, uint32_t seq_len) {
+        set_active_scratch_shape(engine, batch_size, seq_len);
+        return build_embedding_only(arch, input_tokens);
+    }
+    CommandBuffer build_span_layers(Engine& engine, const ModelConfig& config, const ArchDescriptor& arch,
+                                    uint32_t first, uint32_t end, uint32_t batch_size, uint32_t seq_len,
+                                    const KVCacheParams& cache) {
+        set_active_scratch_shape(engine, batch_size, seq_len);
+        CommandBuffer cb;
+        for (uint32_t layer = first; layer < end; ++layer) {
+            if (arch.is_linear(layer)) build_linear_block(cb, config, arch, layer, seq_len, &cache);
+            else build_attention_block(cb, config, arch, layer, batch_size, seq_len, cache.cache_position, &cache);
+            build_mlp_block(cb, config, arch, layer, batch_size, seq_len);
+        }
         return cb;
     }
     CommandBuffer build_head_only(const ModelConfig& config, const ArchDescriptor& arch, uint32_t seq_len) {

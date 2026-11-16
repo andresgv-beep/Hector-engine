@@ -135,7 +135,8 @@ static RoPEType parse_rope_type(const std::string& s) {
 ArchDescriptor GraphBuilder::detect_architecture(
     const Engine& engine,
     const std::string& prefix,
-    const ModelConfig& config
+    const ModelConfig& config,
+    uint32_t known_layers
 ) const {
     ArchDescriptor arch;
     arch.prefix = prefix;
@@ -161,6 +162,7 @@ ArchDescriptor GraphBuilder::detect_architecture(
     if (arch.num_layers == 0) {
         throw std::runtime_error("No layers found for prefix: " + prefix);
     }
+    if (known_layers) arch.num_layers = known_layers;
     
     // Detect from layer 0
     std::string L0 = prefix + ".layer0.";

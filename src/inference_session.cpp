@@ -191,8 +191,11 @@ struct InferenceSession::Impl {
     KVCache kv_cache;
     Gemma4KVCache gemma_kv_cache;
     Gemma4KVCache secondary_kv_cache;
-    // Qwen3.5: el estado de las capas lineales, que no llevan caché.
+    // Qwen3.5: el estado de las capas lineales, que no llevan caché. Con el modelo
+    // repartido, la caché y el estado de las capas de la segunda GPU viven allí.
     LinearState linear;
+    KVCache secondary_plain_cache;
+    LinearState secondary_linear;
     std::vector<char> saved_rings;
     std::vector<char> secondary_saved_rings;
     Sampler sampler;
@@ -234,6 +237,13 @@ struct InferenceSession::Impl {
         // External tensor views must not outlive this session's allocations.
         if (!kv_prefix.empty()) {
             linear.release(*engine);
+            if (M.split && !is_gemma4) {
+                // Lo reservado en la segunda GPU se libera con ella activa.
+                M.secondary_engine->activate();
+                secondary_linear.release(*M.secondary_engine);
+                secondary_plain_cache.free();
+                engine->activate();
+            }
             // Todas las capas del modelo: con capas lineales la caché solo cubre las de
             // atención y sus nombres no son correlativos.
             for (uint32_t l = 0; l < arch.num_layers; ++l) {
@@ -257,8 +267,18 @@ struct InferenceSession::Impl {
     // Las mismas piezas de build_gemma4_forward_cached, cada una en su GPU.
     void build_split(uint32_t seq, uint32_t pos, CommandBuffer& first, CommandBuffer& rest,
                      CommandBuffer& head) {
-        const Gemma4Config& gemma = loader.gemma4_config();
         const KVCacheParams params{kv_prefix, pos, kv_config.max_seq_len};
+        if (!is_gemma4) {
+            M.secondary_engine->activate();
+            rest = M.secondary_gb.build_span_layers(*M.secondary_engine, model_config, arch,
+                                                    M.split_boundary, arch.num_layers, 1, seq, params);
+            engine->activate();
+            first = gb.build_span_input(*engine, arch, "input_tokens", 1, seq);
+            first.append(gb.build_span_layers(*engine, model_config, arch, 0, M.split_boundary, 1, seq, params));
+            head = gb.build_head_only(model_config, arch, seq);
+            return;
+        }
+        const Gemma4Config& gemma = loader.gemma4_config();
         M.secondary_engine->activate();
         rest = M.secondary_gb.build_gemma4_layers_cached(
             *M.secondary_engine, model_config, gemma, arch, M.split_boundary, arch.num_layers,
@@ -285,8 +305,15 @@ struct InferenceSession::Impl {
         // Un estado recurrente no se deshace: se vuelve a la copia más cercana por debajo
         // y la sesión queda AHÍ, no en p. Quien llama mira position() después.
         if (linear.active() && p < position()) {
-            engine->sync();
+            sync_all();
             const std::optional<uint32_t> restored = linear.restore_at_or_before(p);
+            if (secondary_linear.active()) {
+                // Las dos se guardan a la vez, así que caen en la misma copia.
+                M.secondary_engine->activate();
+                const std::optional<uint32_t> other = secondary_linear.restore_at_or_before(p);
+                engine->activate();
+                if (other != restored) { clear(); return; }
+            }
             if (!restored) { clear(); return; }
             p = *restored;
         }
@@ -296,7 +323,15 @@ struct InferenceSession::Impl {
     }
     void clear() {
         if (is_gemma4) gemma_kv_cache.reset(); else kv_cache.reset();
-        if (linear.active()) { engine->sync(); linear.reset(); }
+        if (linear.active()) {
+            sync_all();
+            linear.reset();
+            if (secondary_linear.active()) {
+                M.secondary_engine->activate();
+                secondary_linear.reset();
+                engine->activate();
+            }
+        }
         kv_tokens.clear();
         kv_tracked = true;
         published_position.store(0, std::memory_order_relaxed);
@@ -308,8 +343,22 @@ struct InferenceSession::Impl {
     // Un punto al que se podrá volver. Sin capas lineales no hace nada.
     void snapshot(bool anchor) {
         if (!linear.active()) return;
-        engine->sync();
+        sync_all();
         linear.save(position(), anchor);
+        if (secondary_linear.active()) {
+            M.secondary_engine->activate();
+            secondary_linear.save(position(), anchor);
+            engine->activate();
+        }
+    }
+    // Con el modelo repartido, lo pendiente en las dos tarjetas.
+    void sync_all() {
+        if (M.split) {
+            M.secondary_engine->activate();
+            M.secondary_engine->sync();
+            engine->activate();
+        }
+        engine->sync();
     }
     bool prefix_usable() const {
         return kv_tracked && kv_tokens.size() == position();
@@ -583,14 +632,19 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         s.engine = std::make_unique<Engine>(s.engine_config);
         kernels::register_all_kernels(*s.engine);
         if (second_gpu_used) {
-            const cudaError_t second_gpu = cudaSetDevice(1);
+            // Con el reparto forzado en un equipo de una sola tarjeta, los dos motores van
+            // sobre ella (HELIOS_REPARTO_FORZADO, solo para pruebas).
+            int devices = 0;
+            if (cudaGetDeviceCount(&devices) != cudaSuccess) devices = 1;
+            const int second_device = devices >= 2 ? 1 : 0;
+            const cudaError_t second_gpu = cudaSetDevice(second_device);
             const cudaError_t second_stream = second_gpu == cudaSuccess
                 ? cudaStreamCreate(&s.secondary_stream.handle) : second_gpu;
             if (second_stream != cudaSuccess) {
                 throw std::runtime_error(std::string("segunda GPU: ") + cudaGetErrorString(second_stream));
             }
             EngineConfig secondary_config = s.engine_config;
-            secondary_config.device = 1;
+            secondary_config.device = second_device;
             secondary_config.stream = s.secondary_stream.handle;
             s.secondary_engine = std::make_unique<Engine>(secondary_config);
             kernels::register_all_kernels(*s.secondary_engine);
@@ -655,8 +709,13 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
 
         // El grafo y sus buffers de trabajo son del MODELO: los comparten
         // todas las sesiones, y por eso los turnos van en serie.
-        s.arch = s.split_active() ? gemma4_split_arch(s.model_config.num_hidden_layers())
-                                  : s.gb.detect_architecture(*s.engine, "text", s.model_config);
+        // Repartido, cada motor solo ve sus capas. Gemma no necesita detectar nada; el
+        // camino general detecta en la principal, que tiene la capa 0 y la primera de
+        // atención (gemma4_placement lo garantiza), y se le dice cuántas son en total.
+        s.arch = !s.split_active() ? s.gb.detect_architecture(*s.engine, "text", s.model_config)
+               : s.is_gemma4 ? gemma4_split_arch(s.model_config.num_hidden_layers())
+               : s.gb.detect_architecture(*s.engine, "text", s.model_config,
+                                          s.model_config.num_hidden_layers());
         if (s.is_gemma4 && s.loader.gemma4_config().has_flag(GEMMA4_EXT_FLAG_MOE)) {
             const auto problems = validate_gemma4_moe_tensors(
                 s.loader.gemma4_config(), s.model_config.hidden_size(), s.loader.tensors());
@@ -686,6 +745,12 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
         } else {
             s.gb.allocate_scratch(*s.engine, s.model_config, s.arch,
                                   1, scratch_tokens);
+            if (s.split_active()) {
+                s.secondary_engine->activate();
+                s.secondary_gb.allocate_scratch(*s.secondary_engine, s.model_config, s.arch, 1, scratch_tokens);
+                s.engine->activate();
+                s.split = std::make_unique<Gemma4SplitForward>(*s.engine, *s.secondary_engine, "_s.hidden");
+            }
         }
 
         // Mismos valores por defecto que el oraculo: esto no cambia conducta.
@@ -824,10 +889,12 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
             : (M.sesiones == 0 ? "_kv" : "_kv_s" + std::to_string(M.sesiones));
         M.sesiones++;
 
-        // Con capas lineales (Qwen3.5) la caché es solo de las capas de atención.
-        std::vector<uint32_t> cached_layers;
+        // Con capas lineales (Qwen3.5) la caché es solo de las capas de atención. Con el
+        // modelo repartido, la de cada capa vive en la GPU de esa capa.
+        const uint32_t boundary = M.split ? M.split_boundary : s.arch.num_layers;
+        std::vector<uint32_t> cached_layers, secondary_cached_layers;
         for (uint32_t l = 0; l < s.arch.num_layers; ++l) {
-            if (!s.arch.is_linear(l)) cached_layers.push_back(l);
+            if (!s.arch.is_linear(l)) (l < boundary ? cached_layers : secondary_cached_layers).push_back(l);
         }
         s.kv_config.num_layers = static_cast<uint32_t>(cached_layers.size());
         s.kv_config.num_kv_heads = M.model_config.num_key_value_heads();
@@ -867,30 +934,45 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                 }
             }
         } else {
-            if (!s.kv_cache.allocate(s.kv_config)) {
+            // Nombres y forma EXACTOS del oraculo: el grafo los busca por
+            // "<prefijo>.layerN.k" y con esta disposicion concreta.
+            const auto reserve = [&](KVCache& cache, Engine& owner, const std::vector<uint32_t>& layers) {
+                KVCacheConfig c = s.kv_config;
+                c.num_layers = static_cast<uint32_t>(layers.size());
+                if (!cache.allocate(c)) return false;
+                for (uint32_t slot = 0; slot < c.num_layers; slot++) {
+                    TensorInfo k_info;
+                    k_info.ptr = cache.k_cache(slot);
+                    k_info.shape = {c.max_batch_size, c.max_seq_len, c.num_kv_heads, c.head_dim};
+                    k_info.dtype = dtype::FP16();
+                    k_info.size_bytes = (size_t)c.max_batch_size * c.max_seq_len *
+                                        c.num_kv_heads * c.head_dim * sizeof(half);
+                    k_info.owns_memory = false;
+                    TensorInfo v_info = k_info;
+                    v_info.ptr = cache.v_cache(slot);
+                    const std::string base = s.kv_prefix + ".layer" + std::to_string(layers[slot]);
+                    owner.tensors().register_tensor(base + ".k", k_info);
+                    owner.tensors().register_tensor(base + ".v", v_info);
+                }
+                return true;
+            };
+            // La posición de la sesión la lleva la caché de la principal.
+            if (!reserve(s.kv_cache, *s.engine, cached_layers)) {
                 *error = "no pude reservar el KV";
                 return false;
             }
-            // Nombres y forma EXACTOS del oraculo: el grafo los busca por
-            // "<prefijo>.layerN.k" y con esta disposicion concreta.
-            const auto& c = s.kv_cache.config();
-            for (uint32_t slot = 0; slot < c.num_layers; slot++) {
-                const uint32_t l = cached_layers[slot];
-                TensorInfo k_info;
-                k_info.ptr = s.kv_cache.k_cache(slot);
-                k_info.shape = {c.max_batch_size, c.max_seq_len,
-                                c.num_kv_heads, c.head_dim};
-                k_info.dtype = dtype::FP16();
-                k_info.size_bytes = (size_t)c.max_batch_size * c.max_seq_len *
-                                    c.num_kv_heads * c.head_dim * sizeof(half);
-                k_info.owns_memory = false;
-                TensorInfo v_info = k_info;
-                v_info.ptr = s.kv_cache.v_cache(slot);
-                const std::string base = s.kv_prefix + ".layer" + std::to_string(l);
-                s.engine->tensors().register_tensor(base + ".k", k_info);
-                s.engine->tensors().register_tensor(base + ".v", v_info);
+            s.linear.allocate(*s.engine, s.kv_prefix, s.arch, 0, boundary);
+            if (M.split) {
+                M.secondary_engine->activate();
+                const bool reserved = secondary_cached_layers.empty() ||
+                    reserve(s.secondary_plain_cache, *M.secondary_engine, secondary_cached_layers);
+                if (reserved) s.secondary_linear.allocate(*M.secondary_engine, s.kv_prefix, s.arch, boundary, s.arch.num_layers);
+                s.engine->activate();
+                if (!reserved) {
+                    *error = "no pude reservar el KV de la segunda GPU";
+                    return false;
+                }
             }
-            s.linear.allocate(*s.engine, s.kv_prefix, s.arch);
         }
 
         // Muestreador PROPIO: las penalizaciones son historia de ESTA

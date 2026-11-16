@@ -125,7 +125,54 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
     if (cudaGetDeviceCount(&devices) != cudaSuccess) devices = 0;
     Gemma4Placement single;
     single.fit = Gemma4Fit::Single;
-    if (devices < 1 || !loader.has_gemma4_config()) return single;   // fuera de Gemma 4, como siempre
+    if (devices < 1) return single;
+    if (!loader.has_gemma4_config()) {
+        // Fuera de Gemma 4 solo se reparte la familia Qwen3.5, que trae el tipo de cada capa.
+        const ModelConfig& config = loader.config();
+        const std::string types = config.get<std::string>("layer_types", "");
+        if (types.empty()) return single;                            // los demás, como siempre
+        const uint32_t first_attention = uint32_t(types.find('a'));
+        // HELIOS_REPARTO_FORZADO=N corta en la capa N aunque quepa en una tarjeta, o aunque
+        // solo haya una (entonces los dos motores van sobre ella). Es para probar el reparto
+        // sin dos GPUs: gasta el doble de memoria de trabajo y no sirve para nada más.
+        if (const char* forced = getenv("HELIOS_REPARTO_FORZADO")) {
+            const uint32_t boundary = uint32_t(std::atoi(forced));
+            if (boundary <= first_attention || boundary >= types.size()) {
+                throw std::runtime_error("HELIOS_REPARTO_FORZADO fuera de rango para este modelo");
+            }
+            Gemma4Placement out;
+            out.fit = Gemma4Fit::Split;
+            out.boundary = boundary;
+            return out;
+        }
+        std::vector<uint64_t> layer_bytes(types.size(), 0);
+        uint64_t common_bytes = 0;
+        for (const TensorEntry& tensor : loader.tensors()) {
+            if (tensor.block != "text_model") continue;
+            if (loader.tensor_lives_in_host_ram(tensor)) continue;
+            const int layer = layer_index(tensor.name);
+            if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
+            (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
+        }
+        // Caché solo en las capas de atención; las lineales llevan un estado de tamaño fijo.
+        const uint64_t cache = 2 * sizeof(uint16_t) * uint64_t(max_seq) * config.num_key_value_heads() * config.head_dim();
+        const uint64_t value_heads = uint64_t(config.get<int64_t>("linear_num_value_heads", 0));
+        const uint64_t key_heads = uint64_t(config.get<int64_t>("linear_num_key_heads", 0));
+        const uint64_t key_dim = uint64_t(config.get<int64_t>("linear_key_head_dim", 0));
+        const uint64_t value_dim = uint64_t(config.get<int64_t>("linear_value_head_dim", 0));
+        const uint64_t kernel = uint64_t(config.get<int64_t>("linear_conv_kernel", 0));
+        const uint64_t state = sizeof(float) * (value_heads * key_dim * value_dim +
+            (2 * key_heads * key_dim + value_heads * value_dim) * (kernel ? kernel - 1 : 0));
+        for (size_t i = 0; i < layer_bytes.size(); ++i) layer_bytes[i] += types[i] == 'a' ? cache : state;
+        const uint64_t primary_free = usable_vram(0);
+        const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
+        check(cudaSetDevice(0), "elegir GPU");
+        Gemma4Placement out = plan_gemma4_placement(layer_bytes, common_bytes, 0, primary_free, secondary_free, true);
+        // La arquitectura se detecta en la principal, que tiene que tener la capa 0 y la
+        // primera de atención. Con menos capas que eso allí, este modelo no se reparte.
+        if (out.fit == Gemma4Fit::Split && out.boundary <= first_attention) out.fit = Gemma4Fit::NoFit;
+        return out;
+    }
     const ModelConfig& config = loader.config();
     const Gemma4Config& gemma = loader.gemma4_config();
     std::vector<uint64_t> layer_bytes(gemma.layers.size(), 0);

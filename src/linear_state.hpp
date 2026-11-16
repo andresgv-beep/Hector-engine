@@ -24,6 +24,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <optional>
@@ -44,12 +45,15 @@ public:
     size_t bytes() const { return bytes_; }
     size_t snapshots() const { return snapshots_.size(); }
 
-    // Reserva y registra el estado de todas las capas lineales, a cero.
-    void allocate(Engine& engine, const std::string& prefix, const ArchDescriptor& arch) {
+    // Reserva y registra el estado de las capas lineales de [first, end), a cero, en la
+    // GPU activa. Con el modelo repartido hay uno por motor.
+    void allocate(Engine& engine, const std::string& prefix, const ArchDescriptor& arch,
+                  uint32_t first = 0, uint32_t end = UINT32_MAX) {
+        end = std::min(end, arch.num_layers);
         const size_t state = size_t(arch.lin_value_heads) * arch.lin_key_dim * arch.lin_value_dim;
         const size_t conv = size_t(arch.lin_channels()) * (arch.lin_kernel - 1);
         size_t layers = 0;
-        for (uint32_t l = 0; l < arch.num_layers; ++l) layers += arch.is_linear(l) ? 1 : 0;
+        for (uint32_t l = first; l < end; ++l) layers += arch.is_linear(l) ? 1 : 0;
         if (layers == 0) return;
         bytes_ = layers * (state + conv) * sizeof(float);
         if (cudaMalloc(&data_, bytes_) != cudaSuccess) {
@@ -68,7 +72,7 @@ public:
             names_.push_back(name);
             at += count;
         };
-        for (uint32_t l = 0; l < arch.num_layers; ++l) {
+        for (uint32_t l = first; l < end; ++l) {
             if (!arch.is_linear(l)) continue;
             add(GraphBuilder::linear_state_name(prefix, l),
                 {arch.lin_value_heads, arch.lin_key_dim, arch.lin_value_dim}, state);
