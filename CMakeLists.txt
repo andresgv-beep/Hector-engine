@@ -109,6 +109,7 @@ set(KERNEL_SOURCES
     kernels/fused_add_rmsnorm.cu
     kernels/gemma4_vision.cu
     kernels/moe.cu
+    kernels/delta_net.cu
     kernels/register_kernels.cpp
 )
 
@@ -235,6 +236,10 @@ target_link_libraries(test_gemma4_primitives PRIVATE helios-engine)
 add_executable(test_gemma4_moe tests/test_gemma4_moe.cu)
 target_link_libraries(test_gemma4_moe PRIVATE helios-engine)
 
+# Gated DeltaNet (Qwen3.5) contra un cálculo en CPU, de golpe y por partes
+add_executable(test_delta_net tests/test_delta_net.cu)
+target_link_libraries(test_delta_net PRIVATE helios-engine)
+
 # Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
 # un add_test porque esos datos no viven en el repositorio.
 add_executable(gemma4_moe_generate tools/gemma4_moe_generate.cu)
@@ -329,6 +334,7 @@ add_test(NAME Gemma4UnifiedEmbedderTest COMMAND test_gemma4_unified_embedder)
 add_test(NAME Gemma4PrimitivesTest COMMAND test_gemma4_primitives)
 add_test(NAME Gemma4SplitTest COMMAND test_gemma4_split)
 add_test(NAME Gemma4MoeTest COMMAND test_gemma4_moe ${CMAKE_SOURCE_DIR}/tests/data/gemma4_moe_small.bin)
+add_test(NAME DeltaNetTest COMMAND test_delta_net)
 add_test(NAME Gemma4PleTest COMMAND test_gemma4_ple)
 add_test(NAME Gemma4GraphTest COMMAND test_gemma4_graph)
 add_test(NAME Gemma4KVTest COMMAND test_gemma4_kv)

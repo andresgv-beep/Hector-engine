@@ -726,5 +726,18 @@ void launch_top_k(
     cudaStream_t stream = nullptr
 );
 
+// Gated DeltaNet (Qwen3.5): convolución causal con memoria y regla delta con estado.
+// `x` y `out` son [L, C]; `weight`, [C, K]; `state`, [C, K-1] en FP32 con la muestra más
+// antigua primero, y se actualiza. `out` no puede ser `x`.
+void launch_causal_conv_silu(const half* x, const half* weight, float* state, half* out,
+                             int L, int C, int K, cudaStream_t stream);
+// `mixed` es [L, 2·nk·dk + nv·dv] (consulta, clave y valor ya convolucionados); `z`,
+// [L, nv·dv]; `a` y `b`, [L, nv]. `state` es [nv, dk, dv] en FP32 y se actualiza. Los tokens se
+// recorren en orden, así que L de golpe da lo mismo que de uno en uno.
+void launch_gated_delta_rule(const half* mixed, const half* z, const half* a, const half* b,
+                             const half* a_log, const half* dt_bias, const half* norm_w,
+                             float* state, half* out,
+                             int L, int nk, int nv, int dk, int dv, float eps, cudaStream_t stream);
+
 } // namespace kernels
 } // namespace helios
