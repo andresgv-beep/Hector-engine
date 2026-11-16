@@ -1,4 +1,5 @@
 #include "inference_session.hpp"
+#include "linear_state.hpp"
 
 #include <mutex>
 
@@ -190,6 +191,8 @@ struct InferenceSession::Impl {
     KVCache kv_cache;
     Gemma4KVCache gemma_kv_cache;
     Gemma4KVCache secondary_kv_cache;
+    // Qwen3.5: el estado de las capas lineales, que no llevan caché.
+    LinearState linear;
     std::vector<char> saved_rings;
     std::vector<char> secondary_saved_rings;
     Sampler sampler;
@@ -230,7 +233,10 @@ struct InferenceSession::Impl {
         invalidate_graphs();
         // External tensor views must not outlive this session's allocations.
         if (!kv_prefix.empty()) {
-            for (uint32_t l = 0; l < kv_config.num_layers; ++l) {
+            linear.release(*engine);
+            // Todas las capas del modelo: con capas lineales la caché solo cubre las de
+            // atención y sus nombres no son correlativos.
+            for (uint32_t l = 0; l < arch.num_layers; ++l) {
                 Engine& owner = M.split && l >= M.split_boundary ? *M.secondary_engine : *engine;
                 const auto base = kv_prefix + ".layer" + std::to_string(l);
                 owner.tensors().remove(base + ".k");
@@ -276,12 +282,21 @@ struct InferenceSession::Impl {
             clear(); // The required ring window has already been overwritten.
             return;
         }
+        // Un estado recurrente no se deshace: se vuelve a la copia más cercana por debajo
+        // y la sesión queda AHÍ, no en p. Quien llama mira position() después.
+        if (linear.active() && p < position()) {
+            engine->sync();
+            const std::optional<uint32_t> restored = linear.restore_at_or_before(p);
+            if (!restored) { clear(); return; }
+            p = *restored;
+        }
         if (!is_gemma4) kv_cache.rewind_to(p);
         if (kv_tokens.size() > p) kv_tokens.resize(p);
         published_position.store(position(), std::memory_order_relaxed);
     }
     void clear() {
         if (is_gemma4) gemma_kv_cache.reset(); else kv_cache.reset();
+        if (linear.active()) { engine->sync(); linear.reset(); }
         kv_tokens.clear();
         kv_tracked = true;
         published_position.store(0, std::memory_order_relaxed);
@@ -290,6 +305,12 @@ struct InferenceSession::Impl {
     // el marcador a soft tokens que no son del tokenizador, así que ahí se
     // renuncia en vez de llevar una cuenta que ya no cuadra.
     void untrack() { kv_tracked = false; kv_tokens.clear(); }
+    // Un punto al que se podrá volver. Sin capas lineales no hace nada.
+    void snapshot() {
+        if (!linear.active()) return;
+        engine->sync();
+        linear.save(position());
+    }
     bool prefix_usable() const {
         return kv_tracked && kv_tokens.size() == position();
     }
@@ -320,7 +341,12 @@ struct InferenceSession::Impl {
 
     // El penalty jamás debe caer sobre tokens especiales: penalizar </think>
     // es lo que rompía el cierre del pensamiento en el oráculo.
-    bool penalizable(int32_t id) const { return is_gemma4 || id < 151643; }
+    // Qwen3 pone sus especiales a partir de 151643; Qwen3.5, con otro vocabulario, a
+    // partir de 248044. Con el corte de Qwen3 casi la mitad del vocabulario de Qwen3.5
+    // se quedaría sin penalizar.
+    bool penalizable(int32_t id) const {
+        return is_gemma4 || id < (arch.has_linear() ? 248044 : 151643);
+    }
 };
 
 std::vector<int32_t> InferenceSession::Impl::encode(
@@ -796,7 +822,12 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
             : (M.sesiones == 0 ? "_kv" : "_kv_s" + std::to_string(M.sesiones));
         M.sesiones++;
 
-        s.kv_config.num_layers = M.model_config.num_hidden_layers();
+        // Con capas lineales (Qwen3.5) la caché es solo de las capas de atención.
+        std::vector<uint32_t> cached_layers;
+        for (uint32_t l = 0; l < s.arch.num_layers; ++l) {
+            if (!s.arch.is_linear(l)) cached_layers.push_back(l);
+        }
+        s.kv_config.num_layers = static_cast<uint32_t>(cached_layers.size());
         s.kv_config.num_kv_heads = M.model_config.num_key_value_heads();
         s.kv_config.head_dim = M.model_config.head_dim();
         s.kv_config.max_batch_size = 1;
@@ -841,9 +872,10 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
             // Nombres y forma EXACTOS del oraculo: el grafo los busca por
             // "<prefijo>.layerN.k" y con esta disposicion concreta.
             const auto& c = s.kv_cache.config();
-            for (uint32_t l = 0; l < c.num_layers; l++) {
+            for (uint32_t slot = 0; slot < c.num_layers; slot++) {
+                const uint32_t l = cached_layers[slot];
                 TensorInfo k_info;
-                k_info.ptr = s.kv_cache.k_cache(l);
+                k_info.ptr = s.kv_cache.k_cache(slot);
                 k_info.shape = {c.max_batch_size, c.max_seq_len,
                                 c.num_kv_heads, c.head_dim};
                 k_info.dtype = dtype::FP16();
@@ -851,11 +883,12 @@ bool InferenceSession::attach(std::shared_ptr<Model> model, std::string* error,
                                     c.num_kv_heads * c.head_dim * sizeof(half);
                 k_info.owns_memory = false;
                 TensorInfo v_info = k_info;
-                v_info.ptr = s.kv_cache.v_cache(l);
+                v_info.ptr = s.kv_cache.v_cache(slot);
                 const std::string base = s.kv_prefix + ".layer" + std::to_string(l);
                 s.engine->tensors().register_tensor(base + ".k", k_info);
                 s.engine->tensors().register_tensor(base + ".v", v_info);
             }
+            s.linear.allocate(*s.engine, s.kv_prefix, s.arch);
         }
 
         // Muestreador PROPIO: las penalizaciones son historia de ESTA
@@ -1029,6 +1062,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
         // se reinicia como siempre.
         if (comun > 0 && s.can_rewind(static_cast<uint32_t>(comun))) {
             s.rewind(static_cast<uint32_t>(comun));
+            // Con capas lineales el rebobinado cae en la copia del estado más cercana, que
+            // puede quedar antes de `comun`: solo se da por procesado lo que hay de verdad.
+            if (s.linear.active()) comun = s.position();
             ids.erase(ids.begin(), ids.begin() + static_cast<long>(comun));
             reutilizados = static_cast<uint32_t>(comun);
         } else {
@@ -1037,6 +1073,8 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     }
     stats->prefill_reused = reutilizados;
     const uint32_t base = s.position();
+    // El principio del turno es a donde se vuelve si se cancela o falla.
+    s.snapshot();
     stats->cache_position_before = base;
     stats->cache_position = base;
     if (base + ids.size() + 8 >= s.kv_config.max_seq_len) {
@@ -1156,6 +1194,9 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
                                          stats->prefill_tokens, on_prefill_progress);
             prefill_cancelled = !result.has_value();
             if (result) next = *result;
+            // El final del prompt: a donde vuelve el turno siguiente si la respuesta que
+            // viene ahora no se reenvía igual (pensamiento recortado, otra generación).
+            if (result) s.snapshot();
         }
         auto t1 = clock::now();
         stats->prefill_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
