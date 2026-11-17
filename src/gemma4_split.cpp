@@ -152,30 +152,16 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
             Gemma4Placement out;
             out.fit = Gemma4Fit::Split;
             out.boundary = boundary;
+            // En este modo la caché de expertos solo va si se pide a mano.
+            const int slots = HnfLoader::expert_cache_request();
+            const int experts = int(config.get<int64_t>("moe_experts", 0));
+            if (slots > 0 && slots < experts) out.expert_cache_slots = uint32_t(slots);
             return out;
         }
-        std::vector<uint64_t> layer_bytes(types.size(), 0);
-        uint64_t common_bytes = 0;
         // Con los expertos en memoria gestionada (HELIOS_EXPERTOS_GESTIONADOS=N) solo se
         // cuenta el N % de lo que pesan: el resto vive en RAM y sube cuando hace falta.
         const char* managed = getenv("HELIOS_EXPERTOS_GESTIONADOS");
         const uint64_t resident = managed ? uint64_t(std::min(100, std::max(0, std::atoi(managed)))) : 100;
-        const uint64_t cache_slots = HnfLoader::expert_cache_slots();
-        for (const TensorEntry& tensor : loader.tensors()) {
-            if (tensor.block != "text_model") continue;
-            const int layer = layer_index(tensor.name);
-            if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
-            if (loader.tensor_lives_in_host_ram(tensor)) {
-                // Con caché de expertos la copia completa está en RAM; en VRAM van los huecos.
-                if (cache_slots && layer >= 0 && !tensor.shape.empty() && tensor.shape[0] > 0 &&
-                    tensor.name.find(".moe.experts.") != std::string::npos) {
-                    layer_bytes[size_t(layer)] += tensor.size / tensor.shape[0] * std::min<uint64_t>(cache_slots, tensor.shape[0]);
-                }
-                continue;
-            }
-            const bool expert = resident > 0 && resident < 100 && tensor.name.find(".moe.experts.") != std::string::npos;
-            (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += expert ? tensor.size / 100 * resident : tensor.size;
-        }
         // Caché solo en las capas de atención; las lineales llevan un estado de tamaño fijo.
         const uint64_t cache = 2 * sizeof(uint16_t) * uint64_t(max_seq) * config.num_key_value_heads() * config.head_dim();
         const uint64_t value_heads = uint64_t(config.get<int64_t>("linear_num_value_heads", 0));
@@ -185,22 +171,56 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
         const uint64_t kernel = uint64_t(config.get<int64_t>("linear_conv_kernel", 0));
         const uint64_t state = sizeof(float) * (value_heads * key_dim * value_dim +
             (2 * key_heads * key_dim + value_heads * value_dim) * (kernel ? kernel - 1 : 0));
-        for (size_t i = 0; i < layer_bytes.size(); ++i) layer_bytes[i] += types[i] == 'a' ? cache : state;
+        const uint64_t experts = uint64_t(config.get<int64_t>("moe_experts", 0));
+        const uint64_t top_k = uint64_t(config.get<int64_t>("moe_top_k", 0));
         const uint64_t primary_free = usable_vram(0);
         const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
         check(cudaSetDevice(0), "elegir GPU");
-        Gemma4Placement out = plan_gemma4_placement(layer_bytes, common_bytes, 0, primary_free, secondary_free, true);
-        {
-            uint64_t layers_total = 0;
-            for (uint64_t bytes : layer_bytes) layers_total += bytes;
-            std::cerr << "[modelo] plan: capas " << (layers_total >> 20) << " MiB (" << (layer_bytes.front() >> 20)
-                      << " la primera), comunes " << (common_bytes >> 20) << " MiB; libre tras la reserva "
-                      << (primary_free >> 20) << " + " << (secondary_free >> 20) << " MiB" << std::endl;
+        // El plan con `slots` huecos de caché de expertos por capa; con todos (o sin MoE), sin
+        // caché: los expertos enteros en VRAM.
+        const auto plan = [&](uint64_t slots, bool report) {
+            std::vector<uint64_t> layer_bytes(types.size(), 0);
+            uint64_t common_bytes = 0;
+            for (const TensorEntry& tensor : loader.tensors()) {
+                if (tensor.block != "text_model") continue;
+                const int layer = layer_index(tensor.name);
+                if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
+                const bool expert = layer >= 0 && tensor.name.find(".moe.experts.") != std::string::npos;
+                if (expert && experts && slots < experts) {
+                    // La copia completa va a RAM; en VRAM, los huecos.
+                    layer_bytes[size_t(layer)] += tensor.size / experts * slots;
+                    continue;
+                }
+                if (loader.tensor_lives_in_host_ram(tensor)) continue;
+                const bool part = expert && resident > 0 && resident < 100;
+                (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += part ? tensor.size / 100 * resident : tensor.size;
+            }
+            for (size_t i = 0; i < layer_bytes.size(); ++i) layer_bytes[i] += types[i] == 'a' ? cache : state;
+            Gemma4Placement out = plan_gemma4_placement(layer_bytes, common_bytes, 0, primary_free, secondary_free, true);
+            // La arquitectura se detecta en la principal, que tiene que tener la capa 0 y la
+            // primera de atención. Con menos capas que eso allí, este modelo no se reparte.
+            if (out.fit == Gemma4Fit::Split && out.boundary <= first_attention) out.fit = Gemma4Fit::NoFit;
+            if (out.fit != Gemma4Fit::NoFit && experts && slots < experts) out.expert_cache_slots = uint32_t(slots);
+            if (report) {
+                uint64_t layers_total = 0;
+                for (uint64_t bytes : layer_bytes) layers_total += bytes;
+                std::cerr << "[modelo] plan: capas " << (layers_total >> 20) << " MiB (" << (layer_bytes.front() >> 20)
+                          << " la primera), comunes " << (common_bytes >> 20) << " MiB; libre tras la reserva "
+                          << (primary_free >> 20) << " + " << (secondary_free >> 20) << " MiB" << std::endl;
+            }
+            return out;
+        };
+        // Los huecos: los que diga HELIOS_EXPERTOS_CACHE; si no dice nada, todos los expertos
+        // en VRAM si caben y, si no, los más huecos con los que el modelo entre. Cuáles se
+        // usan depende del texto, así que cuantos más huecos, menos lecturas de RAM.
+        const int requested = HnfLoader::expert_cache_request();
+        if (!experts || requested == 0) return plan(experts, true);
+        if (requested > 0) return plan(std::min<uint64_t>(uint64_t(requested), experts), true);
+        if (plan(experts, false).fit != Gemma4Fit::NoFit) return plan(experts, true);
+        for (uint64_t slots = experts - 8; slots >= std::max<uint64_t>(top_k, experts / 2); slots -= 8) {
+            if (plan(slots, false).fit != Gemma4Fit::NoFit) return plan(slots, true);
         }
-        // La arquitectura se detecta en la principal, que tiene que tener la capa 0 y la
-        // primera de atención. Con menos capas que eso allí, este modelo no se reparte.
-        if (out.fit == Gemma4Fit::Split && out.boundary <= first_attention) out.fit = Gemma4Fit::NoFit;
-        return out;
+        return plan(experts, true);
     }
     const ModelConfig& config = loader.config();
     const Gemma4Config& gemma = loader.gemma4_config();

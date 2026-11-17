@@ -692,17 +692,21 @@ public:
         return (off && *off == '1') || (mmap_env && *mmap_env == '1');
     }
     bool tensor_lives_in_host_ram(const TensorEntry& entry) const {
-        // Con caché de expertos (HELIOS_EXPERTOS_CACHE), la copia completa de los expertos
-        // de un MoE va a RAM y en VRAM solo queda la caché (expert_cache.hpp).
-        if (expert_cache_slots() > 0 && entry.name.find(".moe.experts.") != std::string::npos) return true;
+        // Con caché de expertos, la copia completa de los expertos de un MoE va a RAM y en
+        // VRAM solo queda la caché (expert_cache.hpp). Lo decide la colocación del modelo.
+        if (expert_cache_slots_ > 0 && entry.name.find(".moe.experts.") != std::string::npos) return true;
         return embed_offload_requested() &&
                entry.name.find("token_embedding") != std::string::npos &&
                detail::embedding_is_lookup_only(entry, tensors_);
     }
-    // Huecos por capa pedidos para la caché de expertos; 0 si no se pide.
-    static uint32_t expert_cache_slots() {
+    // Huecos por capa de la caché de expertos con la que se va a cargar; 0 es sin caché.
+    void set_expert_cache_slots(uint32_t slots) { expert_cache_slots_ = slots; }
+    uint32_t expert_cache_slots() const { return expert_cache_slots_; }
+    // HELIOS_EXPERTOS_CACHE fuerza los huecos (0 la prohíbe). Sin ella, -1: la colocación
+    // usa la caché solo si el modelo no cabe entero, con los más huecos que entren.
+    static int expert_cache_request() {
         const char* slots = getenv("HELIOS_EXPERTOS_CACHE");
-        return slots && *slots ? uint32_t(std::max(0, std::atoi(slots))) : 0;
+        return slots && *slots ? std::max(0, std::atoi(slots)) : -1;
     }
     uint64_t file_size() const { return file_size_; }
     // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
@@ -785,6 +789,7 @@ private:
     uint64_t block_vram_[HNF_BLOCK_COUNT] = {};
     uint64_t block_weight_[HNF_BLOCK_COUNT] = {};
     uint64_t file_size_ = 0;
+    uint32_t expert_cache_slots_ = 0;
     std::string chat_template_;
     ModelConfig config_;                                    // Default/text config
     std::unordered_map<BlockID, ModelConfig> block_configs_; // Per-block configs

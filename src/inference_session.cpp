@@ -639,6 +639,10 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             std::cerr << "[modelo] la visión no cabe junto al texto: se abre solo el texto" << std::endl;
         }
         s.split_boundary = s.placement.boundary;
+        // Si el modelo solo cabe con caché de expertos, los dos cargadores dejan la copia
+        // completa de los expertos en RAM.
+        s.loader.set_expert_cache_slots(s.placement.expert_cache_slots);
+        s.secondary_loader.set_expert_cache_slots(s.placement.expert_cache_slots);
         // La segunda GPU hace falta con capas repartidas o con la torre allí sola.
         const bool second_gpu_used = s.split_active() || s.placement.vision == Gemma4VisionPlace::Secondary;
         if (second_gpu_used) s.engine_config.device = 0;
@@ -729,7 +733,7 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
                : s.is_gemma4 ? gemma4_split_arch(s.model_config.num_hidden_layers())
                : s.gb.detect_architecture(*s.engine, "text", s.model_config,
                                           s.model_config.num_hidden_layers());
-        if (const uint32_t slots = HnfLoader::expert_cache_slots(); slots && !s.is_gemma4 && s.arch.has_moe()) {
+        if (const uint32_t slots = s.placement.expert_cache_slots; slots && !s.is_gemma4 && s.arch.has_moe()) {
             s.arch.moe_cache_slots = std::min(slots, s.arch.moe_experts);
             s.expert_cache = std::make_unique<ExpertCache>(*s.engine, s.arch, s.arch.moe_cache_slots);
             if (s.split_active()) {

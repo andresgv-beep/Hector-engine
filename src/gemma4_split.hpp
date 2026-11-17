@@ -47,6 +47,9 @@ struct Gemma4Placement {
     Gemma4VisionPlace vision = Gemma4VisionPlace::None;
     bool vision_dropped = false;    // el HNF trae visión, pero no cabe junto al texto
     uint64_t primary_bytes = 0, secondary_bytes = 0;
+    // Huecos por capa de la caché de expertos con la que cabe (expert_cache.hpp); 0 si
+    // cabe entero o no es un MoE del camino general.
+    uint32_t expert_cache_slots = 0;
 };
 
 // El plan, sin CUDA. `vision_bytes` son los pesos más la memoria de trabajo que declara el
