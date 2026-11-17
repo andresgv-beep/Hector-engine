@@ -155,12 +155,17 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
         }
         std::vector<uint64_t> layer_bytes(types.size(), 0);
         uint64_t common_bytes = 0;
+        // Con los expertos en memoria gestionada (HELIOS_EXPERTOS_GESTIONADOS=N) solo se
+        // cuenta el N % de lo que pesan: el resto vive en RAM y sube cuando hace falta.
+        const char* managed = getenv("HELIOS_EXPERTOS_GESTIONADOS");
+        const uint64_t resident = managed ? uint64_t(std::min(100, std::max(0, std::atoi(managed)))) : 100;
         for (const TensorEntry& tensor : loader.tensors()) {
             if (tensor.block != "text_model") continue;
             if (loader.tensor_lives_in_host_ram(tensor)) continue;
             const int layer = layer_index(tensor.name);
             if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
-            (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += tensor.size;
+            const bool expert = resident > 0 && resident < 100 && tensor.name.find(".moe.experts.") != std::string::npos;
+            (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += expert ? tensor.size / 100 * resident : tensor.size;
         }
         // Caché solo en las capas de atención; las lineales llevan un estado de tamaño fijo.
         const uint64_t cache = 2 * sizeof(uint16_t) * uint64_t(max_seq) * config.num_key_value_heads() * config.head_dim();

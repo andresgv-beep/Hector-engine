@@ -1705,7 +1705,27 @@ bool HnfLoader::load_tensor(std::ifstream& f, const TensorEntry& entry,
                       << entry.size / (1024 * 1024) << " MB fuera de VRAM)" << std::endl;
         }
     }
-    if (!to_host) {
+    // HELIOS_EXPERTOS_GESTIONADOS: los expertos de un MoE en memoria gestionada de CUDA. El
+    // driver sube a la tarjeta las páginas de los expertos que se usan y, cuando falta
+    // VRAM, devuelve a RAM las de los que llevan más tiempo sin usarse. El puntero no
+    // cambia, así que los grafos de decode siguen valiendo. Es para un modelo cuyos
+    // expertos no caben todos: cuáles se usan depende del texto, y una lista fija de
+    // expertos fuera de la VRAM fallaría una de cada diez elecciones al cambiar de tema.
+    const char* managed_env = getenv("HELIOS_EXPERTOS_GESTIONADOS");
+    const bool managed = !to_host && managed_env && std::atoi(managed_env) > 0 &&
+        entry.name.find(".moe.experts.") != std::string::npos;
+    if (managed) {
+        err = cudaMallocManaged(&d_ptr, entry.size, cudaMemAttachGlobal);
+        if (err != cudaSuccess) {
+            std::cerr << "HnfLoader: cudaMallocManaged failed for " << entry.name << ": "
+                      << cudaGetErrorString(err) << std::endl;
+            return false;
+        }
+        // Nacen en RAM y suben a la tarjeta que las toque. No se les fija ubicación
+        // preferida: cudaMemAdvise cambió de firma entre CUDA 12 y 13.
+        std::memcpy(d_ptr, host_data.data(), entry.size);
+        allocation_ptr = d_ptr;
+    } else if (!to_host) {
         err = cudaMalloc(&d_ptr, entry.size);
         if (err != cudaSuccess) {
             size_t free_bytes = 0;
