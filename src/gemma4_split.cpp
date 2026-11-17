@@ -22,11 +22,19 @@ constexpr uint32_t PRIMARY_INPUT_GRAPH = 0, PRIMARY_HEAD_GRAPH = 1, SECONDARY_GR
 // Lo que no son pesos ni KV: scratch, cuBLAS, buffers de prefill y el escritorio.
 constexpr uint64_t VRAM_RESERVE = 1400ull << 20;
 
+// HELIOS_VRAM_RESERVA_MB sustituye la reserva por tarjeta, para medir cuánto hace falta de
+// verdad con un modelo que entra justo.
+uint64_t vram_reserve() {
+    const char* custom = getenv("HELIOS_VRAM_RESERVA_MB");
+    return custom && *custom ? uint64_t(std::strtoull(custom, nullptr, 10)) << 20 : VRAM_RESERVE;
+}
+
 uint64_t usable_vram(int device) {
     check(cudaSetDevice(device), "elegir GPU");
     size_t free_bytes = 0, total = 0;
     check(cudaMemGetInfo(&free_bytes, &total), "leer memoria libre");
-    return free_bytes > VRAM_RESERVE ? free_bytes - VRAM_RESERVE : 0;
+    const uint64_t reserve = vram_reserve();
+    return free_bytes > reserve ? free_bytes - reserve : 0;
 }
 
 int layer_index(const std::string& name) {

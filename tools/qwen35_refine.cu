@@ -3,6 +3,11 @@
 // uso: qwen35_refine entrada.hnf salida.hnf --model checkpoint/ --calibration textos/
 //                    [--tokens 8192] [--damp 1] [--layers N]
 //      qwen35_refine entrada.hnf --tokenize fichero.txt
+//      qwen35_refine entrada.hnf --usage textos/ [--tokens 8192]
+//
+// --usage no refina ni escribe nada: pasa los textos y cuenta a qué expertos manda el
+// enrutador cada token, capa a capa. Dice cuántos expertos hacen falta para cubrir casi
+// todas las elecciones, que es lo que hay que saber antes de dejar expertos fuera de la VRAM.
 //
 // La cuantización del conversor redondea cada peso por su cuenta. GPTQ (src/gptq.hpp) elige
 // los códigos de una matriz entera mirando lo que de verdad le entra: dentro de la rejilla
@@ -50,6 +55,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -296,12 +302,14 @@ int main(int argc, char** argv) try {
         std::cout << std::endl;
         return 0;
     }
-    const fs::path output_path = argv[2];
+    const bool usage_only = std::string(argv[2]) == "--usage";
+    const fs::path output_path = usage_only ? fs::path() : fs::path(argv[2]);
     fs::path model_dir, calibration_dir;
+    if (usage_only) { if (argc < 4) throw std::runtime_error("--usage pide la carpeta de textos"); calibration_dir = argv[3]; }
     double damp = 1.0;
     uint32_t layer_limit = 0;
     size_t token_limit = 8192;
-    for (int i = 3; i + 1 < argc; i += 2) {
+    for (int i = usage_only ? 4 : 3; i + 1 < argc; i += 2) {
         const std::string flag = argv[i];
         if (flag == "--model") model_dir = argv[i + 1];
         else if (flag == "--calibration") calibration_dir = argv[i + 1];
@@ -310,9 +318,9 @@ int main(int argc, char** argv) try {
         else if (flag == "--tokens") token_limit = size_t(std::atoll(argv[i + 1]));
         else throw std::runtime_error("opción desconocida " + flag);
     }
-    if (model_dir.empty() || calibration_dir.empty()) throw std::runtime_error("faltan --model o --calibration");
-    const fs::path work_dir = output_path.string() + ".refine";
-    fs::create_directories(work_dir);
+    if (!usage_only && (model_dir.empty() || calibration_dir.empty())) throw std::runtime_error("faltan --model o --calibration");
+    const fs::path work_dir = usage_only ? fs::temp_directory_path() : fs::path(output_path.string() + ".refine");
+    if (!usage_only) fs::create_directories(work_dir);
     const auto start = std::chrono::steady_clock::now();
 
     hnf10::Contents index;
@@ -320,6 +328,9 @@ int main(int argc, char** argv) try {
         std::ifstream in(input_path, std::ios::binary);
         std::string error;
         if (!hnf10::read(in, index, error)) throw std::runtime_error(error);
+    }
+    if (!usage_only) {
+        std::string error;
         if (!fs::exists(output_path)) throw std::runtime_error("crea antes la salida con: hnf10 begin-edit --from entrada --to salida --touch .m");
         std::ifstream out(output_path, std::ios::binary);
         hnf10::Contents edited;
@@ -359,7 +370,10 @@ int main(int argc, char** argv) try {
     const uint32_t E = arch.moe_experts, K = arch.moe_top_k;
     const bool silu = arch.activation == ActivationType::SILU;
     if (!silu) throw std::runtime_error("la MLP de esta familia es SiLU; el HNF dice otra cosa");
-    const Checkpoint checkpoint(model_dir);
+    if (usage_only) {
+        if (!E) throw std::runtime_error("--usage es para un MoE");
+    }
+    const std::unique_ptr<Checkpoint> checkpoint_owner = usage_only ? nullptr : std::make_unique<Checkpoint>(model_dir);
 
     // Calibración: cada .txt, en documentos de MAX_DOC tokens.
     Calibration calibration;
@@ -408,9 +422,12 @@ int main(int argc, char** argv) try {
             }
     }
 
-    const int fd = ::open(output_path.c_str(), O_RDWR);
-    if (fd < 0) throw std::runtime_error("no abro " + output_path.string());
-    std::ofstream log(work_dir / "refine.log", std::ios::app);
+    const int fd = usage_only ? -1 : ::open(output_path.c_str(), O_RDWR);
+    if (!usage_only && fd < 0) throw std::runtime_error("no abro " + output_path.string());
+    std::ofstream log(usage_only ? fs::path("/dev/null") : work_dir / "refine.log", std::ios::app);
+    // Uso de expertos: elecciones de cada experto por capa.
+    std::vector<std::vector<uint64_t>> usage;
+    if (usage_only) std::cout << "capa  usados  para el 90%  99%  99,9% de las elecciones   el más usado" << std::endl;
     log << "inicio damp " << damp << " documentos " << calibration.documents.size() << " tokens " << T << '\n';
     uint64_t refined_total = 0;
 
@@ -447,6 +464,26 @@ int main(int argc, char** argv) try {
         };
         std::vector<half> next;
         run_layer(true, next);
+        if (usage_only) {
+            std::vector<uint64_t> count(E, 0);
+            for (int32_t e : routes) ++count[size_t(e)];
+            usage.push_back(count);
+            std::vector<uint64_t> sorted = count;
+            std::sort(sorted.rbegin(), sorted.rend());
+            const uint64_t total = uint64_t(T) * K;
+            const auto needed = [&](double share) {
+                uint64_t sum = 0; uint32_t n = 0;
+                while (n < E && double(sum) < share * double(total)) sum += sorted[n++];
+                return n;
+            };
+            uint32_t used = 0;
+            for (uint64_t c : count) used += c > 0;
+            std::printf("%4u  %6u  %11u  %3u  %5u   %.1f %%\n", layer, used, needed(0.90), needed(0.99), needed(0.999),
+                        100.0 * double(sorted[0]) / double(total));
+            std::fflush(stdout);
+            hidden.swap(next);
+            continue;
+        }
 
         const Matrix gate = matrix_named(layer, "mlp.gate"), up = matrix_named(layer, "mlp.up"), down = matrix_named(layer, "mlp.down");
         const Matrix expert_gate_up = matrix_named(layer, "moe.experts.gate_up"), expert_down = matrix_named(layer, "moe.experts.down");
@@ -478,7 +515,7 @@ int main(int argc, char** argv) try {
             const size_t count = size_t(m.rows) * m.cols;
             std::vector<float> a(count), mins(count);
             gptq::hq44_grid(blocks, int(m.rows), int(m.cols), a.data(), mins.data());
-            const std::vector<double> w = checkpoint.read(m.source, uint64_t(expert) * count, count);
+            const std::vector<double> w = checkpoint_owner->read(m.source, uint64_t(expert) * count, count);
             check(cudaMemcpy(d_w, w.data(), count * 8, cudaMemcpyHostToDevice), "subir W");
             check(cudaMemcpy(d_a, a.data(), count * 4, cudaMemcpyHostToDevice), "subir a");
             check(cudaMemcpy(d_m, mins.data(), count * 4, cudaMemcpyHostToDevice), "subir m");
@@ -544,7 +581,7 @@ int main(int argc, char** argv) try {
                     if (m.rows) return refined_values;
                     for (const auto& t : index.tensors)
                         if (t.name == "text.layer" + std::to_string(layer) + ".mlp." + part + ".weight")
-                            return checkpoint.read(t.source, 0, size_t(inner) * H);
+                            return checkpoint_owner->read(t.source, 0, size_t(inner) * H);
                     throw std::runtime_error(std::string("falta mlp.") + part);
                 };
                 const std::vector<double> g = project(values(gate, gate_q, "gate"), T, inner, H);
@@ -607,6 +644,25 @@ int main(int argc, char** argv) try {
         std::cerr << line.str() << std::endl;
         log << line.str() << '\n';
         log.flush();
+    }
+    if (usage_only) {
+        // Cuántas elecciones caerían fuera si en cada capa solo se quedaran los N más usados
+        // de ESTE texto. Es optimista: con otro texto los más usados no serán los mismos.
+        std::cout << "\nquedándose con los N más usados de cada capa, elecciones que caen fuera:" << std::endl;
+        for (uint32_t keep : {128u, 160u, 192u, 208u, 224u, 240u}) {
+            uint64_t missed = 0, total = 0;
+            for (auto count : usage) {
+                std::sort(count.rbegin(), count.rend());
+                for (uint32_t e = 0; e < E; ++e) { total += count[e]; if (e >= keep) missed += count[e]; }
+            }
+            std::printf("  N = %3u (%.0f %% de los expertos): %.3f %%\n", keep, 100.0 * keep / E, 100.0 * double(missed) / double(total));
+        }
+        // Para comparar dos textos: el uso crudo.
+        if (const char* dump = getenv("QWEN35_USO_VOLCADO")) {
+            std::ofstream f(dump, std::ios::binary);
+            for (const auto& count : usage) f.write(reinterpret_cast<const char*>(count.data()), std::streamsize(count.size() * 8));
+        }
+        return 0;
     }
     ::close(fd);
     {
