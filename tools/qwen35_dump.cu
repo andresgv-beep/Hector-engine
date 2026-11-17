@@ -125,6 +125,14 @@ int main(int argc, char** argv) {
         std::cerr << arch.num_layers << " capas (" << attention_layers << " de atención, "
                   << arch.num_layers - attention_layers << " lineales), tipos " << arch.layer_types << std::endl;
 
+        // Con torre de visión, la posición de cada token va en tres ejes y la pone la sesión
+        // en _s.rope3. Aquí no hay sesión: sin esto la atención giraría todo a la posición 0.
+        const auto place = [&](uint32_t position) {
+            if (!arch.rope_axes3) return;
+            const int32_t row[3] = {int32_t(position), int32_t(position), int32_t(position)};
+            need(cudaMemcpy(engine.tensors().get("_s.rope3")->ptr, row, sizeof(row), cudaMemcpyHostToDevice), "posición");
+        };
+
         if (bench) {
             using clock = std::chrono::steady_clock;
             const auto ms = [](clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
@@ -133,6 +141,7 @@ int main(int argc, char** argv) {
                 need(cudaMemcpy(engine.tensors().get("input_tokens")->ptr, &ids[step % ids.size()], sizeof(int32_t),
                                 cudaMemcpyHostToDevice), "token");
                 engine.update_device_cache_pos(position, 1);
+                place(position);
             };
             // Pasada 1: el token entero, una sola sincronización al final. Se separa lo que
             // cuesta montar los comandos de lo que cuesta ejecutarlos.
@@ -191,6 +200,7 @@ int main(int argc, char** argv) {
             const uint32_t position = static_cast<uint32_t>(t);
             need(cudaMemcpy(engine.tensors().get("input_tokens")->ptr, &ids[t], sizeof(int32_t), cudaMemcpyHostToDevice), "token");
             engine.update_device_cache_pos(position, 1);
+            place(position);
             const KVCacheParams cache{prefix, position, max_seq};
 
             CommandBuffer embedding = gb.build_embedding_only(arch, "input_tokens");
