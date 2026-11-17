@@ -170,7 +170,11 @@ class Modelo:
         return capa['out'] @ salida.reshape(-1)
 
     def _rotar(self, x):
-        angulos = self.pos * self.inv_freq
+        # Tres ejes (tiempo, fila, columna), una frecuencia para cada uno por turnos. En texto
+        # los tres valen lo mismo y queda la rotación de siempre; en una imagen, no.
+        t, fila, columna = self.pos3
+        eje = np.arange(len(self.inv_freq)) % 3
+        angulos = np.where(eje == 0, t, np.where(eje == 1, fila, columna)) * self.inv_freq
         cos, sin = np.cos(angulos), np.sin(angulos)
         cos = np.concatenate([cos, cos]).astype(np.float32)
         sin = np.concatenate([sin, sin]).astype(np.float32)
@@ -219,9 +223,26 @@ class Modelo:
 
     # --- un token ----------------------------------------------------------------------
 
-    def paso(self, token, volcar=None):
+    def imagen(self, vectores, filas, columnas, volcar=None):
+        """Mete una imagen ya pasada por la torre visual: un vector por bloque, fila a fila.
+
+        Todos comparten el mismo «tiempo» y cada uno lleva su fila y su columna, contadas
+        desde la posición donde empieza la imagen. Después el texto sigue a partir de esa
+        posición más el lado mayor de la rejilla: la imagen ocupa filas×columnas puestos en
+        la caché, pero solo avanza la posición lo que mide su lado.
+        """
+        inicio, logits = self.pos, None
+        for f in range(filas):
+            for c in range(columnas):
+                logits = self.paso(None, volcar, vector=vectores[f * columnas + c],
+                                   pos3=(inicio, inicio + f, inicio + c))
+        self.pos = inicio + max(filas, columnas)
+        return logits
+
+    def paso(self, token, volcar=None, vector=None, pos3=None):
         """Avanza la sesión un token. Devuelve los logits del siguiente."""
-        h = self.emb[token].astype(np.float32).copy()
+        h = (self.emb[token] if vector is None else vector).astype(np.float32).copy()
+        self.pos3 = pos3 if pos3 is not None else (self.pos, self.pos, self.pos)
         if volcar is not None:
             volcar['emb'].append(h.copy())
         for i, (capa, estado) in enumerate(zip(self.capas, self.estado)):
@@ -234,7 +255,8 @@ class Modelo:
             h = h + self._mlp(capa, x, volcar, i)
             if volcar is not None:
                 volcar['capa%02d' % i].append(h.copy())
-        self.pos += 1
+        if pos3 is None:
+            self.pos += 1
         final = rms_centrada(h, self.norma_final, self.eps)
         logits = self.cabeza @ final
         if volcar is not None:
@@ -250,6 +272,8 @@ def main():
     ap.add_argument('--text')
     ap.add_argument('--generate', type=int, default=0, help='tokens a continuar, eligiendo siempre el más probable')
     ap.add_argument('--dump', help='carpeta donde dejar la salida de cada capa')
+    ap.add_argument('--image', help='imagen que sustituye a los tokens <|image_pad|> de la entrada')
+    ap.add_argument('--max-pixels', type=int, default=1024 * 1024)
     args = ap.parse_args()
 
     # Un modelo sintético no trae vocabulario: se le habla con --ids.
@@ -275,8 +299,21 @@ def main():
     texto = lambda i: por_id.get(i, '<%d>' % i).replace('Ġ', ' ').replace('Ċ', '\\n')
     print('entrada:', ids, repr(''.join(texto(i) for i in ids)))
     logits = None
+    vectores = rejilla = None
+    if args.image:
+        # Un solo <|image_pad|> en la entrada marca dónde va la imagen entera.
+        from PIL import Image
+        from qwen35_vision_ref import Torre
+        marcador = modelo.config['image_token_id']
+        if ids.count(marcador) != 1:
+            raise SystemExit('Con --image la entrada lleva un único token %d (<|image_pad|>)' % marcador)
+        vectores, rejilla = Torre(args.modelo).imagen(Image.open(args.image), args.max_pixels)
+        print('imagen: rejilla %d×%d, %d tokens' % (rejilla[0], rejilla[1], len(vectores)))
     for token in ids:
-        logits = modelo.paso(token, volcar)
+        if vectores is not None and token == modelo.config['image_token_id']:
+            logits = modelo.imagen(vectores, rejilla[0], rejilla[1], volcar)
+        else:
+            logits = modelo.paso(token, volcar)
     generados = []
     for _ in range(args.generate):
         siguiente = int(np.argmax(logits))
@@ -290,6 +327,9 @@ def main():
         salida = Path(args.dump)
         salida.mkdir(parents=True, exist_ok=True)
         np.save(salida / 'ids.npy', np.array(ids + generados, dtype=np.int32))
+        if vectores is not None:
+            np.save(salida / 'imagen.npy', vectores)
+            np.save(salida / 'rejilla.npy', np.array(rejilla, dtype=np.int32))
         for nombre, filas in volcar.items():
             np.save(salida / (nombre + '.npy'), np.stack(filas).astype(np.float32))
         print('volcado en', salida, '(%d tensores, %d tokens)' % (len(volcar), len(ids) + len(generados)))
