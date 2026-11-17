@@ -695,18 +695,32 @@ void launch_moe_add_gated_shared(const half* input, const half* gate, const half
 // Rellena con ceros cada fila de [M, logical] hasta [M, physical].
 void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
                              cudaStream_t stream);
+// Caché de expertos, para un MoE cuyos expertos no caben todos en la VRAM. Los tensores de
+// expertos de siempre pasan a ser la copia completa, en RAM y lenta de leer desde la
+// tarjeta; `gate_up` y `down` son los que hay en VRAM, con los mismos bytes por experto.
+// Un experto elegido que no está en la caché se lee de la RAM: sale bien, solo más despacio.
+struct MoeExpertCache {
+    const int32_t* slot_map = nullptr;   // [E]: en qué hueco está cada experto, o -1
+    const void* gate_up = nullptr;       // [huecos, 2I, H]
+    const void* down = nullptr;          // [huecos, H, P]
+    int32_t* record = nullptr;           // [K], solo decode: el experto de cada puesto, con
+                                         // MOE_CACHE_MISS si hubo que leerlo de la RAM
+};
+constexpr int32_t MOE_CACHE_MISS = 1 << 30;
 // Un solo token sin pasar por la CPU, capturable en un CUDA Graph: lee `indices` y
 // `weights` al ejecutarse, así que pueden cambiar entre repeticiones del grafo.
 // gate_up y down son FP16 o HQ44, cada uno por su lado.
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, int P, cudaStream_t stream, bool silu = false);
+                               int K, int H, int I, int P, cudaStream_t stream, bool silu = false,
+                               const MoeExpertCache* cache = nullptr);
 // gate_up es [E, 2I, H] y down [E, H, P]. Sincroniza: no es capturable en un grafo.
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* output,
-                               int L, int E, int K, int H, int I, int P, cudaStream_t stream, bool silu = false);
+                               int L, int E, int K, int H, int I, int P, cudaStream_t stream, bool silu = false,
+                               const MoeExpertCache* cache = nullptr);
 
 void launch_matmul_fp16_cublas(
     const half* A, const half* B, half* C,

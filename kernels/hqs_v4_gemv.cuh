@@ -203,12 +203,21 @@ __global__ void gemv_hq44_v2_kernel(const half* __restrict__ input, const uint8_
 template<int WARPS_PER_ROW, int ROWS_PER_BLOCK, int U>
 __global__ void gemv_hq44_indexed_kernel(const half* __restrict__ input, const int32_t* __restrict__ indices,
                                          const uint8_t* __restrict__ weights, half* __restrict__ output,
-                                         size_t expert_stride, int input_stride, int K, int N, bool direct) {
+                                         size_t expert_stride, int input_stride, int K, int N, bool direct,
+                                         const int32_t* __restrict__ slot_map, const uint8_t* __restrict__ cache) {
     extern __shared__ half s_input[];
     const int blocks_per_expert = (N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
     const int slot = blockIdx.x / blocks_per_expert;
+    // Con caché de expertos: `weights` es la copia completa, en RAM y lenta de leer, y
+    // `cache` los que hay en VRAM. El mapa dice en qué hueco está cada uno, o -1.
+    const int expert = indices[slot];
+    const uint8_t* matrix = weights + size_t(expert) * expert_stride;
+    if (slot_map) {
+        const int cached = slot_map[expert];
+        if (cached >= 0) matrix = cache + size_t(cached) * expert_stride;
+    }
     gemv_hq44_v2_body<WARPS_PER_ROW, ROWS_PER_BLOCK, U>(
-        s_input, input + size_t(slot) * input_stride, weights + size_t(indices[slot]) * expert_stride,
+        s_input, input + size_t(slot) * input_stride, matrix,
         output + size_t(slot) * N, K, N, (blockIdx.x % blocks_per_expert) * ROWS_PER_BLOCK, direct);
 }
 
@@ -219,14 +228,15 @@ static inline bool direct_input(const half* in, int K) {
 template<int WPR, int RPB, int U>
 static void launch_gemv2_indexed(const half* in, const int32_t* indices, const uint8_t* weights, half* out,
                                  size_t expert_stride, int input_stride, int slots, int K, int N,
-                                 cudaStream_t stream) {
+                                 cudaStream_t stream, const int32_t* slot_map = nullptr,
+                                 const uint8_t* cache = nullptr) {
     const int threads = WPR * RPB * 32;
     const int blocks = slots * ((N + RPB - 1) / RPB);
     // Every slot's input must be aligned, so the stride counts too.
     const bool direct = direct_input(in, K) && (input_stride % 8) == 0;
     const size_t shared = (direct ? 0 : std::min(K, INPUT_CHUNK) * sizeof(half)) + RPB * WPR * sizeof(float);
     gemv_hq44_indexed_kernel<WPR, RPB, U><<<blocks, threads, shared, stream>>>(
-        in, indices, weights, out, expert_stride, input_stride, K, N, direct);
+        in, indices, weights, out, expert_stride, input_stride, K, N, direct, slot_map, cache);
 }
 
 template<int WPR, int RPB, int U>

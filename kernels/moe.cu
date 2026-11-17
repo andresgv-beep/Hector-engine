@@ -209,13 +209,20 @@ __global__ void moe_scatter_add_kernel(
 __global__ void moe_indexed_gemv_fp16_kernel(
     const half* __restrict__ input, const int32_t* __restrict__ indices,
     const half* __restrict__ weights, half* __restrict__ output,
-    size_t expert_stride, int input_stride, int K, int rows, int columns
+    size_t expert_stride, int input_stride, int K, int rows, int columns,
+    const int32_t* __restrict__ slot_map, const half* __restrict__ cache
 ) {
     extern __shared__ float partial[];
     const int position = blockIdx.x;
     const int k = position / rows, row = position % rows;
     const half* x = input + size_t(k) * input_stride;
-    const half* w = weights + size_t(indices[k]) * expert_stride + size_t(row) * columns;
+    const int expert = indices[k];
+    const half* matrix = weights + size_t(expert) * expert_stride;
+    if (slot_map) {
+        const int cached = slot_map[expert];
+        if (cached >= 0) matrix = cache + size_t(cached) * expert_stride;
+    }
+    const half* w = matrix + size_t(row) * columns;
     float sum = 0.0f;
     for (int c = threadIdx.x; c < columns; c += blockDim.x) sum += __half2float(x[c]) * __half2float(w[c]);
     partial[threadIdx.x] = sum;
@@ -278,18 +285,30 @@ void check(cudaError_t error, const char* where) {
 // HQ44 usa 1x8u4 fijo: el sintonizador lanza y sincroniza, y eso no cabe en un
 // grafo. Es el mejor en la 4070 Ti y queda a menos del 2 % en la 2080 Ti.
 void indexed_gemv(const half* input, const int32_t* indices, const void* matrix, bool hq44, half* output,
-                  int input_stride, int K, int rows, int columns, cudaStream_t stream) {
+                  int input_stride, int K, int rows, int columns, cudaStream_t stream,
+                  const int32_t* slot_map = nullptr, const void* cache = nullptr) {
     if (hq44) {
         if (columns % 256) throw std::invalid_argument("MoE decode: HQ44 exige columnas múltiplo de 256");
         hqs_v4::launch_gemv2_indexed<1, 8, 4>(
             input, indices, static_cast<const uint8_t*>(matrix), output,
-            size_t(rows) * (columns / 256) * hqs_v4::BLOCK_BYTES, input_stride, K, columns, rows, stream);
+            size_t(rows) * (columns / 256) * hqs_v4::BLOCK_BYTES, input_stride, K, columns, rows, stream,
+            slot_map, static_cast<const uint8_t*>(cache));
         return;
     }
     const int threads = 128;
     moe_indexed_gemv_fp16_kernel<<<K * rows, threads, threads * sizeof(float), stream>>>(
         input, indices, static_cast<const half*>(matrix), output, size_t(rows) * columns, input_stride,
-        K, rows, columns);
+        K, rows, columns, slot_map, static_cast<const half*>(cache));
+}
+
+// Lo que la caché necesita saber de este token: qué experto se eligió en cada puesto y si
+// hubo que leerlo de la RAM.
+__global__ void moe_cache_record_kernel(const int32_t* __restrict__ indices, const int32_t* __restrict__ slot_map,
+                                        int32_t* __restrict__ record, int K) {
+    const int k = threadIdx.x;
+    if (k >= K) return;
+    const int expert = indices[k];
+    record[k] = slot_map[expert] >= 0 ? expert : (expert | MOE_CACHE_MISS);
 }
 
 }  // namespace
@@ -319,8 +338,21 @@ void launch_moe_route(const float* logits, const half* expert_scale, int32_t* in
 void launch_moe_experts_decode(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* gate_up_scratch, half* hidden_scratch, half* rows_scratch, half* output,
-                               int K, int H, int I, int P, cudaStream_t stream, bool silu) {
+                               int K, int H, int I, int P, cudaStream_t stream, bool silu,
+                               const MoeExpertCache* cache) {
     if (K <= 0 || H <= 0 || I <= 0 || P < I) throw std::invalid_argument("MoE decode: dimensiones inválidas");
+    if (cache) {
+        if (K > 256) throw std::invalid_argument("MoE decode: demasiados expertos por token para la caché");
+        moe_cache_record_kernel<<<1, K, 0, stream>>>(indices, cache->slot_map, cache->record, K);
+        indexed_gemv(input, indices, gate_up, gate_up_hq44, gate_up_scratch, 0, K, 2 * I, H, stream,
+                     cache->slot_map, cache->gate_up);
+        moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * P), MOE_BLOCK, 0, stream>>>(
+            gate_up_scratch, hidden_scratch, K, I, P, silu ? 1 : 0);
+        indexed_gemv(hidden_scratch, indices, down, down_hq44, rows_scratch, P, K, H, P, stream,
+                     cache->slot_map, cache->down);
+        moe_weighted_sum_kernel<<<blocks_for(H), MOE_BLOCK, 0, stream>>>(rows_scratch, weights, output, K, H);
+        return;
+    }
     indexed_gemv(input, indices, gate_up, gate_up_hq44, gate_up_scratch, 0, K, 2 * I, H, stream);
     moe_gate_up_mul_kernel<<<blocks_for(size_t(K) * P), MOE_BLOCK, 0, stream>>>(
         gate_up_scratch, hidden_scratch, K, I, P, silu ? 1 : 0);
@@ -387,7 +419,7 @@ void launch_pad_columns_fp16(const half* input, half* output, int M, int logical
 void run_moe_experts_reference(const half* input, const int32_t* indices, const float* weights,
                                const void* gate_up, bool gate_up_hq44, const void* down, bool down_hq44,
                                half* output, int L, int E, int K, int H, int I, int P, cudaStream_t stream,
-                               bool silu) {
+                               bool silu, const MoeExpertCache* cache) {
     if (L <= 0 || E <= 0 || K <= 0 || H <= 0 || I <= 0 || P < I) {
         throw std::invalid_argument("MoE expertos: dimensiones inválidas");
     }
@@ -399,6 +431,14 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
     check(cudaMemcpy(host_weights.data(), weights, host_weights.size() * sizeof(float),
                      cudaMemcpyDeviceToHost), "leer pesos");
 
+    // Con caché: los que están en VRAM se leen de allí, y los demás de su copia en RAM, una
+    // vez por tanda. La tanda no mueve la caché: casi todos los expertos salen elegidos.
+    std::vector<int32_t> slot_of;
+    if (cache) {
+        slot_of.resize(size_t(E));
+        check(cudaMemcpy(slot_of.data(), cache->slot_map, slot_of.size() * sizeof(int32_t),
+                         cudaMemcpyDeviceToHost), "leer el mapa de la caché");
+    }
     std::vector<std::vector<int32_t>> tokens(E);
     std::vector<std::vector<float>> token_weights(E);
     for (int token = 0; token < L; ++token) {
@@ -432,11 +472,13 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
         const size_t count = size_t(M) * H, inner = size_t(M) * P;
         moe_gather_rows_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
             input, device_tokens.data, gathered.data, M, H);
-        expert_matmul(gathered.data, gate_up, gate_up_hq44, expert, gate_up_stride, dequant.data,
+        const bool cached = cache && slot_of[size_t(expert)] >= 0;
+        const size_t place = cached ? size_t(slot_of[size_t(expert)]) : size_t(expert);
+        expert_matmul(gathered.data, cached ? cache->gate_up : gate_up, gate_up_hq44, place, gate_up_stride, dequant.data,
                       gate_up_out.data, M, H, 2 * I, stream);
         moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I, P,
                                                                             silu ? 1 : 0);
-        expert_matmul(hidden.data, down, down_hq44, expert, down_stride, dequant.data, rows.data,
+        expert_matmul(hidden.data, cached ? cache->down : down, down_hq44, place, down_stride, dequant.data, rows.data,
                       M, P, H, stream);
         moe_scatter_add_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
             rows.data, device_tokens.data, device_weights.data, sums.data, M, H);

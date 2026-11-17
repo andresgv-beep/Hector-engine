@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <iostream>
 #include <limits>
 #include <stdexcept>
 
@@ -159,11 +160,19 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
         // cuenta el N % de lo que pesan: el resto vive en RAM y sube cuando hace falta.
         const char* managed = getenv("HELIOS_EXPERTOS_GESTIONADOS");
         const uint64_t resident = managed ? uint64_t(std::min(100, std::max(0, std::atoi(managed)))) : 100;
+        const uint64_t cache_slots = HnfLoader::expert_cache_slots();
         for (const TensorEntry& tensor : loader.tensors()) {
             if (tensor.block != "text_model") continue;
-            if (loader.tensor_lives_in_host_ram(tensor)) continue;
             const int layer = layer_index(tensor.name);
             if (layer >= int(layer_bytes.size())) return Gemma4Placement{};
+            if (loader.tensor_lives_in_host_ram(tensor)) {
+                // Con caché de expertos la copia completa está en RAM; en VRAM van los huecos.
+                if (cache_slots && layer >= 0 && !tensor.shape.empty() && tensor.shape[0] > 0 &&
+                    tensor.name.find(".moe.experts.") != std::string::npos) {
+                    layer_bytes[size_t(layer)] += tensor.size / tensor.shape[0] * std::min<uint64_t>(cache_slots, tensor.shape[0]);
+                }
+                continue;
+            }
             const bool expert = resident > 0 && resident < 100 && tensor.name.find(".moe.experts.") != std::string::npos;
             (layer < 0 ? common_bytes : layer_bytes[size_t(layer)]) += expert ? tensor.size / 100 * resident : tensor.size;
         }
@@ -181,6 +190,13 @@ Gemma4Placement gemma4_placement(const HnfLoader& loader, uint32_t max_seq, uint
         const uint64_t secondary_free = devices >= 2 ? usable_vram(1) : 0;
         check(cudaSetDevice(0), "elegir GPU");
         Gemma4Placement out = plan_gemma4_placement(layer_bytes, common_bytes, 0, primary_free, secondary_free, true);
+        {
+            uint64_t layers_total = 0;
+            for (uint64_t bytes : layer_bytes) layers_total += bytes;
+            std::cerr << "[modelo] plan: capas " << (layers_total >> 20) << " MiB (" << (layer_bytes.front() >> 20)
+                      << " la primera), comunes " << (common_bytes >> 20) << " MiB; libre tras la reserva "
+                      << (primary_free >> 20) << " + " << (secondary_free >> 20) << " MiB" << std::endl;
+        }
         // La arquitectura se detecta en la principal, que tiene que tener la capa 0 y la
         // primera de atención. Con menos capas que eso allí, este modelo no se reparte.
         if (out.fit == Gemma4Fit::Split && out.boundary <= first_attention) out.fit = Gemma4Fit::NoFit;

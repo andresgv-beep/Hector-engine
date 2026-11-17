@@ -1,5 +1,6 @@
 #include "inference_session.hpp"
 #include "linear_state.hpp"
+#include "expert_cache.hpp"
 
 #include <mutex>
 
@@ -128,6 +129,8 @@ struct Model::Impl {
     HnfLoader secondary_loader;
     GraphBuilder secondary_gb;
     std::unique_ptr<Gemma4SplitForward> split;
+    // Caché de expertos de cada motor (HELIOS_EXPERTOS_CACHE), para un MoE que no cabe.
+    std::unique_ptr<ExpertCache> expert_cache, secondary_expert_cache;
     // Before `multimodal`: the unified adapter reads this loader's hints and
     // must be destroyed first.
     HnfLoader modality_loader;
@@ -508,6 +511,16 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
         engine->execute(decode_cb);
     }
     advance(1);
+    if (M.expert_cache) {
+        // Lo que este token leyó de la RAM sube a la caché antes del siguiente.
+        sync_all();
+        M.expert_cache->after_token();
+        if (M.secondary_expert_cache) {
+            M.secondary_engine->activate();
+            M.secondary_expert_cache->after_token();
+            engine->activate();
+        }
+    }
     if (position() % LinearState::kEvery == 0) snapshot(false);
     if (kv_tracked) kv_tokens.push_back(token);
     auto* logits = gb.get_logits(*engine);
@@ -716,6 +729,17 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
                : s.is_gemma4 ? gemma4_split_arch(s.model_config.num_hidden_layers())
                : s.gb.detect_architecture(*s.engine, "text", s.model_config,
                                           s.model_config.num_hidden_layers());
+        if (const uint32_t slots = HnfLoader::expert_cache_slots(); slots && !s.is_gemma4 && s.arch.has_moe()) {
+            s.arch.moe_cache_slots = std::min(slots, s.arch.moe_experts);
+            s.expert_cache = std::make_unique<ExpertCache>(*s.engine, s.arch, s.arch.moe_cache_slots);
+            if (s.split_active()) {
+                s.secondary_engine->activate();
+                s.secondary_expert_cache = std::make_unique<ExpertCache>(*s.secondary_engine, s.arch, s.arch.moe_cache_slots);
+                s.engine->activate();
+            }
+            std::cerr << "[modelo] caché de expertos: " << s.arch.moe_cache_slots << " de " << s.arch.moe_experts
+                      << " por capa en VRAM, el resto se lee de RAM" << std::endl;
+        }
         if (s.is_gemma4 && s.loader.gemma4_config().has_flag(GEMMA4_EXT_FLAG_MOE)) {
             const auto problems = validate_gemma4_moe_tensors(
                 s.loader.gemma4_config(), s.model_config.hidden_size(), s.loader.tensors());

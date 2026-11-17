@@ -150,6 +150,8 @@ struct ArchDescriptor {
     // MoE por el camino general (Qwen): la MLP densa de la capa es el experto compartido.
     uint32_t moe_experts = 0, moe_top_k = 0, moe_intermediate = 0;
     bool has_moe() const { return moe_experts != 0; }
+    // Huecos por capa de la caché de expertos (expert_cache.hpp); 0 si no se usa.
+    uint32_t moe_cache_slots = 0;
     uint32_t lin_channels() const { return 2 * lin_key_heads * lin_key_dim + lin_value_heads * lin_value_dim; }
 };
 
@@ -432,6 +434,10 @@ public:
 
     // Qwen3.5: cómo se llaman, en el registro de tensores, el estado recurrente y el de la
     // convolución de una capa lineal. Los reserva quien sea dueño de la sesión, como la caché.
+    // Los tensores de la caché de expertos de una capa: gate_up, down, map y record.
+    static std::string expert_cache_name(const ArchDescriptor& arch, uint32_t layer, const char* part) {
+        return arch.prefix + ".layer" + std::to_string(layer) + ".moe.cache." + part;
+    }
     static std::string linear_state_name(const std::string& kv_prefix, uint32_t layer);
     static std::string linear_conv_name(const std::string& kv_prefix, uint32_t layer);
 

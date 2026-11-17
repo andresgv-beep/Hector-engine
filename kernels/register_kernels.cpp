@@ -518,6 +518,20 @@ static bool moe_expert_dtype(const TensorInfo& tensor) {
     return tensor.dtype == dtype::FP16() || tensor.dtype == dtype::HQ44K();
 }
 
+// La caché de expertos, si la orden la trae: a partir de `first`, los expertos de la
+// caché (gate_up y down), el mapa y, en decode, el registro del token.
+static bool moe_cache(const ExecContext& ctx, size_t first, bool with_record, MoeExpertCache& cache) {
+    if (ctx.num_inputs() <= first) return false;
+    TensorInfo* gate_up = ctx.in(first); TensorInfo* down = ctx.in(first + 1); TensorInfo* map = ctx.in(first + 2);
+    TensorInfo* record = with_record ? ctx.in(first + 3) : nullptr;
+    if (!gate_up || !down || !map || (with_record && !record)) throw std::runtime_error("MOE_EXPERTS: caché incompleta");
+    cache.gate_up = gate_up->ptr;
+    cache.down = down->ptr;
+    cache.slot_map = static_cast<const int32_t*>(map->ptr);
+    cache.record = record ? static_cast<int32_t*>(record->ptr) : nullptr;
+    return true;
+}
+
 struct MoeExpertShape {
     uint32_t experts, hidden, inner, physical;
 };
@@ -702,6 +716,7 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("MOE_EXPERTS: experts must be FP16 or HQ44");
         }
         const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        MoeExpertCache cache;
         const uint32_t hidden = shape.hidden;
         const size_t tokens = input->numel() / hidden;
         if (tokens == 0 || indices->numel() % tokens != 0 ||
@@ -714,7 +729,7 @@ void register_memory_kernels(Engine& engine) {
             as_fp16(output), static_cast<int>(tokens), static_cast<int>(shape.experts),
             static_cast<int>(indices->numel() / tokens), static_cast<int>(hidden),
             static_cast<int>(shape.inner), static_cast<int>(shape.physical), ctx.stream,
-            cmd.get<uint32_t>("silu", 0) != 0);
+            cmd.get<uint32_t>("silu", 0) != 0, moe_cache(ctx, 5, false, cache) ? &cache : nullptr);
     });
 
     engine.register_kernel(op::MOE_EXPERTS_DECODE(), [](ExecContext& ctx, const Command& cmd) {
@@ -735,6 +750,7 @@ void register_memory_kernels(Engine& engine) {
             throw std::runtime_error("MOE_EXPERTS_DECODE: experts must be FP16 or HQ44");
         }
         const MoeExpertShape shape = moe_expert_shape(*input, *gate_up, *down, *output);
+        MoeExpertCache cache;
         const size_t top_k = indices->numel();
         if (input->numel() != shape.hidden || top_k == 0 || weights->numel() != top_k) {
             throw std::runtime_error("MOE_EXPERTS_DECODE: expects one token");
@@ -749,7 +765,8 @@ void register_memory_kernels(Engine& engine) {
             gate_up->ptr, gate_up->dtype == dtype::HQ44K(), down->ptr, down->dtype == dtype::HQ44K(),
             as_fp16(gate_up_scratch), as_fp16(hidden_scratch), as_fp16(rows_scratch), as_fp16(output),
             static_cast<int>(top_k), static_cast<int>(shape.hidden), static_cast<int>(shape.inner),
-            static_cast<int>(shape.physical), ctx.stream, cmd.get<uint32_t>("silu", 0) != 0);
+            static_cast<int>(shape.physical), ctx.stream, cmd.get<uint32_t>("silu", 0) != 0,
+            moe_cache(ctx, 8, true, cache) ? &cache : nullptr);
     });
 
     engine.register_kernel(op::PAD_COLUMNS(), [](ExecContext& ctx, const Command&) {

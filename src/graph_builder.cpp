@@ -1897,6 +1897,15 @@ void GraphBuilder::build_mlp_block(
                                W(arch, layer_idx, "moe.experts.gate_up.weight"),
                                W(arch, layer_idx, "moe.experts.down.weight"));
         }
+        if (arch.moe_cache_slots) {
+            // Los tensores de expertos de arriba son la copia completa en RAM; se añade la
+            // caché de VRAM con su mapa y, en decode, el registro de lo elegido.
+            auto& inputs = cb.commands().back().inputs;
+            inputs.push_back(expert_cache_name(arch, layer_idx, "gate_up"));
+            inputs.push_back(expert_cache_name(arch, layer_idx, "down"));
+            inputs.push_back(expert_cache_name(arch, layer_idx, "map"));
+            if (batch_size * seq_len == 1) inputs.push_back(expert_cache_name(arch, layer_idx, "record"));
+        }
         cb.commands().back().set("silu", silu);
         cb.add_op(ops.get_id("moe_add_gated_shared"), S("mlp_out"))
             .in({S("normed"), W(arch, layer_idx, "moe.shared_gate.weight"), S("moe_out")});
