@@ -77,6 +77,7 @@ set(ENGINE_SOURCES
     src/gemma4_vision_validator.cpp
     src/gemma4_vision_preprocess.cpp
     src/gemma4_vision_runner.cpp
+    kernels/qwen35_vision.cu
     src/gemma4_unified_embedder.cpp
     src/gemma4_unified_adapter.cpp
     src/graph_builder.cpp
@@ -244,6 +245,8 @@ target_link_libraries(test_delta_net PRIVATE helios-engine)
 # No es un add_test: necesita un HNF que no vive en el repositorio.
 add_executable(qwen35_dump tools/qwen35_dump.cu)
 target_link_libraries(qwen35_dump PRIVATE helios-engine)
+add_executable(qwen35_vision_dump tools/qwen35_vision_dump.cu)
+target_link_libraries(qwen35_vision_dump PRIVATE helios-engine)
 
 # Cola MoE de una capa real contra el oraculo FP32. Necesita references/ y no es
 # un add_test porque esos datos no viven en el repositorio.

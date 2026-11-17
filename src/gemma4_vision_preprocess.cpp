@@ -180,6 +180,11 @@ bool resize_bicubic_aa_rgb(const Gemma4RgbView& source,
 
 } // namespace
 
+bool resize_rgb_bicubic(const Gemma4RgbView& source, uint32_t target_width, uint32_t target_height,
+                        std::vector<uint8_t>& output) {
+    return resize_bicubic_aa_rgb(source, target_width, target_height, output);
+}
+
 bool gemma4_vision_target_size(
     uint32_t source_width, uint32_t source_height,
     const Gemma4VisionPreprocessConfig& config,

@@ -709,6 +709,7 @@ public:
         return slots && *slots ? std::max(0, std::atoi(slots)) : -1;
     }
     uint64_t file_size() const { return file_size_; }
+    const std::string& file_path() const { return file_path_; }
     // Plantilla de chat guardada en el HNFv10, si la trae (bytes UTF-8 exactos).
     const std::string& chat_template() const { return chat_template_; }
     

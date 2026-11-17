@@ -42,6 +42,10 @@ struct MultimodalTurnInput {
     // attachment placeholder. The adapter owns expansion/substitution.
     std::vector<int32_t> formatted_token_ids;
     std::vector<TurnAttachment> attachments;
+    // Qwen3.5: lo que la sesión suma hoy al puesto en la caché para tener la posición de un
+    // token (0 mientras no haya entrado ninguna imagen). El adaptador lo necesita para
+    // colocar la imagen en sus tres ejes.
+    int32_t position_delta = 0;
 };
 
 struct MultimodalAdapterLimits {
@@ -55,6 +59,9 @@ struct MultimodalPrefillResult {
     uint32_t sequence_tokens = 0;
     uint32_t injected_tokens = 0;
     uint32_t attachment_count = 0;
+    // Qwen3.5: cuánto cambia ese desfase tras este adjunto. Una imagen ocupa filas×columnas
+    // puestos y solo avanza la posición lo que mide su lado mayor.
+    int32_t position_delta_change = 0;
 };
 
 // Common validation is public so process boundaries can reject malformed

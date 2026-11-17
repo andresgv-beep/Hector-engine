@@ -50,6 +50,10 @@ bool gemma4_vision_target_size(
     uint32_t& target_height,
     std::string* error = nullptr);
 
+// El redimensionado bicúbico con antialias de arriba, suelto, para otras torres visuales
+// (Qwen3.5). Salida RGB8 sin relleno, target_width * target_height * 3 bytes.
+bool resize_rgb_bicubic(const Gemma4RgbView& source, uint32_t target_width, uint32_t target_height,
+                        std::vector<uint8_t>& output);
 // CPU preprocessing from an already decoded RGB8 image. PNG/JPEG decoding is
 // deliberately outside this API. Resize is PyTorch/Pillow-compatible Keys
 // bicubic with antialiasing and uint8 rounding before FP32 rescaling.

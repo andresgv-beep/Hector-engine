@@ -991,7 +991,11 @@ __global__ void qk_norm_rope_kernel(
     const half* __restrict__ v_in,      // solo si WRITE_CACHE
     half* __restrict__ k_cache,
     half* __restrict__ v_cache,
-    int max_seq_len
+    int max_seq_len,
+    // Qwen3.5 con imágenes: posición de cada fila en tres ejes (tiempo, fila, columna),
+    // [seq_len, 3]. Cada frecuencia usa un eje por turnos. Sin esto, la posición es el
+    // puesto en la caché, que deja de valer en cuanto hay una imagen en el contexto.
+    const int32_t* __restrict__ positions3
 ) {
     const int total_heads = num_heads + (WRITE_CACHE ? 2 * num_kv_heads : num_kv_heads);
     const int blk = blockIdx.x;
@@ -1065,7 +1069,8 @@ __global__ void qk_norm_rope_kernel(
     for (int i = threadIdx.x; i < head_dim; i += blockDim.x) {
         if (i < half_rot) {
             float freq = 1.0f / powf(theta_base, float(2 * i) / float(rotary_dim));
-            float angle = pos * freq;
+            const float at = positions3 ? float(positions3[s * 3 + (i % 3)]) / scaling_factor : pos;
+            float angle = at * freq;
             float c = cosf(angle);
             float sn = sinf(angle);
             float x0 = s_v[i];
@@ -1083,7 +1088,7 @@ void launch_qk_norm_rope_fp16(
     half* q, half* k, const half* q_norm_w, const half* k_norm_w,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, int position_offset, float eps,
-    float theta, float scaling_factor, cudaStream_t stream
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3
 ) {
     if (rotary_dim <= 0) rotary_dim = head_dim;
     if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
@@ -1094,14 +1099,14 @@ void launch_qk_norm_rope_fp16(
         q, k, q_norm_w, k_norm_w, batch_size, seq_len,
         num_heads, num_kv_heads, head_dim, rotary_dim,
         position_offset, nullptr, eps, theta, scaling_factor,
-        nullptr, nullptr, nullptr, 0);
+        nullptr, nullptr, nullptr, 0, positions3);
 }
 
 void launch_qk_norm_rope_fp16_dp(
     half* q, half* k, const half* q_norm_w, const half* k_norm_w,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, const int32_t* d_position_offset, float eps,
-    float theta, float scaling_factor, cudaStream_t stream
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3
 ) {
     if (rotary_dim <= 0) rotary_dim = head_dim;
     if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
@@ -1112,7 +1117,7 @@ void launch_qk_norm_rope_fp16_dp(
         q, k, q_norm_w, k_norm_w, batch_size, seq_len,
         num_heads, num_kv_heads, head_dim, rotary_dim,
         0, d_position_offset, eps, theta, scaling_factor,
-        nullptr, nullptr, nullptr, 0);
+        nullptr, nullptr, nullptr, 0, positions3);
 }
 
 // Variante fusionada: ademas de normar y rotar, escribe K y V en el cache.
@@ -1124,7 +1129,7 @@ void launch_qk_norm_rope_kv_fp16(
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, int position_offset,
     const int32_t* d_position_offset, int max_seq_len, float eps,
-    float theta, float scaling_factor, cudaStream_t stream
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3
 ) {
     if (rotary_dim <= 0) rotary_dim = head_dim;
     if (scaling_factor <= 0.0f) scaling_factor = 1.0f;
@@ -1136,13 +1141,13 @@ void launch_qk_norm_rope_kv_fp16(
             q, k, q_norm_w, k_norm_w, batch_size, seq_len,
             num_heads, num_kv_heads, head_dim, rotary_dim,
             0, d_position_offset, eps, theta, scaling_factor,
-            v, k_cache, v_cache, max_seq_len);
+            v, k_cache, v_cache, max_seq_len, positions3);
     } else {
         qk_norm_rope_kernel<false, true><<<num_blocks, block_size, smem, stream>>>(
             q, k, q_norm_w, k_norm_w, batch_size, seq_len,
             num_heads, num_kv_heads, head_dim, rotary_dim,
             position_offset, nullptr, eps, theta, scaling_factor,
-            v, k_cache, v_cache, max_seq_len);
+            v, k_cache, v_cache, max_seq_len, positions3);
     }
 }
 

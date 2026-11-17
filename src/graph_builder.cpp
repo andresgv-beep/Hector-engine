@@ -188,6 +188,7 @@ ArchDescriptor GraphBuilder::detect_architecture(
             throw std::runtime_error("faltan las dimensiones de la atención lineal en la configuración");
         }
     }
+    arch.rope_axes3 = config.get<std::string>("vision_family", "") == "qwen3_5";
     arch.moe_experts = (uint32_t)config.get<int64_t>("moe_experts", 0);
     if (arch.has_moe()) {
         arch.moe_top_k = (uint32_t)config.get<int64_t>("moe_top_k", 0);
@@ -417,6 +418,11 @@ void GraphBuilder::allocate_scratch(
         alloc("lin_a",     {B, L, arch.lin_value_heads});
         alloc("lin_b",     {B, L, arch.lin_value_heads});
         alloc("lin_out",   {B, L, VD});
+    }
+    if (arch.rope_axes3) {
+        // Rango 2: no sigue la forma activa del lote; la sesión escribe las filas que tocan.
+        engine.tensors().allocate_and_register(S("rope3"), {L, 3}, dtype::INT32());
+        scratch_names_.push_back(S("rope3"));
     }
     if (arch.has_moe()) {
         const uint32_t E = arch.moe_experts, K = arch.moe_top_k, I = arch.moe_intermediate;
@@ -1639,6 +1645,7 @@ void GraphBuilder::build_attention_block(
         c.set("partial_rotary", arch.partial_rotary_factor);
         c.set("rope_scaling_factor", arch.rope_scaling_factor);
         if (device_pos) c.set("device_pos", (uint32_t)1);
+        if (arch.rope_axes3) c.set("axes3", (uint32_t)1);
     }
     // 2b. QK-norm sin RoPE (poco común): RMSNorm por-head separada
     else if (arch.use_qk_norm) {

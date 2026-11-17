@@ -398,21 +398,23 @@ void launch_qk_norm_rope_fp16(
     half* q, half* k, const half* q_norm_w, const half* k_norm_w,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, int position_offset, float eps,
-    float theta, float scaling_factor, cudaStream_t stream);
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3 = nullptr);
 
+// `positions3`, en las tres: posición de cada fila en tres ejes [seq_len, 3] (Qwen3.5 con
+// imágenes). Sin ella la posición es el puesto en la caché.
 void launch_qk_norm_rope_kv_fp16(
     half* q, half* k, const half* v, const half* q_norm_w, const half* k_norm_w,
     half* k_cache, half* v_cache,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, int position_offset,
     const int32_t* d_position_offset, int max_seq_len, float eps,
-    float theta, float scaling_factor, cudaStream_t stream);
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3 = nullptr);
 
 void launch_qk_norm_rope_fp16_dp(
     half* q, half* k, const half* q_norm_w, const half* k_norm_w,
     int batch_size, int seq_len, int num_heads, int num_kv_heads,
     int head_dim, int rotary_dim, const int32_t* d_position_offset, float eps,
-    float theta, float scaling_factor, cudaStream_t stream);
+    float theta, float scaling_factor, cudaStream_t stream, const int32_t* positions3 = nullptr);
 
 // Device-pointer variant: position_offset leído de device (CUDA Graph replay)
 void launch_rope_inplace_fp16_dp(

@@ -1,6 +1,7 @@
 #include "inference_session.hpp"
 #include "linear_state.hpp"
 #include "expert_cache.hpp"
+#include "qwen35_vision.hpp"
 
 #include <mutex>
 
@@ -163,6 +164,120 @@ struct Model::Impl {
     std::timed_mutex en_uso;
 };
 
+// ============================================================================
+// Visión de la familia Qwen3.5
+// ============================================================================
+// La torre (qwen35_vision.hpp) da un vector por cada bloque de 2×2 parches. Entran en el
+// texto como tokens causales corrientes, así que van por las mismas capas que el texto: lo
+// único distinto es que su entrada es el vector en vez de un embedding, y su posición, que
+// es en tres ejes. El texto de antes y de después del marcador lo procesa la sesión.
+class Qwen35VisionAdapter final : public MultimodalAdapter {
+public:
+    Qwen35VisionAdapter(Model::Impl& model, const Qwen35VisionConfig& config, uint32_t chunk)
+        : M_(model), runner_(model.loader, config), chunk_(chunk) {
+        if (cudaMalloc(&vectors_, size_t(config.max_tokens()) * config.out_hidden * sizeof(half)) != cudaSuccess) {
+            vectors_ = nullptr;
+            throw std::runtime_error("sin memoria para los vectores de la imagen");
+        }
+    }
+    ~Qwen35VisionAdapter() override {
+        M_.engine->activate();
+        if (vectors_) cudaFree(vectors_);
+    }
+
+    const char* id() const override { return "helios.qwen35.vision.v1"; }
+    MultimodalAdapterLimits limits() const override {
+        return {attachment_kind_bit(AttachmentKind::ImageRgb8), 1, 1u << 20, size_t{300} * 1024 * 1024};
+    }
+    int32_t marker_token(AttachmentKind kind) const override {
+        return kind == AttachmentKind::ImageRgb8 ? runner_.config().image_token : -1;
+    }
+    bool prefix_is_text() const override { return true; }
+
+    bool prefill(const MultimodalTurnInput& turn, const KVCacheParams& cache,
+                 MultimodalPrefillResult& result, std::string* error) override {
+        result = {};
+        const auto fail = [&](const std::string& why) { if (error) *error = why; return false; };
+        if (turn.attachments.size() != 1 || turn.attachments.front().kind != AttachmentKind::ImageRgb8) {
+            return fail("la visión de Qwen3.5 admite una imagen RGB8 por turno");
+        }
+        try {
+            const TurnAttachment& image = turn.attachments.front();
+            Engine& engine = *M_.engine;
+            engine.activate();
+            Qwen35ImageGrid grid;
+            std::string why;
+            if (!runner_.run({static_cast<const uint8_t*>(image.data), image.width, image.height, image.row_stride_bytes},
+                             vectors_, grid, engine.config().stream, &why)) {
+                return fail(why);
+            }
+            const uint32_t total = grid.tokens(), width = runner_.config().out_hidden;
+            if (width != M_.model_config.hidden_size()) return fail("la torre visual no da vectores del ancho del texto");
+            if (cache.max_cache_len == 0 || cache.cache_position + total + 8 >= cache.max_cache_len) {
+                return fail("la imagen no cabe en el contexto restante");
+            }
+            // Todos los vectores comparten el «tiempo»; fila y columna cuentan desde donde
+            // empieza la imagen.
+            const int32_t start = int32_t(cache.cache_position) + turn.position_delta;
+            for (uint32_t done = 0; done < total; done += chunk_) {
+                const uint32_t n = std::min(chunk_, total - done), slot = cache.cache_position + done;
+                std::vector<int32_t> rows(size_t(n) * 3);
+                for (uint32_t i = 0; i < n; ++i) {
+                    const uint32_t token = done + i;
+                    rows[3 * i] = start;
+                    rows[3 * i + 1] = start + int32_t(token / grid.columns);
+                    rows[3 * i + 2] = start + int32_t(token % grid.columns);
+                }
+                const KVCacheParams here{cache.kv_prefix, slot, cache.max_cache_len};
+                const auto put = [&](Engine& target) {
+                    cudaMemcpy(target.tensors().at("_s.rope3").ptr, rows.data(), rows.size() * sizeof(int32_t),
+                               cudaMemcpyHostToDevice);
+                };
+                const size_t bytes = size_t(n) * width * sizeof(half);
+                const half* source = vectors_ + size_t(done) * width;
+                if (M_.split) {
+                    M_.secondary_engine->activate();
+                    put(*M_.secondary_engine);
+                    CommandBuffer rest = M_.secondary_gb.build_span_layers(
+                        *M_.secondary_engine, M_.model_config, M_.arch, M_.split_boundary, M_.arch.num_layers, 1, n, here);
+                    engine.activate();
+                    put(engine);
+                    M_.split->update_device_cache_pos(int32_t(slot), int32_t(n));
+                    CommandBuffer first = M_.gb.build_span_layers(engine, M_.model_config, M_.arch, 0, M_.split_boundary, 1, n, here);
+                    const CommandBuffer head = M_.gb.build_head_only(M_.model_config, M_.arch, n);
+                    if (cudaMemcpy(engine.tensors().at("_s.hidden").ptr, source, bytes, cudaMemcpyDeviceToDevice) != cudaSuccess) {
+                        return fail("no pude dejar la imagen en la entrada del texto");
+                    }
+                    M_.split->run({first, rest, head});
+                } else {
+                    put(engine);
+                    engine.update_device_cache_pos(slot, n);
+                    CommandBuffer layers = M_.gb.build_span_layers(engine, M_.model_config, M_.arch, 0, M_.arch.num_layers, 1, n, here);
+                    layers.append(M_.gb.build_head_only(M_.model_config, M_.arch, n));
+                    if (cudaMemcpy(engine.tensors().at("_s.hidden").ptr, source, bytes, cudaMemcpyDeviceToDevice) != cudaSuccess) {
+                        return fail("no pude dejar la imagen en la entrada del texto");
+                    }
+                    engine.execute(layers);
+                }
+                engine.sync();
+            }
+            result.sequence_tokens = total;
+            result.injected_tokens = total;
+            result.attachment_count = 1;
+            result.position_delta_change = int32_t(std::max(grid.rows, grid.columns)) - int32_t(total);
+            return true;
+        } catch (const std::exception& e) {
+            return fail(e.what());
+        }
+    }
+
+private:
+    Model::Impl& M_;
+    Qwen35VisionRunner runner_;
+    uint32_t chunk_;
+    half* vectors_ = nullptr;
+};
+
 Model::Model() : impl_(std::make_unique<Impl>()) {}
 Model::~Model() = default;
 const Model::Info& Model::info() const { return impl_->info; }
@@ -321,6 +436,10 @@ struct InferenceSession::Impl {
             p = *restored;
         }
         if (!is_gemma4) kv_cache.rewind_to(p);
+        while (!rope_steps.empty() && rope_steps.back().first > p) {
+            rope_delta = rope_steps.back().second;
+            rope_steps.pop_back();
+        }
         if (kv_tokens.size() > p) kv_tokens.resize(p);
         published_position.store(position(), std::memory_order_relaxed);
     }
@@ -337,12 +456,42 @@ struct InferenceSession::Impl {
         }
         kv_tokens.clear();
         kv_tracked = true;
+        rope_delta = 0;
+        rope_steps.clear();
         published_position.store(0, std::memory_order_relaxed);
     }
     // El seguimiento solo vale si describe el KV entero. La ruta visual expande
     // el marcador a soft tokens que no son del tokenizador, así que ahí se
     // renuncia en vez de llevar una cuenta que ya no cuadra.
     void untrack() { kv_tracked = false; kv_tokens.clear(); }
+    // Qwen3.5 con visión: lo que hay que sumar al puesto en la caché para tener la posición
+    // de un token de texto. Vale 0 hasta que entra una imagen, que ocupa filas×columnas
+    // puestos y solo avanza la posición lo que mide su lado. `rope_steps` guarda, por cada
+    // cambio, a partir de qué puesto rige y cuánto valía antes, para poder rebobinar.
+    int32_t rope_delta = 0;
+    std::vector<std::pair<uint32_t, int32_t>> rope_steps;
+    // Deja en _s.rope3 la posición (igual en los tres ejes) de `n` tokens de texto que van a
+    // ocupar los puestos desde `first`. En los dos motores, si el modelo está repartido.
+    void write_text_positions(uint32_t first, uint32_t n) {
+        if (!arch.rope_axes3) return;
+        std::vector<int32_t> rows(size_t(n) * 3);
+        for (uint32_t i = 0; i < n; ++i) {
+            rows[3 * i] = rows[3 * i + 1] = rows[3 * i + 2] = int32_t(first + i) + rope_delta;
+        }
+        write_positions(rows);
+    }
+    void write_positions(const std::vector<int32_t>& rows) {
+        const auto put = [&](Engine& target) {
+            cudaMemcpy(target.tensors().at("_s.rope3").ptr, rows.data(), rows.size() * sizeof(int32_t),
+                       cudaMemcpyHostToDevice);
+        };
+        if (M.split) {
+            M.secondary_engine->activate();
+            put(*M.secondary_engine);
+            engine->activate();
+        }
+        put(*engine);
+    }
     // Un punto al que se podrá volver. Sin capas lineales no hace nada.
     void snapshot(bool anchor) {
         if (!linear.active()) return;
@@ -462,6 +611,7 @@ int32_t InferenceSession::Impl::forward_one(int32_t token, cudaStream_t stream) 
     cudaMemcpy(input_info->ptr, &token, sizeof(int32_t), cudaMemcpyHostToDevice);
     uint32_t pos = position();
     if (is_gemma4) gemma_kv_cache.note_write_end(pos + 1);
+    write_text_positions(pos, 1);
     if (M.split) M.split->update_device_cache_pos(pos, 1);
     else engine->update_device_cache_pos(pos, 1);
 
@@ -554,6 +704,7 @@ std::optional<int32_t> InferenceSession::Impl::forward_batch(
                    cudaMemcpyHostToDevice);
         uint32_t pos = position();
         if (is_gemma4) gemma_kv_cache.note_write_end(pos + static_cast<uint32_t>(n));
+        write_text_positions(pos, static_cast<uint32_t>(n));
         // Prefill mutates scratch views, including zero-copy QKV/gate splits.
         // The next decode must rebuild its views before capture or eager use.
         invalidate_graphs();
@@ -828,6 +979,16 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             if (!s.multimodal) {
                 *error = "no pude crear el adaptador visual: " + adapter_error;
                 return nullptr;
+            }
+        }
+        // Qwen3.5: su torre no pasa por los adaptadores de Gemma; se reconoce por las
+        // propiedades que deja el conversor y no ocupa VRAM hasta que llega una imagen.
+        if (!s.multimodal && !s.is_gemma4 && s.loader.has_block(BLOCK_VISION)) {
+            Qwen35VisionConfig vision_config;
+            if (vision_config.read(s.model_config)) {
+                s.multimodal = std::make_unique<Qwen35VisionAdapter>(s, vision_config, scratch_tokens);
+                std::cerr << "[modelo] visión Qwen3.5: hasta " << vision_config.max_tokens()
+                          << " puestos por imagen, pesos fuera de la VRAM" << std::endl;
             }
         }
         if (multimodal_file) {
@@ -1272,6 +1433,7 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             // forward_batch: el próximo decode tiene que reconstruir las suyas.
             s.invalidate_graphs();
             s.decode_cb_built = false;
+            turn.position_delta = s.rope_delta;
             if (!prefill_cancelled &&
                 !s.multimodal->prefill(turn, {s.kv_prefix, s.position(),
                                               s.kv_config.max_seq_len},
@@ -1284,6 +1446,11 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             }
             if (!prefill_cancelled) {
                 s.advance(pr.sequence_tokens);
+                if (pr.position_delta_change) {
+                    // A partir de aquí el texto ya no está en la posición de su puesto.
+                    s.rope_steps.emplace_back(s.position(), s.rope_delta);
+                    s.rope_delta += pr.position_delta_change;
+                }
                 // Los soft tokens de la imagen no son del tokenizador: a partir de
                 // aquí no se puede afirmar qué hay en el KV, así que no se reaprovecha.
                 s.untrack();

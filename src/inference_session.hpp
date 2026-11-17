@@ -39,6 +39,8 @@ namespace helios {
 // Héctor NO sabe para qué se usa cada sesión. Aquí no hay reflexión, ni
 // consolidación, ni chat: hay sesiones genéricas sobre unos pesos. Para qué
 // sirve cada una lo decide quien llama.
+class Qwen35VisionAdapter;
+
 class Model {
 public:
     struct Config {
@@ -80,6 +82,7 @@ public:
 private:
     Model();
     friend class InferenceSession;
+    friend class Qwen35VisionAdapter;   // mete la imagen por las capas del texto
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

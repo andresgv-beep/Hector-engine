@@ -1064,6 +1064,15 @@ void register_attention_kernels(Engine& engine) {
 
             const bool dev_pos = cmd.get<uint32_t>("device_pos", 0) &&
                                  engine.has_device_cache_pos();
+            // Posiciones en tres ejes: las deja la sesión en _s.rope3 antes de cada pasada.
+            const int32_t* positions3 = nullptr;
+            if (cmd.get<uint32_t>("axes3", 0)) {
+                TensorInfo* table = engine.tensors().get("_s.rope3");
+                if (!table || table->numel() < size_t(seq_len) * 3) {
+                    throw std::runtime_error("QK_NORM_ROPE: falta la tabla de posiciones en tres ejes");
+                }
+                positions3 = static_cast<const int32_t*>(table->ptr);
+            }
 
             // Variante fusionada: si el comando trae v/k_cache/v_cache como
             // entradas extra, esta op escribe tambien el cache y el grafo se
@@ -1082,19 +1091,19 @@ void register_attention_kernels(Engine& engine) {
                     1, seq_len, H, KVH, HD, rotary_dim,
                     offset, dev_pos ? engine.device_cache_pos() : nullptr,
                     (int)cmd.get<uint32_t>("max_seq_len", 4096),
-                    eps, theta, scaling_factor, ctx.stream);
+                    eps, theta, scaling_factor, ctx.stream, positions3);
             } else if (dev_pos) {
                 launch_qk_norm_rope_fp16_dp(
                     as_fp16(q), as_fp16(k), as_fp16_const(qw), as_fp16_const(kw),
                     1, seq_len, H, KVH, HD, rotary_dim,
                     engine.device_cache_pos(), eps, theta, scaling_factor,
-                    ctx.stream);
+                    ctx.stream, positions3);
             } else {
                 launch_qk_norm_rope_fp16(
                     as_fp16(q), as_fp16(k), as_fp16_const(qw), as_fp16_const(kw),
                     1, seq_len, H, KVH, HD, rotary_dim,
                     offset, eps, theta, scaling_factor,
-                    ctx.stream);
+                    ctx.stream, positions3);
             }
         });
     }

@@ -150,6 +150,10 @@ struct ArchDescriptor {
     // MoE por el camino general (Qwen): la MLP densa de la capa es el experto compartido.
     uint32_t moe_experts = 0, moe_top_k = 0, moe_intermediate = 0;
     bool has_moe() const { return moe_experts != 0; }
+    // Qwen3.5 con torre visual: la rotación del texto usa posiciones en tres ejes, que la
+    // sesión deja en _s.rope3. Con una imagen en el contexto, posición y puesto en la
+    // caché dejan de coincidir.
+    bool rope_axes3 = false;
     // Huecos por capa de la caché de expertos (expert_cache.hpp); 0 si no se usa.
     uint32_t moe_cache_slots = 0;
     uint32_t lin_channels() const { return 2 * lin_key_heads * lin_key_dim + lin_value_heads * lin_value_dim; }
