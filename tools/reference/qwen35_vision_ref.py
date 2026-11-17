@@ -71,9 +71,9 @@ class Torre:
         config = json.loads((carpeta / 'config.json').read_text())
         self.c = c = config['vision_config']
         pesos = sorted(carpeta.glob('*.safetensors'))
-        if len(pesos) != 1:
-            raise SystemExit('Se espera un único fichero .safetensors en ' + str(carpeta))
-        w, _ = cargar_safetensors(pesos[0])
+        if not pesos:
+            raise SystemExit('No hay ficheros .safetensors en ' + str(carpeta))
+        w, _, _ = cargar_safetensors(pesos)
         self.w = lambda nombre: w('model.visual.' + nombre)
         self.parche, self.fusion, self.tiempo = c['patch_size'], c['spatial_merge_size'], c['temporal_patch_size']
         self.ancho, self.cabezas = c['hidden_size'], c['num_heads']
