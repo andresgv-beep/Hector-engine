@@ -932,10 +932,17 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
             }
         }
 
-        // Mismos valores por defecto que el oraculo: esto no cambia conducta.
-        s.cfg_rep  = env_f("HELIOS_REP", s.is_gemma4 ? 1.0f : 1.15f);
-        s.cfg_freq = env_f("HELIOS_FREQ", s.is_gemma4 ? 0.0f : 0.1f);
+        // Sin penalización de repetición por defecto, en ninguna familia. Hasta el 19/11 lo
+        // que no era Gemma 4 heredaba la del oráculo (1,15 y 0,1 por frecuencia). Con el
+        // Qwen3.6 35B dirigido en greedy por HexOS cortaba el turno a media palabra («Voy a
+        // proponer la versión correg»): la ventana arrastra el código de la llamada anterior,
+        // los tokens corrientes quedan castigados y <|im_end|>, que nunca se penaliza, gana.
+        // Quien la quiera la pide con HELIOS_REP / HELIOS_FREQ.
+        s.cfg_rep  = env_f("HELIOS_REP", 1.0f);
+        s.cfg_freq = env_f("HELIOS_FREQ", 0.0f);
         s.penalty_window = env_i("HELIOS_WINDOW", 384);
+        std::cerr << "[modelo] muestreo: repetición " << s.cfg_rep << ", frecuencia " << s.cfg_freq
+                  << ", ventana " << s.penalty_window << std::endl;
         s.cfg_topk = env_i("HELIOS_TOPK", s.is_gemma4 ? 64 : 50);
         s.cfg_topp = env_f("HELIOS_TOPP", s.is_gemma4 ? 0.95f : 0.9f);
         s.seed = env_i("HELIOS_SEED", 0);
