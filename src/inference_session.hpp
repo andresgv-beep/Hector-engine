@@ -115,6 +115,12 @@ public:
         // pone aquí el que abre una llamada a herramienta: la conversación puede
         // muestrearse con temperatura y los argumentos de la llamada salen exactos.
         std::vector<std::string> greedy_after_tokens;
+        // El prompt termina con el pensamiento ya abierto (la plantilla de Qwen acaba en
+        // «<think>\n»): lo que se genere hasta «</think>» es pensamiento. Se queda en el
+        // texto visible, que es donde el adaptador lo separa, pero gasta de
+        // max_thinking_tokens; agotado, el motor escribe él «</think>» y el modelo pasa
+        // a contestar. Sin esto un razonamiento en bucle corría hasta el tope visible.
+        bool thinking_open = false;
     };
 
     // Adjunto prestado: el motor recibe píxeles RGB8 ya decodificados o audio

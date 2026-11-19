@@ -1371,6 +1371,8 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
     std::string visible, pending;
     uint32_t visible_tokens = 0, thinking = 0, generated = 0;
     bool in_think = false, think_cut = false;
+    // Pensamiento que venía abierto en el prompt: visible, pero con presupuesto.
+    bool inline_think = gen.thinking_open && s.think_close.has_value();
     *reason = FinishReason::Eos;
 
     // Volcar la cola pendiente sin dejar UTF-8 a medias: lo incompleto se
@@ -1522,6 +1524,24 @@ bool InferenceSession::run_turn(const std::vector<ChatMessage>& messages,
             if (!greedy_after.empty() && s.sample_config.temperature >= 0.01f &&
                 std::find(greedy_after.begin(), greedy_after.end(), next) != greedy_after.end()) {
                 s.sample_config = s.build_sampling(0.0f);
+            }
+
+            if (inline_think) {
+                if (next == *s.think_close) {
+                    inline_think = false;
+                } else if (static_cast<int>(++thinking) > gen.max_thinking_tokens) {
+                    // Presupuesto agotado: el token muestreado se descarta y en su lugar
+                    // entra «</think>», en el KV y en el texto. Si el adaptador pidió
+                    // greedy a partir del cierre, vale igual cuando lo cierra el motor.
+                    pending += s.tokenizer->decode({*s.think_close});
+                    if (std::find(greedy_after.begin(), greedy_after.end(), *s.think_close) != greedy_after.end())
+                        s.sample_config = s.build_sampling(0.0f);
+                    next = s.forward_one(*s.think_close, stream);
+                    inline_think = false;
+                    think_cut = true;
+                    generated++;
+                    continue;
+                }
             }
 
             if (s.think_open && next == *s.think_open) in_think = true;

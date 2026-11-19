@@ -501,6 +501,8 @@ int main(int argc, char** argv) {
                 gen.reuse_prefix = v->boo(false);
             if (const auto* v = g->get("close_turn"))
                 gen.close_turn = v->boo(true);
+            if (const auto* v = g->get("thinking_open"))
+                gen.thinking_open = v->boo(false);
             if (const auto* arr = g->get("stop_tokens"); arr && arr->is_array())
                 for (const auto& v : *arr->array) gen.stop_tokens.push_back(v.str());
             if (const auto* arr = g->get("greedy_after_tokens"); arr && arr->is_array())
