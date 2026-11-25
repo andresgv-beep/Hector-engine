@@ -121,6 +121,13 @@ public:
     
     // Remove tensor (frees memory if owns_memory)
     void remove(const std::string& name);
+
+    // Cambia dónde vive un tensor ya registrado, sin tocar nombre ni forma: suelta la
+    // memoria que tuviera (si era suya) y adopta `allocation`, de `allocation_size` bytes
+    // y reservada con cudaHostAlloc si `host_mapped`, con cudaMalloc si no. El TensorInfo
+    // sigue siendo el mismo objeto: quien guardara su dirección sigue viendo el tensor.
+    void replace_storage(const std::string& name, void* device_ptr, void* allocation,
+                         size_t allocation_size, bool host_mapped);
     
     // Clear all tensors
     void clear();

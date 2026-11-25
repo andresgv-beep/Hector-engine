@@ -891,14 +891,20 @@ std::shared_ptr<Model> Model::load(const Config& config, std::string* error) {
                                           s.model_config.num_hidden_layers());
         if (const uint32_t slots = s.placement.expert_cache_slots; slots && !s.is_gemma4 && s.arch.has_moe()) {
             s.arch.moe_cache_slots = std::min(slots, s.arch.moe_experts);
-            s.expert_cache = std::make_unique<ExpertCache>(*s.engine, s.arch, s.arch.moe_cache_slots);
+            s.expert_cache = std::make_unique<ExpertCache>(*s.engine, s.arch, s.arch.moe_cache_slots, &s.loader);
             if (s.split_active()) {
                 s.secondary_engine->activate();
-                s.secondary_expert_cache = std::make_unique<ExpertCache>(*s.secondary_engine, s.arch, s.arch.moe_cache_slots);
+                s.secondary_expert_cache = std::make_unique<ExpertCache>(*s.secondary_engine, s.arch, s.arch.moe_cache_slots,
+                                                                         &s.secondary_loader);
                 s.engine->activate();
             }
+            const size_t reserva = s.expert_cache->reserve_bytes() +
+                (s.secondary_expert_cache ? s.secondary_expert_cache->reserve_bytes() : 0);
             std::cerr << "[modelo] caché de expertos: " << s.arch.moe_cache_slots << " de " << s.arch.moe_experts
-                      << " por capa en VRAM, el resto se lee de RAM" << std::endl;
+                      << " por capa en VRAM, el resto se lee de RAM";
+            if (reserva) std::cerr << " (reserva anclada de " << reserva / (1024 * 1024) << " MB, uno de los huecos libre)";
+            else std::cerr << " (copia completa)";
+            std::cerr << std::endl;
         }
         if (s.is_gemma4 && s.loader.gemma4_config().has_flag(GEMMA4_EXT_FLAG_MOE)) {
             const auto problems = validate_gemma4_moe_tensors(

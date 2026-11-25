@@ -220,7 +220,8 @@ __global__ void moe_indexed_gemv_fp16_kernel(
     const half* matrix = weights + size_t(expert) * expert_stride;
     if (slot_map) {
         const int cached = slot_map[expert];
-        if (cached >= 0) matrix = cache + size_t(cached) * expert_stride;
+        matrix = cached >= 0 ? cache + size_t(cached) * expert_stride
+                             : weights + size_t(-1 - cached) * expert_stride;
     }
     const half* w = matrix + size_t(row) * columns;
     float sum = 0.0f;
@@ -472,8 +473,10 @@ void run_moe_experts_reference(const half* input, const int32_t* indices, const 
         const size_t count = size_t(M) * H, inner = size_t(M) * P;
         moe_gather_rows_kernel<<<blocks_for(count), MOE_BLOCK, 0, stream>>>(
             input, device_tokens.data, gathered.data, M, H);
+        // Con caché, el mapa trae el hueco de VRAM o, en negativo, el sitio en la copia de RAM.
         const bool cached = cache && slot_of[size_t(expert)] >= 0;
-        const size_t place = cached ? size_t(slot_of[size_t(expert)]) : size_t(expert);
+        const size_t place = !cache ? size_t(expert)
+                           : cached ? size_t(slot_of[size_t(expert)]) : size_t(-1 - slot_of[size_t(expert)]);
         expert_matmul(gathered.data, cached ? cache->gate_up : gate_up, gate_up_hq44, place, gate_up_stride, dequant.data,
                       gate_up_out.data, M, H, 2 * I, stream);
         moe_gate_up_mul_kernel<<<blocks_for(inner), MOE_BLOCK, 0, stream>>>(gate_up_out.data, hidden.data, M, I, P,

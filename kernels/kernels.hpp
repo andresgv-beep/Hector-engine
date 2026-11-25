@@ -698,11 +698,13 @@ void launch_moe_add_gated_shared(const half* input, const half* gate, const half
 void launch_pad_columns_fp16(const half* input, half* output, int M, int logical, int physical,
                              cudaStream_t stream);
 // Caché de expertos, para un MoE cuyos expertos no caben todos en la VRAM. Los tensores de
-// expertos de siempre pasan a ser la copia completa, en RAM y lenta de leer desde la
-// tarjeta; `gate_up` y `down` son los que hay en VRAM, con los mismos bytes por experto.
+// expertos de siempre pasan a ser la copia en RAM, lenta de leer desde la tarjeta (la
+// completa, o solo la reserva con los que no están en VRAM); `gate_up` y `down` son los
+// que hay en VRAM, con los mismos bytes por experto.
 // Un experto elegido que no está en la caché se lee de la RAM: sale bien, solo más despacio.
 struct MoeExpertCache {
-    const int32_t* slot_map = nullptr;   // [E]: en qué hueco está cada experto, o -1
+    const int32_t* slot_map = nullptr;   // [E]: hueco de VRAM de cada experto (>= 0) o, si
+                                         // no está, su sitio en la copia de RAM (-1 - sitio)
     const void* gate_up = nullptr;       // [huecos, 2I, H]
     const void* down = nullptr;          // [huecos, H, P]
     int32_t* record = nullptr;           // [K], solo decode: el experto de cada puesto, con

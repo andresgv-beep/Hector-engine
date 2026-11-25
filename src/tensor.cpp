@@ -199,6 +199,25 @@ void TensorRegistry::remove(const std::string& name) {
     tensors_.erase(it);
 }
 
+void TensorRegistry::replace_storage(const std::string& name, void* device_ptr, void* allocation,
+                                     size_t allocation_size, bool host_mapped) {
+    TensorInfo& info = at(name);
+    total_bytes_ -= info.size_bytes;
+    if (info.owns_memory) {
+        owned_bytes_ -= info.allocation_size ? info.allocation_size : info.size_bytes;
+        release_tensor_memory(info);
+    }
+    info.ptr = device_ptr;
+    info.allocation_ptr = allocation;
+    info.allocation_size = allocation_size;
+    info.size_bytes = allocation_size;
+    info.owns_memory = true;
+    info.host_mapped = host_mapped;
+    info.file_mapped = false;
+    total_bytes_ += allocation_size;
+    owned_bytes_ += allocation_size;
+}
+
 void TensorRegistry::clear() {
     // Free all owned memory
     for (auto& [name, info] : tensors_) {

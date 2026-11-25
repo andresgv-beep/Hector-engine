@@ -208,13 +208,15 @@ __global__ void gemv_hq44_indexed_kernel(const half* __restrict__ input, const i
     extern __shared__ half s_input[];
     const int blocks_per_expert = (N + ROWS_PER_BLOCK - 1) / ROWS_PER_BLOCK;
     const int slot = blockIdx.x / blocks_per_expert;
-    // Con caché de expertos: `weights` es la copia completa, en RAM y lenta de leer, y
-    // `cache` los que hay en VRAM. El mapa dice en qué hueco está cada uno, o -1.
+    // Con caché de expertos: `weights` es la copia en RAM, lenta de leer, y `cache` los que
+    // hay en VRAM. El mapa dice en qué hueco de VRAM está cada uno (>= 0) o, si no está,
+    // en qué sitio de la copia en RAM (-1 - sitio).
     const int expert = indices[slot];
     const uint8_t* matrix = weights + size_t(expert) * expert_stride;
     if (slot_map) {
         const int cached = slot_map[expert];
-        if (cached >= 0) matrix = cache + size_t(cached) * expert_stride;
+        matrix = cached >= 0 ? cache + size_t(cached) * expert_stride
+                             : weights + size_t(-1 - cached) * expert_stride;
     }
     gemv_hq44_v2_body<WARPS_PER_ROW, ROWS_PER_BLOCK, U>(
         s_input, input + size_t(slot) * input_stride, matrix,
