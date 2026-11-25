@@ -750,6 +750,11 @@ const InferenceSession::ModelInfo& InferenceSession::info() const {
 uint32_t InferenceSession::cache_position() const {
     return impl_->published_position.load(std::memory_order_relaxed);
 }
+uint64_t InferenceSession::expert_ram_reads() const {
+    const auto& M = impl_->M;
+    return (M.expert_cache ? M.expert_cache->misses() : 0) +
+           (M.secondary_expert_cache ? M.secondary_expert_cache->misses() : 0);
+}
 
 void InferenceSession::reset() {
     std::lock_guard<std::timed_mutex> lock(impl_->M.en_uso);

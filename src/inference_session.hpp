@@ -214,6 +214,9 @@ public:
     const std::string& kv_namespace() const;
 
     uint32_t cache_position() const;
+    // Expertos que el decode ha tenido que leer de la RAM por no estar en la caché de
+    // VRAM, acumulado de todas las sesiones del modelo. 0 si el modelo no lleva caché.
+    uint64_t expert_ram_reads() const;
     void reset();
 
     // Añade `messages` al KV y genera. Devuelve false y llena `error_code` /

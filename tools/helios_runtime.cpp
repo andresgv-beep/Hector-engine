@@ -14,8 +14,10 @@
 // cancelación no podría llegar nunca.
 
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <ctime>
 #include <deque>
 #include <map>
 #include <memory>
@@ -95,10 +97,51 @@ void emit_error(const std::string& rid, const std::string& code,
 }
 
 // --------------------------------------------------------------------------
+// Registro: una línea por turno en stderr, con el tiempo desglosado.
+//
+// El cliente recibe prefill_ms y decode_ms en `completed`, pero quien lo usa suele
+// guardar solo la suma, y los turnos de las sesiones auxiliares no los guarda nadie.
+// Sin esta línea, un turno lento no se puede explicar después: no se sabe si esperó
+// detrás de otro, si releyó contexto o si generó despacio.
+//   espera   en la cola del runtime, detrás de la petición anterior
+//   cola     dentro de run_turn, hasta tener los buffers de trabajo
+//   anillos  guardar y devolver el KV de la sesión principal (sesiones que lo toman prestado)
+//   total    desde que se sacó de la cola hasta terminar
+//   expertos_de_RAM  expertos que el decode leyó de la RAM por no estar en VRAM
+// --------------------------------------------------------------------------
+
+double ms_desde(std::chrono::steady_clock::time_point t) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t).count();
+}
+
+void apuntar_peticion(const std::string& sesion, const std::string& id, const char* fin,
+                      double espera_ms, double anillos_ms, double total_ms,
+                      const InferenceSession::TurnStats& st, uint64_t expertos_de_ram) {
+    char hora[16] = "";
+    const std::time_t ahora = std::time(nullptr);
+    std::tm local {};
+    if (localtime_r(&ahora, &local)) std::strftime(hora, sizeof hora, "%H:%M:%S", &local);
+    std::fprintf(stderr,
+                 "[petición] %s sesión=%s id=%.16s fin=%s espera=%.0f ms cola=%.0f ms anillos=%.0f ms "
+                 "lectura=%u tok (%u reusados) %.0f ms generación=%u tok (%u pensando) %.0f ms %.1f tok/s "
+                 "primer_token=%.0f ms total=%.0f ms expertos_de_RAM=%llu kv=%u->%u\n",
+                 hora, sesion.c_str(), id.c_str(), fin, espera_ms, st.queue_ms, anillos_ms,
+                 st.prefill_tokens, st.prefill_reused, st.prefill_ms,
+                 st.generated_tokens, st.thinking_tokens, st.decode_ms,
+                 st.decode_ms > 0 ? st.generated_tokens * 1000.0 / st.decode_ms : 0.0,
+                 st.first_token_ms, total_ms, static_cast<unsigned long long>(expertos_de_ram),
+                 st.cache_position_before, st.cache_position);
+}
+
+// --------------------------------------------------------------------------
 // Cola de peticiones: el hilo lector nunca bloquea al de generación.
 // --------------------------------------------------------------------------
 
-struct Peticion { std::string tipo, id; mj::Value doc; };
+struct Peticion {
+    std::string tipo, id;
+    mj::Value doc;
+    std::chrono::steady_clock::time_point llegada;   // cuándo entró en la cola
+};
 
 std::mutex g_cola_mtx;
 std::deque<Peticion> g_cola;
@@ -267,6 +310,7 @@ void hilo_lector() {
             }
         }
 
+        p.llegada = std::chrono::steady_clock::now();
         { std::lock_guard<std::mutex> l(g_cola_mtx); g_cola.push_back(p); }
         if (p.tipo == "shutdown") break;
     }
@@ -370,6 +414,7 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
             continue;
         }
+        const auto sacada = std::chrono::steady_clock::now();
 
         // A qué sesión va esto. Sin campo, la de siempre: el protocolo viejo
         // sigue valiendo palabra por palabra.
@@ -550,18 +595,28 @@ int main(int argc, char** argv) {
         InferenceSession* dueno = session.borrows_rings()
                                       ? sesiones.at(kSesionPorDefecto).get() : nullptr;
         bool ok = false;
+        const uint64_t expertos_antes = session.expert_ram_reads();
+        double anillos_ms = 0.0;
+        const auto t_anillos = std::chrono::steady_clock::now();
         if (dueno && !dueno->save_rings()) {
             code = "engine_failure";
             msg = "no pude guardar el KV de la sesión principal";
         } else {
             if (dueno) session.reset();
+            anillos_ms += ms_desde(t_anillos);
             ok = session.run_turn(messages, adjuntos, gen, on_text,
                                   on_think, on_prefill, g_cancelar,
                                   &st, &reason, &code, &msg, on_progress);
             // Sin los anillos el KV principal no sirve: se vacía y el adaptador
             // reenvía la conversación en su turno siguiente.
+            const auto t_devolver = std::chrono::steady_clock::now();
             if (dueno && !dueno->restore_rings()) dueno->reset();
+            anillos_ms += ms_desde(t_devolver);
         }
+        apuntar_peticion(sid, p.id, ok ? InferenceSession::finish_reason_name(reason) : "error",
+                         std::chrono::duration<double, std::milli>(sacada - p.llegada).count(),
+                         anillos_ms, ms_desde(sacada), st,
+                         session.expert_ram_reads() - expertos_antes);
         if (ok && !(reason == InferenceSession::FinishReason::Cancelled &&
                     st.generated_tokens == 0)) {
             // Fallo/cancelación sin generación permiten reintentar el adjunto
